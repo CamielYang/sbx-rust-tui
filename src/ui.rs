@@ -276,16 +276,29 @@ fn wizard_lines(wizard: &Wizard) -> Vec<Line<'static>> {
 
         let mut value = wizard.value_for(*step);
         if value.is_empty() {
-            value = "<empty>".to_owned();
+            value = if *step == WizardStep::Name {
+                "<required>".to_owned()
+            } else {
+                "<empty>".to_owned()
+            };
         }
         if index == current_index && step.is_text() {
             value.push('▌');
         }
 
-        lines.push(Line::from(vec![
-            Span::styled(format!("{marker} {}: ", step.label()), style),
-            Span::styled(value, style),
-        ]));
+        let mut spans = vec![
+            Span::styled(format!("{marker} "), style),
+            Span::styled(step.label(), style),
+        ];
+        if *step == WizardStep::Name {
+            spans.push(Span::styled(
+                "*",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ));
+        }
+        spans.push(Span::styled(": ", style));
+        spans.push(Span::styled(value, style));
+        lines.push(Line::from(spans));
     }
 
     lines.push(Line::raw(""));
@@ -438,7 +451,8 @@ mod tests {
 
         let screen = snapshot(90, 24, &mut app).join("\n");
         assert!(screen.contains("New Sandbox"));
-        assert!(screen.contains("Name"));
+        assert!(screen.contains("Name*"));
+        assert!(screen.contains("<required>"));
     }
 
     #[test]

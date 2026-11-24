@@ -81,8 +81,9 @@ reviewed before a sandbox can be created.
 Open the modal by selecting **+ New Sandbox** and pressing `Enter`. It walks
 through these settings one at a time:
 
-1. **Name** — 2–63 ASCII letters, numbers, `-` or `.`; each dot-separated part
-   must start and end with an alphanumeric character; `default` is reserved.
+1. **Name** — required, 2–63 ASCII letters, numbers, `-` or `.`; each
+   dot-separated part must start and end with an alphanumeric character;
+   `default` is reserved.
 2. **Agent** — all options are shown in a two-column list with the current one
    marked: `claude`, `codex`, `copilot`, `cursor`, `devin`, `docker-agent`,
    `droid`, `kiro`, `opencode` (default), `shell`. Move with `↑`/`↓` or `j`/`k`.

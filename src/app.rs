@@ -134,7 +134,7 @@ impl WizardStep {
 
     pub fn prompt(self) -> &'static str {
         match self {
-            Self::Name => "Sandbox name (2-63 ASCII letters, numbers, '-' or '.')",
+            Self::Name => "Sandbox name (required, 2-63 ASCII letters, numbers, '-' or '.')",
             Self::Agent => "Pick an agent",
             Self::RootSize => "Root filesystem size in GB (number only), e.g. 40 (empty skips)",
             Self::DockerSize => "Docker data size in GB (number only), e.g. 20 (empty skips)",
