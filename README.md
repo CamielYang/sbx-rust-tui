@@ -72,9 +72,9 @@ panic). Click a sandbox block to select it, click **+ New Sandbox** to open the
 wizard, and use the scroll wheel to move between grid rows.
 
 The wizard modal has an **[X]** close button in its top-right corner and a
-**[ Create Sandbox ]** button at the bottom. The Create button works from any
-step: every field is validated first, and the first invalid field becomes the
-active step with the reason shown in the footer.
+**[ Create Sandbox ]** button at the bottom. The Create button is disabled
+(dimmed, not clickable) until the final **Review** step, so all fields have been
+reviewed before a sandbox can be created.
 
 ## New sandbox wizard modal
 
@@ -83,16 +83,19 @@ through these settings one at a time:
 
 1. **Name** — 2–63 ASCII letters, numbers, `-` or `.`; each dot-separated part
    must start and end with an alphanumeric character; `default` is reserved.
-2. **Agent** — `claude`, `codex`, `copilot`, `cursor`, `devin`, `docker-agent`,
-   `droid`, `kiro`, `opencode` (default), `shell`.
-3. **Root size** — optional, e.g. `40g` → `DOCKER_SANDBOXES_ROOT_SIZE=40g`.
-4. **Docker data size** — optional, e.g. `20g` → `DOCKER_SANDBOXES_DOCKER_SIZE=20g`.
+2. **Agent** — all options are shown in a two-column list with the current one
+   marked: `claude`, `codex`, `copilot`, `cursor`, `devin`, `docker-agent`,
+   `droid`, `kiro`, `opencode` (default), `shell`. Move with `↑`/`↓` or `j`/`k`.
+3. **Root size** — optional, in GB: type just a number, e.g. `40` →
+   `DOCKER_SANDBOXES_ROOT_SIZE=40g`.
+4. **Docker data size** — optional, in GB: type just a number, e.g. `20` →
+   `DOCKER_SANDBOXES_DOCKER_SIZE=20g`.
 5. **CPUs** — positive integer; `0` means auto (default: `2`).
 6. **Memory** — binary units such as `512m` or `8g`; minimum 512 MiB, maximum
    host memory. Defaults to half of host memory (clamped to 512 MiB–32 GiB)
    and warns above 75% of host memory.
-7. **Review** — shows the exact command, then `y`/`Enter` or the bottom
-   **Create Sandbox** button creates the sandbox.
+7. **Review** — enable the **Create Sandbox** button; `y`/`Enter` or a click
+   creates the sandbox. No command is printed on this step.
 
 Example generated command:
 

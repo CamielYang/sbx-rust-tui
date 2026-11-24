@@ -55,6 +55,7 @@ pub struct PendingCommand {
 }
 
 impl PendingCommand {
+    #[cfg(test)]
     pub fn preview(&self) -> String {
         let mut parts = self
             .env
@@ -80,6 +81,7 @@ impl PendingCommand {
     }
 }
 
+#[cfg(test)]
 fn quote_if_needed(part: &str) -> String {
     if part.contains(char::is_whitespace) {
         format!("'{part}'")
@@ -96,7 +98,7 @@ pub enum Mode {
 
 // --- wizard -----------------------------------------------------------------
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WizardStep {
     Name,
     Agent,
@@ -134,11 +136,11 @@ impl WizardStep {
         match self {
             Self::Name => "Sandbox name (2-63 ASCII letters, numbers, '-' or '.')",
             Self::Agent => "Pick an agent",
-            Self::RootSize => "Root filesystem size, e.g. 40g (leave empty to skip)",
-            Self::DockerSize => "Docker data size, e.g. 20g (leave empty to skip)",
+            Self::RootSize => "Root filesystem size in GB (number only), e.g. 40 (empty skips)",
+            Self::DockerSize => "Docker data size in GB (number only), e.g. 20 (empty skips)",
             Self::Cpus => "Number of CPUs (positive integer, 0 = auto)",
             Self::Memory => "Memory limit in binary units, e.g. 512m or 8g",
-            Self::Confirm => "Review the command before creating the sandbox",
+            Self::Confirm => "Review your settings, then create the sandbox",
         }
     }
 
@@ -196,8 +198,17 @@ impl Wizard {
         self.step
     }
 
+    /// True once every field has been reviewed and the sandbox can be created.
+    pub fn is_ready(&self) -> bool {
+        self.step == WizardStep::Confirm
+    }
+
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn agent_index(&self) -> usize {
+        self.agent_index
     }
 
     pub fn field_error(&self) -> Option<String> {
@@ -211,8 +222,8 @@ impl Wizard {
     fn error_for(&self, step: WizardStep) -> Option<String> {
         match step {
             WizardStep::Name => validate_name(&self.name).err(),
-            WizardStep::RootSize => validate_size(&self.root_size).err(),
-            WizardStep::DockerSize => validate_size(&self.docker_size).err(),
+            WizardStep::RootSize => validate_gb_size(&self.root_size).err(),
+            WizardStep::DockerSize => validate_gb_size(&self.docker_size).err(),
             WizardStep::Cpus => validate_cpus(&self.cpus).err(),
             WizardStep::Memory => validate_memory(&self.memory).err(),
             _ => None,
@@ -262,6 +273,7 @@ impl Wizard {
         }
     }
 
+    #[cfg(test)]
     pub fn preview(&self) -> String {
         self.pending_command().preview()
     }
@@ -286,13 +298,13 @@ impl Wizard {
         if !self.root_size.trim().is_empty() {
             env.push((
                 "DOCKER_SANDBOXES_ROOT_SIZE".to_owned(),
-                self.root_size.trim().to_owned(),
+                format!("{}g", self.root_size.trim()),
             ));
         }
         if !self.docker_size.trim().is_empty() {
             env.push((
                 "DOCKER_SANDBOXES_DOCKER_SIZE".to_owned(),
-                self.docker_size.trim().to_owned(),
+                format!("{}g", self.docker_size.trim()),
             ));
         }
 
@@ -429,38 +441,12 @@ fn validate_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_size(value: &str) -> Result<(), String> {
-    if value.is_empty() {
-        return Ok(());
-    }
-    let split = value
-        .find(|character: char| !character.is_ascii_digit())
-        .unwrap_or(value.len());
-    let (number, unit) = value.split_at(split);
-    let valid = !number.is_empty()
-        && matches!(
-            unit.to_ascii_lowercase().as_str(),
-            "b" | "k"
-                | "m"
-                | "g"
-                | "t"
-                | "kb"
-                | "mb"
-                | "gb"
-                | "tb"
-                | "ki"
-                | "mi"
-                | "gi"
-                | "ti"
-                | "kib"
-                | "mib"
-                | "gib"
-                | "tib"
-        );
-    if valid {
+/// Sizes are always gigabytes, so the user only types the number.
+fn validate_gb_size(value: &str) -> Result<(), String> {
+    if value.is_empty() || value.bytes().all(|byte| byte.is_ascii_digit()) {
         Ok(())
     } else {
-        Err("Use a size like 40g or 20g.".to_owned())
+        Err("Enter a whole number of GB, e.g. 40.".to_owned())
     }
 }
 
@@ -705,6 +691,10 @@ impl App {
     }
 
     fn create_from_button(&mut self) {
+        if !self.wizard.is_ready() {
+            self.message = "Finish the wizard steps before creating the sandbox.".to_owned();
+            return;
+        }
         match self.wizard.finish() {
             Ok(pending) => {
                 let name = self.wizard.name().to_owned();
@@ -833,10 +823,11 @@ mod tests {
 
     #[test]
     fn size_and_cpu_validation() {
-        assert!(validate_size("").is_ok());
-        assert!(validate_size("40g").is_ok());
-        assert!(validate_size("20GiB").is_ok());
-        assert!(validate_size("40x").is_err());
+        assert!(validate_gb_size("").is_ok());
+        assert!(validate_gb_size("40").is_ok());
+        assert!(validate_gb_size("20").is_ok());
+        assert!(validate_gb_size("40g").is_err());
+        assert!(validate_gb_size("40x").is_err());
         assert!(validate_cpus("2").is_ok());
         assert!(validate_cpus("0").is_ok());
         assert!(validate_cpus("abc").is_err());
@@ -854,8 +845,8 @@ mod tests {
     fn wizard_builds_expected_command() {
         let mut wizard = Wizard::new();
         wizard.name = "demo-tui".to_owned();
-        wizard.root_size = "40g".to_owned();
-        wizard.docker_size = "20g".to_owned();
+        wizard.root_size = "40".to_owned();
+        wizard.docker_size = "20".to_owned();
         wizard.cpus = "2".to_owned();
         wizard.memory = "4g".to_owned();
 

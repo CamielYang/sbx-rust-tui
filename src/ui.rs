@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::app::{
-    App, ClickAction, ClickTarget, GRID_COLUMNS, Mode, WIZARD_STEPS, Wizard, WizardStep,
+    AGENTS, App, ClickAction, ClickTarget, GRID_COLUMNS, Mode, WIZARD_STEPS, Wizard, WizardStep,
 };
 
 const BLOCK_HEIGHT: u16 = 3;
@@ -159,7 +159,7 @@ fn render_modal(
     click_targets: &mut Vec<ClickTarget>,
 ) {
     let width = area.width.saturating_sub(6).min(78);
-    let height = area.height.saturating_sub(4).min(24);
+    let height = area.height.saturating_sub(2).min(24);
     if width == 0 || height == 0 {
         return;
     }
@@ -222,16 +222,25 @@ fn render_modal(
             width: button_width,
             height: 1,
         };
+        let button_style = if wizard.is_ready() {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM)
+        };
         frame.render_widget(
-            Paragraph::new(label).alignment(Alignment::Center).style(
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Paragraph::new(label)
+                .alignment(Alignment::Center)
+                .style(button_style),
             button_rect,
         );
-        click_targets.push(ClickTarget::new(button_rect, ClickAction::CreateSandbox));
+        if wizard.is_ready() {
+            click_targets.push(ClickTarget::new(button_rect, ClickAction::CreateSandbox));
+        }
     }
 }
 
@@ -293,18 +302,54 @@ fn wizard_lines(wizard: &Wizard) -> Vec<Line<'static>> {
         )));
     }
 
+    if wizard.step() == WizardStep::Agent {
+        lines.extend(agent_options(wizard.agent_index()));
+    }
+
     if wizard.step() == WizardStep::Confirm {
         lines.push(Line::raw(""));
-        lines.push(Line::from(Span::styled(
-            wizard.preview(),
-            Style::default().fg(Color::Green),
-        )));
         lines.push(Line::from(Span::styled(
             "Press y/Enter or click Create Sandbox.",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )));
+    }
+
+    lines
+}
+
+/// Two-column list of selectable agents, with the current one marked.
+fn agent_options(selected: usize) -> Vec<Line<'static>> {
+    let column_width = AGENTS.iter().map(|agent| agent.len()).max().unwrap_or(0) + 4;
+
+    let mut lines = vec![Line::from(Span::styled(
+        "Agents (↑/↓ or j/k to change):",
+        Style::default().fg(Color::DarkGray),
+    ))];
+
+    for row in 0..AGENTS.len().div_ceil(2) {
+        let mut spans = Vec::new();
+        for column in 0..2 {
+            let index = row * 2 + column;
+            let Some(agent) = AGENTS.get(index) else {
+                continue;
+            };
+            if column == 1 {
+                let first_width = 2 + AGENTS[index - 1].len();
+                spans.push(Span::raw(" ".repeat(column_width - first_width)));
+            }
+            let marker = if index == selected { ">" } else { " " };
+            let style = if index == selected {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            spans.push(Span::styled(format!("{marker} {agent}"), style));
+        }
+        lines.push(Line::from(spans));
     }
 
     lines
@@ -424,17 +469,52 @@ mod tests {
     }
 
     #[test]
-    fn create_button_validates_every_field() {
+    fn create_button_is_disabled_until_review() {
         let mut app = App::with_sandboxes(&["alpha"]);
         app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         snapshot(90, 24, &mut app);
 
-        // The Create button is usable from any step; an empty name is rejected
-        // instead of running `sbx create` with no name.
-        click(&mut app, ClickAction::CreateSandbox);
-        assert!(matches!(app.mode(), Mode::Wizard));
-        assert!(app.message().contains("Name must be 2-63 characters."));
+        assert!(
+            app.click_targets()
+                .iter()
+                .all(|target| target.action != ClickAction::CreateSandbox)
+        );
+
+        for character in "demo-tui".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        for _ in 0..6 {
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        }
+        assert!(app.wizard().is_ready());
+
+        let screen = snapshot(90, 24, &mut app).join("\n");
+        assert!(
+            app.click_targets()
+                .iter()
+                .any(|target| target.action == ClickAction::CreateSandbox)
+        );
+        assert!(!screen.contains("sbx create"));
+    }
+
+    #[test]
+    fn agent_step_lists_all_agents() {
+        let mut app = App::with_sandboxes(&["alpha"]);
+        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        for character in "demo-tui".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.wizard().step(), WizardStep::Agent);
+
+        let screen = snapshot(90, 24, &mut app).join("\n");
+        assert!(screen.contains("Agents (↑/↓ or j/k to change):"));
+        for agent in AGENTS {
+            assert!(screen.contains(agent), "missing agent {agent}");
+        }
+        assert!(screen.contains("> opencode"));
     }
 
     #[test]
