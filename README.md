@@ -1,7 +1,7 @@
 # sbx-rust-tui
 
-A small ratatui skeleton for launching frequently used Docker Sandboxes (`sbx`)
-and Docker commands from a TUI instead of typing them each time.
+A ratatui dashboard for Docker Sandboxes (`sbx`): browse active sandboxes and
+create new ones without leaving the terminal.
 
 ## Run
 
@@ -9,26 +9,66 @@ and Docker commands from a TUI instead of typing them each time.
 cargo run
 ```
 
+## Home screen
+
+The home screen has a centered **Docker Sandbox Builder** title, a grid of blocks
+(three columns per row) for the active sandboxes, and a trailing
+**+ New Sandbox** button. Each sandbox block currently shows only its name.
+Selecting an existing sandbox does nothing yet; the button opens the create
+wizard as a modal over the dashboard.
+
+Sandbox names come from `sbx ls -q` at startup and are refreshed after a sandbox
+is created (or when `r` is pressed). If `sbx` is missing or fails, the grid is
+empty and the error is shown in the footer.
+
+## Windows build (cross-compile from Linux)
+
+```sh
+rustup target add x86_64-pc-windows-gnu
+# Debian/Ubuntu: linker for the windows-gnu target
+sudo apt-get install gcc-mingw-w64-x86-64
+cargo build --release --target x86_64-pc-windows-gnu
+```
+
+The executable is written to
+`target/x86_64-pc-windows-gnu/release/sbx-rust-tui.exe`. It is a 64-bit Windows
+console program; copy it to a Windows machine and run it from a terminal.
+
+Two platform notes:
+
+- Creating a sandbox calls `sbx`, so `sbx` must be available on the Windows
+  machine in `PATH`.
+- The wizard reads `/proc/meminfo` for its default memory limit and warnings.
+  That file does not exist on Windows, so it falls back to `4g` and skips the
+  host-memory checks there.
+
 ## Keys
 
 | Key | Action |
 | --- | --- |
-| `↑` / `↓` or `k` / `j` | Move through the command list |
-| `Enter` | Preview the selected command and ask for confirmation |
-| `y` / `Enter` | Run the confirmed command |
-| `n` / `Esc` | Cancel confirmation |
-| `PgUp` / `PgDn` | Scroll the captured output |
-| `c` | Clear the output pane |
+| `←` / `→` / `↑` / `↓` or `h` / `l` / `k` / `j` | Move between blocks |
+| `Home` / `End` | First / last block |
+| `PgUp` / `PgDn` | Scroll the grid |
+| `Enter` (on **+ New Sandbox**) | Open the create wizard modal |
+| `r` | Refresh the sandbox list |
 | `q` / `Esc` / `Ctrl+C` | Quit (terminal is always restored) |
 
-Commands are shown before they run, and stdout/stderr are captured and displayed
-in the details pane. Any `{sandbox}` placeholder in a command's arguments is
-replaced with the `SANDBOX_NAME` environment variable at launch time.
+Inside the wizard modal:
 
-## Create-sandbox wizard
+| Key | Action |
+| --- | --- |
+| Type characters | Edit the current field |
+| `↑` / `↓` or `k` / `j` | Choose an agent |
+| `Ctrl+U` | Clear the current field |
+| `Enter` | Next step |
+| `Esc` | Previous step (or cancel on the first) |
+| `y` / `Enter` | Create the sandbox on the review step |
+| `n` / `Esc` | Return to the memory step from review |
 
-Select **Create new sandbox (wizard)** (first menu item) and press `Enter`. It
-walks through these settings one at a time:
+## New sandbox wizard modal
+
+Open the modal by selecting **+ New Sandbox** and pressing `Enter`. It walks
+through these settings one at a time:
 
 1. **Name** — 2–63 ASCII letters, numbers, `-` or `.`; each dot-separated part
    must start and end with an alphanumeric character; `default` is reserved.
@@ -42,9 +82,6 @@ walks through these settings one at a time:
    and warns above 75% of host memory.
 7. **Review** — shows the exact command, then `y`/`Enter` creates the sandbox.
 
-In wizard text fields, `Ctrl+U` clears the line. `Esc` goes back one step (or
-cancels on the first step); in the review step `n`/`Esc` returns to memory.
-
 Example generated command:
 
 ```sh
@@ -55,30 +92,15 @@ DOCKER_SANDBOXES_ROOT_SIZE=40g DOCKER_SANDBOXES_DOCKER_SIZE=20g \
 The two size variables are passed only to the child process via
 `Command::env`, so the TUI's own environment is unchanged.
 
-## Add your own commands
-
-Edit the `MENU` constant in [`src/app.rs`](src/app.rs):
-
-```rust
-CommandSpec {
-    name: "My command",
-    description: "What this command does.",
-    program: "sbx",
-    args: &["port", "publish", "{sandbox}", "8080:8080/tcp"],
-},
-```
-
-## Layout
+## Code layout
 
 - [`src/main.rs`](src/main.rs) — terminal setup/restore, panic hook, event loop
-- [`src/app.rs`](src/app.rs) — menu, state, wizard, validation and execution
-- [`src/ui.rs`](src/ui.rs) — ratatui rendering
+- [`src/app.rs`](src/app.rs) — sandbox list, state, wizard, validation and execution
+- [`src/ui.rs`](src/ui.rs) — dashboard grid and modal rendering
 
 ## Notes / possible next steps
 
-- Commands currently run synchronously; the UI is blocked while a command runs.
+- Sandbox creation runs synchronously; the UI is blocked while `sbx create` runs.
   Moving execution to a worker thread with a channel would fix that.
-- Output is captured with `Command::output()`, so interactive commands that need
-  a TTY are not supported yet.
-- Command list is static. A config file (TOML) would make it editable without
-  recompiling.
+- Sandbox blocks are display-only for now; wiring them to attach/inspect actions
+  is a natural next step.

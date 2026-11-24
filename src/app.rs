@@ -16,6 +16,8 @@ pub const AGENTS: &[&str] = &[
     "shell",
 ];
 
+pub const GRID_COLUMNS: usize = 3;
+
 /// A ready-to-run command, including any environment overrides for the child.
 #[derive(Clone)]
 pub struct PendingCommand {
@@ -58,129 +60,10 @@ fn quote_if_needed(part: &str) -> String {
     }
 }
 
-/// A command that can be launched from the TUI.
-///
-/// Add your own entries to `MENU` below. `{sandbox}` in `args` is replaced
-/// with the `SANDBOX_NAME` environment variable at launch time.
-#[derive(Clone, Copy)]
-pub struct CommandSpec {
-    pub name: &'static str,
-    pub description: &'static str,
-    pub program: &'static str,
-    pub args: &'static [&'static str],
-}
-
-impl CommandSpec {
-    fn resolved_args(&self) -> Vec<String> {
-        let sandbox = std::env::var("SANDBOX_NAME").unwrap_or_default();
-        self.args
-            .iter()
-            .map(|arg| arg.replace("{sandbox}", &sandbox))
-            .collect()
-    }
-
-    fn to_pending(self) -> PendingCommand {
-        PendingCommand {
-            program: self.program.to_owned(),
-            args: self.resolved_args(),
-            env: Vec::new(),
-        }
-    }
-
-    pub fn preview(&self) -> String {
-        self.to_pending().preview()
-    }
-}
-
-#[derive(Clone)]
-pub enum MenuItem {
-    CreateSandbox,
-    Command(CommandSpec),
-}
-
-impl MenuItem {
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::CreateSandbox => "Create new sandbox (wizard)",
-            Self::Command(command) => command.name,
-        }
-    }
-
-    pub fn description(&self) -> &'static str {
-        match self {
-            Self::CreateSandbox => {
-                "Walk through name, agent, disk sizes, CPUs and memory, then run sbx create."
-            }
-            Self::Command(command) => command.description,
-        }
-    }
-
-    pub fn preview(&self) -> String {
-        match self {
-            Self::CreateSandbox => "opens an interactive create wizard".to_owned(),
-            Self::Command(command) => command.preview(),
-        }
-    }
-}
-
-const MENU: &[MenuItem] = &[
-    MenuItem::CreateSandbox,
-    MenuItem::Command(CommandSpec {
-        name: "List sandboxes",
-        description: "Show all local and cloud sandboxes.",
-        program: "sbx",
-        args: &["ls"],
-    }),
-    MenuItem::Command(CommandSpec {
-        name: "Inspect this sandbox",
-        description: "Show details for the sandbox this TUI is running in.",
-        program: "sbx",
-        args: &["inspect", "{sandbox}"],
-    }),
-    MenuItem::Command(CommandSpec {
-        name: "Published ports",
-        description: "List ports published for the current sandbox.",
-        program: "sbx",
-        args: &["port", "ls", "{sandbox}"],
-    }),
-    MenuItem::Command(CommandSpec {
-        name: "Network rules",
-        description: "List active sandbox network policy rules.",
-        program: "sbx",
-        args: &["policy", "ls"],
-    }),
-    MenuItem::Command(CommandSpec {
-        name: "Network log",
-        description: "Show recent connections and why they were blocked.",
-        program: "sbx",
-        args: &["policy", "log"],
-    }),
-    MenuItem::Command(CommandSpec {
-        name: "Docker containers",
-        description: "Show running Docker containers.",
-        program: "docker",
-        args: &["ps"],
-    }),
-    MenuItem::Command(CommandSpec {
-        name: "sbx version",
-        description: "Show the installed Docker Sandboxes version.",
-        program: "sbx",
-        args: &["version"],
-    }),
-];
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Normal,
-    Confirm,
     Wizard,
-}
-
-pub struct CommandResult {
-    pub command: String,
-    pub success: bool,
-    pub stdout: String,
-    pub stderr: String,
 }
 
 // --- wizard -----------------------------------------------------------------
@@ -283,6 +166,10 @@ impl Wizard {
 
     pub fn step(&self) -> WizardStep {
         self.step
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     pub fn field_error(&self) -> Option<String> {
@@ -577,43 +464,63 @@ fn default_memory() -> String {
     }
 }
 
+// --- sandbox list -----------------------------------------------------------
+
+/// Fetch the names of the sandboxes known to `sbx` (one per line with `-q`).
+pub fn list_sandboxes() -> Result<Vec<String>, String> {
+    let output = ProcessCommand::new("sbx")
+        .args(["ls", "-q"])
+        .output()
+        .map_err(|error| error.to_string())?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(if stderr.is_empty() {
+            format!("sbx ls exited with {}.", output.status)
+        } else {
+            stderr
+        });
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
 // --- app --------------------------------------------------------------------
 
 pub struct App {
-    menu: Vec<MenuItem>,
+    sandboxes: Vec<String>,
     selected: usize,
+    grid_offset: usize,
+    visible_rows: usize,
     mode: Mode,
     wizard: Wizard,
-    result: Option<CommandResult>,
-    output_scroll: u16,
     message: String,
     should_quit: bool,
 }
 
 impl App {
     pub fn new() -> Self {
-        Self {
-            menu: MENU.to_vec(),
+        let mut app = Self {
+            sandboxes: Vec::new(),
             selected: 0,
+            grid_offset: 0,
+            visible_rows: 1,
             mode: Mode::Normal,
             wizard: Wizard::new(),
-            result: None,
-            output_scroll: 0,
             message: String::new(),
             should_quit: false,
-        }
+        };
+        app.refresh_sandboxes();
+        app
     }
 
     pub fn should_quit(&self) -> bool {
         self.should_quit
-    }
-
-    pub fn menu(&self) -> &[MenuItem] {
-        &self.menu
-    }
-
-    pub fn selected_index(&self) -> usize {
-        self.selected
     }
 
     pub fn mode(&self) -> Mode {
@@ -624,16 +531,35 @@ impl App {
         &self.wizard
     }
 
-    pub fn result(&self) -> Option<&CommandResult> {
-        self.result.as_ref()
-    }
-
-    pub fn output_scroll(&self) -> u16 {
-        self.output_scroll
-    }
-
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    pub fn sandboxes(&self) -> &[String] {
+        &self.sandboxes
+    }
+
+    /// Sandbox blocks plus the trailing "+ New Sandbox" button.
+    pub fn block_count(&self) -> usize {
+        self.sandboxes.len() + 1
+    }
+
+    pub fn selected_index(&self) -> usize {
+        self.selected
+    }
+
+    pub fn is_new_sandbox_selected(&self) -> bool {
+        self.selected == self.sandboxes.len()
+    }
+
+    pub fn grid_offset(&self) -> usize {
+        self.grid_offset
+    }
+
+    /// Called by the renderer so keyboard scrolling matches what is on screen.
+    pub fn set_visible_rows(&mut self, rows: usize) {
+        self.visible_rows = rows.max(1);
+        self.clamp_navigation();
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
@@ -645,102 +571,133 @@ impl App {
         match self.mode {
             Mode::Normal => match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
-                KeyCode::Up | KeyCode::Char('k') => self.select_previous(),
-                KeyCode::Down | KeyCode::Char('j') => self.select_next(),
-                KeyCode::Enter => self.open_selected(),
-                KeyCode::PageUp => self.scroll_output(-10),
-                KeyCode::PageDown => self.scroll_output(10),
-                KeyCode::Char('c') => {
-                    self.result = None;
-                    self.output_scroll = 0;
-                    self.message.clear();
-                }
-                _ => {}
-            },
-            Mode::Confirm => match key.code {
-                KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    if let Some(MenuItem::Command(command)) = self.menu.get(self.selected) {
-                        let pending = command.to_pending();
-                        self.execute(pending);
-                    }
-                    self.mode = Mode::Normal;
-                }
-                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
-                    self.mode = Mode::Normal;
-                    self.message = "Cancelled.".to_owned();
-                }
+                KeyCode::Left | KeyCode::Char('h') => self.move_horizontal(-1),
+                KeyCode::Right | KeyCode::Char('l') => self.move_horizontal(1),
+                KeyCode::Up | KeyCode::Char('k') => self.move_vertical(-1),
+                KeyCode::Down | KeyCode::Char('j') => self.move_vertical(1),
+                KeyCode::PageUp => self.move_page(-1),
+                KeyCode::PageDown => self.move_page(1),
+                KeyCode::Home => self.select(0),
+                KeyCode::End => self.select(self.block_count() - 1),
+                KeyCode::Enter if self.is_new_sandbox_selected() => self.open_wizard(),
+                KeyCode::Char('r') | KeyCode::Char('R') => self.refresh_sandboxes(),
                 _ => {}
             },
             Mode::Wizard => match self.wizard.handle_key(key, &mut self.message) {
                 WizardOutcome::Continue => {}
                 WizardOutcome::Cancelled => {
                     self.mode = Mode::Normal;
+                    self.wizard = Wizard::new();
                     self.message = "Create sandbox cancelled.".to_owned();
                 }
                 WizardOutcome::Create(pending) => {
-                    self.execute(pending);
+                    let name = self.wizard.name().to_owned();
+                    self.execute(pending, &name);
                     self.mode = Mode::Normal;
+                    self.wizard = Wizard::new();
                 }
             },
         }
     }
 
-    fn open_selected(&mut self) {
+    fn open_wizard(&mut self) {
+        self.wizard = Wizard::new();
         self.message.clear();
-        match self.menu.get(self.selected) {
-            Some(MenuItem::CreateSandbox) => {
-                self.wizard = Wizard::new();
-                self.mode = Mode::Wizard;
-            }
-            Some(MenuItem::Command(_)) => self.mode = Mode::Confirm,
-            None => {}
+        self.mode = Mode::Wizard;
+    }
+
+    fn select(&mut self, index: usize) {
+        self.selected = index.min(self.block_count() - 1);
+        self.keep_selection_visible();
+    }
+
+    fn move_horizontal(&mut self, delta: isize) {
+        let next = self.selected as isize + delta;
+        if next < 0 || next >= self.block_count() as isize {
+            return;
+        }
+        // Don't wrap from the end of a row into the start of the next one.
+        if delta < 0 && self.selected.is_multiple_of(GRID_COLUMNS) {
+            return;
+        }
+        if delta > 0 && (next as usize).is_multiple_of(GRID_COLUMNS) {
+            return;
+        }
+        self.select(next as usize);
+    }
+
+    fn move_vertical(&mut self, delta: isize) {
+        let next = self.selected as isize + delta * GRID_COLUMNS as isize;
+        if next >= 0 && next < self.block_count() as isize {
+            self.select(next as usize);
         }
     }
 
-    fn select_previous(&mut self) {
-        if self.selected > 0 {
-            self.selected -= 1;
+    fn move_page(&mut self, direction: isize) {
+        let step = (self.visible_rows * GRID_COLUMNS) as isize;
+        let next = self.selected as isize + direction * step;
+        if next < 0 {
+            self.select(0);
+        } else if next >= self.block_count() as isize {
+            self.select(self.block_count() - 1);
+        } else {
+            self.select(next as usize);
         }
     }
 
-    fn select_next(&mut self) {
-        if self.selected + 1 < self.menu.len() {
-            self.selected += 1;
+    fn clamp_navigation(&mut self) {
+        let rows = self.block_count().div_ceil(GRID_COLUMNS);
+        self.selected = self.selected.min(self.block_count() - 1);
+        self.grid_offset = self.grid_offset.min(rows.saturating_sub(self.visible_rows));
+        self.keep_selection_visible();
+    }
+
+    fn keep_selection_visible(&mut self) {
+        let row = self.selected / GRID_COLUMNS;
+        if row < self.grid_offset {
+            self.grid_offset = row;
+        } else if row >= self.grid_offset + self.visible_rows {
+            self.grid_offset = row + 1 - self.visible_rows;
         }
     }
 
-    fn scroll_output(&mut self, delta: i32) {
-        self.output_scroll = (self.output_scroll as i32 + delta).max(0) as u16;
+    fn refresh_sandboxes(&mut self) {
+        self.message.clear();
+        match list_sandboxes() {
+            Ok(names) => self.sandboxes = names,
+            Err(error) => self.message = format!("Could not list sandboxes: {error}"),
+        }
+        self.clamp_navigation();
     }
 
-    fn execute(&mut self, pending: PendingCommand) {
-        let preview = pending.preview();
+    fn execute(&mut self, pending: PendingCommand, name: &str) {
         match pending.run() {
+            Ok(output) if output.status.success() => {
+                self.refresh_sandboxes();
+                if self.message.is_empty() {
+                    self.message = format!("Sandbox '{name}' created.");
+                }
+            }
             Ok(output) => {
-                let success = output.status.success();
-                self.message = if success {
-                    "Command finished.".to_owned()
-                } else {
-                    format!("Command exited with {}.", output.status)
-                };
-                self.result = Some(CommandResult {
-                    command: preview,
-                    success,
-                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-                });
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let detail = stderr
+                    .lines()
+                    .find(|line| !line.trim().is_empty())
+                    .unwrap_or("sbx create failed");
+                self.message = format!("Could not create sandbox: {detail}");
             }
-            Err(error) => {
-                self.message = format!("Could not start command: {error}");
-                self.result = Some(CommandResult {
-                    command: preview,
-                    success: false,
-                    stdout: String::new(),
-                    stderr: error.to_string(),
-                });
-            }
+            Err(error) => self.message = format!("Could not run sbx: {error}"),
         }
-        self.output_scroll = 0;
+    }
+}
+
+#[cfg(test)]
+impl App {
+    pub fn with_sandboxes(names: &[&str]) -> Self {
+        let mut app = Self::new();
+        app.sandboxes = names.iter().map(|name| (*name).to_owned()).collect();
+        app.clamp_navigation();
+        app
     }
 }
 
