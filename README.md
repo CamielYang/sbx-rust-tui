@@ -25,9 +25,39 @@ Commands are shown before they run, and stdout/stderr are captured and displayed
 in the details pane. Any `{sandbox}` placeholder in a command's arguments is
 replaced with the `SANDBOX_NAME` environment variable at launch time.
 
+## Create-sandbox wizard
+
+Select **Create new sandbox (wizard)** (first menu item) and press `Enter`. It
+walks through these settings one at a time:
+
+1. **Name** — 2–63 ASCII letters, numbers, `-` or `.`; each dot-separated part
+   must start and end with an alphanumeric character; `default` is reserved.
+2. **Agent** — `claude`, `codex`, `copilot`, `cursor`, `devin`, `docker-agent`,
+   `droid`, `kiro`, `opencode` (default), `shell`.
+3. **Root size** — optional, e.g. `40g` → `DOCKER_SANDBOXES_ROOT_SIZE=40g`.
+4. **Docker data size** — optional, e.g. `20g` → `DOCKER_SANDBOXES_DOCKER_SIZE=20g`.
+5. **CPUs** — positive integer; `0` means auto (default: `2`).
+6. **Memory** — binary units such as `512m` or `8g`; minimum 512 MiB, maximum
+   host memory. Defaults to half of host memory (clamped to 512 MiB–32 GiB)
+   and warns above 75% of host memory.
+7. **Review** — shows the exact command, then `y`/`Enter` creates the sandbox.
+
+In wizard text fields, `Ctrl+U` clears the line. `Esc` goes back one step (or
+cancels on the first step); in the review step `n`/`Esc` returns to memory.
+
+Example generated command:
+
+```sh
+DOCKER_SANDBOXES_ROOT_SIZE=40g DOCKER_SANDBOXES_DOCKER_SIZE=20g \
+  sbx create --name demo-tui opencode --cpus 2 --memory 3584m
+```
+
+The two size variables are passed only to the child process via
+`Command::env`, so the TUI's own environment is unchanged.
+
 ## Add your own commands
 
-Edit the `COMMANDS` constant in [`src/app.rs`](src/app.rs):
+Edit the `MENU` constant in [`src/app.rs`](src/app.rs):
 
 ```rust
 CommandSpec {
@@ -41,7 +71,7 @@ CommandSpec {
 ## Layout
 
 - [`src/main.rs`](src/main.rs) — terminal setup/restore, panic hook, event loop
-- [`src/app.rs`](src/app.rs) — state, key handling, command execution
+- [`src/app.rs`](src/app.rs) — menu, state, wizard, validation and execution
 - [`src/ui.rs`](src/ui.rs) — ratatui rendering
 
 ## Notes / possible next steps

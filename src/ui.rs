@@ -1,12 +1,12 @@
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout},
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
 };
 
-use crate::app::{App, Mode};
+use crate::app::{App, Mode, WIZARD_STEPS, Wizard, WizardStep};
 
 pub fn render(frame: &mut Frame, app: &App) {
     let [main_area, footer_area] =
@@ -26,12 +26,12 @@ pub fn render(frame: &mut Frame, app: &App) {
     render_footer(frame, footer_area, app);
 }
 
-fn render_list(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
+fn render_list(frame: &mut Frame, area: Rect, app: &App) {
     let items = app
-        .commands()
+        .menu()
         .iter()
         .enumerate()
-        .map(|(index, command)| {
+        .map(|(index, item)| {
             let style = if index == app.selected_index() {
                 Style::default()
                     .fg(Color::Cyan)
@@ -39,7 +39,7 @@ fn render_list(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
             } else {
                 Style::default()
             };
-            ListItem::new(Line::from(Span::styled(command.name, style)))
+            ListItem::new(Line::from(Span::styled(item.name(), style)))
         })
         .collect::<Vec<_>>();
 
@@ -47,26 +47,31 @@ fn render_list(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
     frame.render_widget(list, area);
 }
 
-fn render_detail(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
-    let Some(command) = app.commands().get(app.selected_index()) else {
+fn render_detail(frame: &mut Frame, area: Rect, app: &App) {
+    if app.mode() == Mode::Wizard {
+        render_wizard(frame, area, app.wizard());
+        return;
+    }
+
+    let Some(item) = app.menu().get(app.selected_index()) else {
         return;
     };
 
     let mut lines = vec![
         Line::from(Span::styled(
-            command.name,
+            item.name(),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )),
-        Line::from(Span::raw(command.description)),
+        Line::from(Span::raw(item.description())),
         Line::raw(""),
         Line::from(Span::styled(
             "Command",
             Style::default().add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            command.preview(),
+            item.preview(),
             Style::default().fg(Color::Green),
         )),
         Line::raw(""),
@@ -120,10 +125,104 @@ fn render_detail(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
     frame.render_widget(detail, area);
 }
 
-fn render_footer(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
+fn render_wizard(frame: &mut Frame, area: Rect, wizard: &Wizard) {
+    let current_index = WIZARD_STEPS
+        .iter()
+        .position(|step| *step == wizard.step())
+        .unwrap_or(0);
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Create a new sandbox",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            wizard.step().prompt(),
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::raw(""),
+    ];
+
+    for (index, step) in WIZARD_STEPS.iter().enumerate() {
+        let marker = if index < current_index {
+            "[✓]"
+        } else if index == current_index {
+            "[>]"
+        } else {
+            "[ ]"
+        };
+        let style = if index == current_index {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+
+        let mut value = wizard.value_for(*step);
+        if value.is_empty() {
+            value = "<empty>".to_owned();
+        }
+        if index == current_index && step.is_text() {
+            value.push('▌');
+        }
+
+        lines.push(Line::from(vec![
+            Span::styled(format!("{marker} {}: ", step.label()), style),
+            Span::styled(value, style),
+        ]));
+    }
+
+    lines.push(Line::raw(""));
+    if let Some(error) = wizard.field_error() {
+        lines.push(Line::from(Span::styled(
+            format!("Error: {error}"),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    if let Some(warning) = wizard.warning() {
+        lines.push(Line::from(Span::styled(
+            warning,
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+
+    if wizard.step() == WizardStep::Confirm {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            wizard.preview(),
+            Style::default().fg(Color::Green),
+        )));
+        lines.push(Line::from(Span::styled(
+            "Press y/Enter to create the sandbox.",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+    }
+
+    let detail = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" New sandbox "),
+        )
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(detail, area);
+}
+
+fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     let hints = match app.mode() {
         Mode::Normal => " ↑/↓ select   ↵ confirm   PgUp/PgDn scroll   c clear   q quit ",
         Mode::Confirm => " ↵/y run   n/Esc cancel ",
+        Mode::Wizard => match app.wizard().step() {
+            WizardStep::Agent => " ↑/↓ choose agent   ↵ next   Esc back ",
+            WizardStep::Confirm => " ↵/y create   n/Esc back ",
+            _ => " type value   Ctrl+U clear   ↵ next   Esc back ",
+        },
     };
 
     let line = Line::from(vec![
