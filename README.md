@@ -65,6 +65,17 @@ Inside the wizard modal:
 | `y` / `Enter` | Create the sandbox on the review step |
 | `n` / `Esc` | Return to the memory step from review |
 
+## Mouse
+
+Mouse capture is enabled on startup and disabled when the app exits (including on
+panic). Click a sandbox block to select it, click **+ New Sandbox** to open the
+wizard, and use the scroll wheel to move between grid rows.
+
+The wizard modal has an **[X]** close button in its top-right corner and a
+**[ Create Sandbox ]** button at the bottom. The Create button works from any
+step: every field is validated first, and the first invalid field becomes the
+active step with the reason shown in the footer.
+
 ## New sandbox wizard modal
 
 Open the modal by selecting **+ New Sandbox** and pressing `Enter`. It walks
@@ -80,7 +91,8 @@ through these settings one at a time:
 6. **Memory** — binary units such as `512m` or `8g`; minimum 512 MiB, maximum
    host memory. Defaults to half of host memory (clamped to 512 MiB–32 GiB)
    and warns above 75% of host memory.
-7. **Review** — shows the exact command, then `y`/`Enter` creates the sandbox.
+7. **Review** — shows the exact command, then `y`/`Enter` or the bottom
+   **Create Sandbox** button creates the sandbox.
 
 Example generated command:
 

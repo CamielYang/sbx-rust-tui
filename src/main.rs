@@ -7,7 +7,7 @@ use std::time::Duration;
 use app::App;
 use crossterm::{
     cursor,
-    event::{self, Event, KeyEventKind},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -29,7 +29,12 @@ fn main() -> Result<()> {
 
 fn init_terminal() -> Result<Tui> {
     enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen, cursor::Hide)?;
+    execute!(
+        io::stdout(),
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        cursor::Hide
+    )?;
     let terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     Ok(terminal)
 }
@@ -37,7 +42,12 @@ fn init_terminal() -> Result<Tui> {
 fn restore_terminal(terminal: &mut Tui) -> Result<()> {
     terminal.show_cursor()?;
     disable_raw_mode()?;
-    execute!(io::stdout(), LeaveAlternateScreen, cursor::Show)?;
+    execute!(
+        io::stdout(),
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        cursor::Show
+    )?;
     Ok(())
 }
 
@@ -46,7 +56,12 @@ fn install_panic_hook() {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, cursor::Show);
+        let _ = execute!(
+            io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            cursor::Show
+        );
         original_hook(panic_info);
     }));
 }
@@ -55,12 +70,13 @@ fn run(terminal: &mut Tui, app: &mut App) -> Result<()> {
     while !app.should_quit() {
         terminal.draw(|frame| ui::render(frame, app))?;
 
-        // Ignore key-release and repeat events; handle each press once.
-        if event::poll(Duration::from_millis(100))?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            app.handle_key(key);
+        if event::poll(Duration::from_millis(100))? {
+            match event::read()? {
+                // Ignore key-release and repeat events; handle each press once.
+                Event::Key(key) if key.kind == KeyEventKind::Press => app.handle_key(key),
+                Event::Mouse(mouse) => app.handle_mouse(mouse),
+                _ => {}
+            }
         }
     }
     Ok(())

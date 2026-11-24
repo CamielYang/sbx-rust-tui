@@ -1,7 +1,8 @@
 use std::io;
 use std::process::Command as ProcessCommand;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
 
 pub const AGENTS: &[&str] = &[
     "claude",
@@ -17,6 +18,33 @@ pub const AGENTS: &[&str] = &[
 ];
 
 pub const GRID_COLUMNS: usize = 3;
+
+/// An action bound to a rectangle on screen by the renderer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClickAction {
+    Select(usize),
+    OpenWizard,
+    CloseWizard,
+    CreateSandbox,
+}
+
+/// A clickable rectangle. The renderer refreshes these on every frame so the
+/// coordinates always match what the user currently sees.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClickTarget {
+    pub area: Rect,
+    pub action: ClickAction,
+}
+
+impl ClickTarget {
+    pub fn new(area: Rect, action: ClickAction) -> Self {
+        Self { area, action }
+    }
+
+    fn contains(&self, x: u16, y: u16) -> bool {
+        self.area.contains((x, y).into())
+    }
+}
 
 /// A ready-to-run command, including any environment overrides for the child.
 #[derive(Clone)]
@@ -173,14 +201,40 @@ impl Wizard {
     }
 
     pub fn field_error(&self) -> Option<String> {
-        match self.step {
-            WizardStep::Name if self.name.is_empty() => None,
+        // Don't show an error on the untouched first field.
+        if self.step == WizardStep::Name && self.name.is_empty() {
+            return None;
+        }
+        self.error_for(self.step)
+    }
+
+    fn error_for(&self, step: WizardStep) -> Option<String> {
+        match step {
             WizardStep::Name => validate_name(&self.name).err(),
             WizardStep::RootSize => validate_size(&self.root_size).err(),
             WizardStep::DockerSize => validate_size(&self.docker_size).err(),
             WizardStep::Cpus => validate_cpus(&self.cpus).err(),
             WizardStep::Memory => validate_memory(&self.memory).err(),
             _ => None,
+        }
+    }
+
+    /// Validate every field, not just the current one. This powers the
+    /// clickable Create button, which can be used from any wizard step.
+    pub fn first_error(&self) -> Option<(WizardStep, String)> {
+        WIZARD_STEPS
+            .iter()
+            .find_map(|step| self.error_for(*step).map(|error| (*step, error)))
+    }
+
+    pub fn go_to_step(&mut self, step: WizardStep) {
+        self.step = step;
+    }
+
+    pub fn finish(&self) -> Result<PendingCommand, (WizardStep, String)> {
+        match self.first_error() {
+            Some(error) => Err(error),
+            None => Ok(self.pending_command()),
         }
     }
 
@@ -501,6 +555,7 @@ pub struct App {
     wizard: Wizard,
     message: String,
     should_quit: bool,
+    click_targets: Vec<ClickTarget>,
 }
 
 impl App {
@@ -514,6 +569,7 @@ impl App {
             wizard: Wizard::new(),
             message: String::new(),
             should_quit: false,
+            click_targets: Vec::new(),
         };
         app.refresh_sandboxes();
         app
@@ -562,6 +618,48 @@ impl App {
         self.clamp_navigation();
     }
 
+    /// Called by the renderer on every frame with the areas that are clickable.
+    pub fn set_click_targets(&mut self, targets: Vec<ClickTarget>) {
+        self.click_targets = targets;
+    }
+
+    #[cfg(test)]
+    pub fn click_targets(&self) -> &[ClickTarget] {
+        &self.click_targets
+    }
+
+    /// Handle a mouse event against the most recently rendered hit regions.
+    pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                // Reverse order: modal widgets are drawn last and must win
+                // when they overlap the grid underneath them.
+                if let Some(target) = self
+                    .click_targets
+                    .iter()
+                    .rev()
+                    .find(|target| target.contains(mouse.column, mouse.row))
+                {
+                    let action = target.action;
+                    self.handle_click(action);
+                }
+            }
+            MouseEventKind::ScrollUp if self.mode == Mode::Normal => self.move_vertical(-1),
+            MouseEventKind::ScrollDown if self.mode == Mode::Normal => self.move_vertical(1),
+            _ => {}
+        }
+    }
+
+    fn handle_click(&mut self, action: ClickAction) {
+        match action {
+            ClickAction::Select(index) if self.mode == Mode::Normal => self.select(index),
+            ClickAction::OpenWizard if self.mode == Mode::Normal => self.open_wizard(),
+            ClickAction::CloseWizard if self.mode == Mode::Wizard => self.close_wizard(),
+            ClickAction::CreateSandbox if self.mode == Mode::Wizard => self.create_from_button(),
+            _ => {}
+        }
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
@@ -585,16 +683,10 @@ impl App {
             },
             Mode::Wizard => match self.wizard.handle_key(key, &mut self.message) {
                 WizardOutcome::Continue => {}
-                WizardOutcome::Cancelled => {
-                    self.mode = Mode::Normal;
-                    self.wizard = Wizard::new();
-                    self.message = "Create sandbox cancelled.".to_owned();
-                }
+                WizardOutcome::Cancelled => self.close_wizard(),
                 WizardOutcome::Create(pending) => {
                     let name = self.wizard.name().to_owned();
-                    self.execute(pending, &name);
-                    self.mode = Mode::Normal;
-                    self.wizard = Wizard::new();
+                    self.finish_wizard(pending, &name);
                 }
             },
         }
@@ -604,6 +696,31 @@ impl App {
         self.wizard = Wizard::new();
         self.message.clear();
         self.mode = Mode::Wizard;
+    }
+
+    fn close_wizard(&mut self) {
+        self.mode = Mode::Normal;
+        self.wizard = Wizard::new();
+        self.message = "Create sandbox cancelled.".to_owned();
+    }
+
+    fn create_from_button(&mut self) {
+        match self.wizard.finish() {
+            Ok(pending) => {
+                let name = self.wizard.name().to_owned();
+                self.finish_wizard(pending, &name);
+            }
+            Err((step, error)) => {
+                self.wizard.go_to_step(step);
+                self.message = error;
+            }
+        }
+    }
+
+    fn finish_wizard(&mut self, pending: PendingCommand, name: &str) {
+        self.execute(pending, name);
+        self.mode = Mode::Normal;
+        self.wizard = Wizard::new();
     }
 
     fn select(&mut self, index: usize) {
