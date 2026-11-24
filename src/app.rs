@@ -3,6 +3,7 @@ use std::process::Command as ProcessCommand;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
+use serde_json::Value;
 
 pub const AGENTS: &[&str] = &[
     "claude",
@@ -26,6 +27,11 @@ pub enum ClickAction {
     OpenWizard,
     CloseWizard,
     CreateSandbox,
+    Stop(usize),
+    Exec(usize),
+    Remove(usize),
+    Info(usize),
+    CloseInfo,
 }
 
 /// A clickable rectangle. The renderer refreshes these on every frame so the
@@ -55,7 +61,16 @@ pub struct PendingCommand {
 }
 
 impl PendingCommand {
-    #[cfg(test)]
+    pub fn new(program: &str, args: &[&str]) -> Self {
+        Self {
+            program: program.to_owned(),
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+            env: Vec::new(),
+        }
+    }
+
+    /// The exact shell spelling of this command, used for the external
+    /// terminal and for tests.
     pub fn preview(&self) -> String {
         let mut parts = self
             .env
@@ -79,9 +94,70 @@ impl PendingCommand {
         }
         command.output()
     }
+
+    /// Open a new terminal window and run this command there. The TUI must be
+    /// suspended (raw mode / alternate screen disabled) by the caller first.
+    pub fn run_in_external_terminal(&self) -> Result<(), String> {
+        let command = self.preview();
+
+        #[cfg(windows)]
+        {
+            ProcessCommand::new("cmd")
+                .args(["/C", "start", "", "cmd", "/K", &command])
+                .status()
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let script = format!(
+                "tell application \"Terminal\" to do script \"{}\"",
+                command.replace('\\', "\\\\").replace('"', "\\\"")
+            );
+            ProcessCommand::new("osascript")
+                .args([
+                    "-e",
+                    &script,
+                    "-e",
+                    "tell application \"Terminal\" to activate",
+                ])
+                .status()
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        }
+
+        #[cfg(not(any(windows, target_os = "macos")))]
+        {
+            // Keep the shell open after the command exits so its output stays
+            // readable in the new window.
+            let inner = format!("{command}; exec bash");
+            let emulators: &[&[&str]] = &[
+                &["x-terminal-emulator", "-e"],
+                &["gnome-terminal", "--"],
+                &["konsole", "-e"],
+                &["xfce4-terminal", "-e"],
+                &["mate-terminal", "-e"],
+                &["kitty"],
+                &["alacritty", "-e"],
+                &["xterm", "-e"],
+            ];
+            for prefix in emulators {
+                let mut process = ProcessCommand::new(prefix[0]);
+                process.args(&prefix[1..]).args(["sh", "-c", &inner]);
+                match process.status() {
+                    Ok(_) => return Ok(()),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error.to_string()),
+                }
+            }
+            Err(format!(
+                "no terminal emulator found; run '{command}' in a terminal yourself"
+            ))
+        }
+    }
 }
 
-#[cfg(test)]
 fn quote_if_needed(part: &str) -> String {
     if part.contains(char::is_whitespace) {
         format!("'{part}'")
@@ -94,6 +170,7 @@ fn quote_if_needed(part: &str) -> String {
 pub enum Mode {
     Normal,
     Wizard,
+    Info,
 }
 
 // --- wizard -----------------------------------------------------------------
@@ -504,10 +581,65 @@ fn default_memory() -> String {
     }
 }
 
-// --- sandbox list -----------------------------------------------------------
+// --- sandbox data -----------------------------------------------------------
 
-/// Fetch the names of the sandboxes known to `sbx` (one per line with `-q`).
-pub fn list_sandboxes() -> Result<Vec<String>, String> {
+/// A sandbox as shown in a dashboard block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Sandbox {
+    pub name: String,
+    pub status: String,
+}
+
+impl Sandbox {
+    pub fn new(name: String, status: String) -> Self {
+        Self { name, status }
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.status.trim().to_ascii_lowercase().contains("running")
+    }
+}
+
+/// Resource details shown in the info modal. Every value is optional because
+/// `sbx inspect` output varies between local/cloud sandboxes and versions.
+#[derive(Clone, Debug, Default)]
+pub struct SandboxDetails {
+    pub name: String,
+    pub status: String,
+    pub cpus: Option<String>,
+    pub memory: Option<String>,
+    pub root_size: Option<String>,
+    pub docker_size: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Fetch sandboxes with their status from `sbx ls --format json`. Falls back
+/// to `sbx ls -q` when structured output is unavailable.
+pub fn fetch_sandboxes() -> Result<Vec<Sandbox>, String> {
+    let structured = ProcessCommand::new("sbx")
+        .args(["ls", "--format", "json"])
+        .output()
+        .map_err(|error| error.to_string())?;
+
+    if structured.status.success()
+        && let Ok(value) = serde_json::from_slice::<Value>(&structured.stdout)
+    {
+        let rows = value
+            .as_array()
+            .or_else(|| value.get("sandboxes").and_then(Value::as_array));
+        if let Some(rows) = rows {
+            return Ok(rows
+                .iter()
+                .filter_map(|row| {
+                    let name = json_text(row, &["name", "sandbox_name"])?;
+                    let status = json_text(row, &["status", "state"])
+                        .unwrap_or_else(|| "unknown".to_owned());
+                    Some(Sandbox::new(name, status))
+                })
+                .collect());
+        }
+    }
+
     let output = ProcessCommand::new("sbx")
         .args(["ls", "-q"])
         .output()
@@ -526,19 +658,121 @@ pub fn list_sandboxes() -> Result<Vec<String>, String> {
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .map(str::to_owned)
+        .map(|name| Sandbox::new(name.to_owned(), "unknown".to_owned()))
         .collect())
+}
+
+/// Read resource details for one sandbox from `sbx inspect --format json`.
+pub fn inspect_sandbox(sandbox: &Sandbox) -> SandboxDetails {
+    let mut details = SandboxDetails {
+        name: sandbox.name.clone(),
+        status: sandbox.status.clone(),
+        ..SandboxDetails::default()
+    };
+
+    let output = match ProcessCommand::new("sbx")
+        .args(["inspect", &sandbox.name, "--format", "json"])
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) => {
+            details.error = Some(format!("Could not inspect sandbox: {error}"));
+            return details;
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        details.error = Some(if stderr.is_empty() {
+            format!("sbx inspect exited with {}.", output.status)
+        } else {
+            stderr
+        });
+        return details;
+    }
+
+    let value: Value = match serde_json::from_slice(&output.stdout) {
+        Ok(value) => value,
+        Err(error) => {
+            details.error = Some(format!("Could not parse sbx inspect output: {error}"));
+            return details;
+        }
+    };
+
+    details.cpus = json_text(&value, &["cpus", "cpu", "cpu_count", "vcpus"]);
+    details.memory = json_text(
+        &value,
+        &["memory", "memoryMiB", "memory_mib", "memory_mb", "mem"],
+    );
+    details.root_size = json_text(
+        &value,
+        &[
+            "root_size",
+            "rootSize",
+            "rootfs",
+            "root_filesystem_size",
+            "rootFilesystemSize",
+        ],
+    );
+    details.docker_size = json_text(
+        &value,
+        &[
+            "docker_size",
+            "dockerSize",
+            "docker",
+            "dind_volume_size",
+            "dindVolumeSize",
+        ],
+    );
+    details
+}
+
+/// Find a key near the root of a JSON document. `sbx inspect` nests the same
+/// fields at different depths depending on the sandbox, so a bounded search
+/// is more robust than a fixed path.
+fn find_key<'a>(value: &'a Value, key: &str, depth: usize) -> Option<&'a Value> {
+    if depth > 5 {
+        return None;
+    }
+    if let Some(map) = value.as_object() {
+        if let Some(found) = map.get(key) {
+            return Some(found);
+        }
+        for child in map.values() {
+            if let Some(found) = find_key(child, key, depth + 1) {
+                return Some(found);
+            }
+        }
+    } else if let Some(items) = value.as_array() {
+        for child in items {
+            if let Some(found) = find_key(child, key, depth + 1) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+fn json_text(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| match find_key(value, key, 0)? {
+        Value::String(text) if !text.is_empty() => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(boolean) => Some(boolean.to_string()),
+        _ => None,
+    })
 }
 
 // --- app --------------------------------------------------------------------
 
 pub struct App {
-    sandboxes: Vec<String>,
+    sandboxes: Vec<Sandbox>,
     selected: usize,
     grid_offset: usize,
     visible_rows: usize,
     mode: Mode,
     wizard: Wizard,
+    info: Option<SandboxDetails>,
+    pending_external: Option<PendingCommand>,
     message: String,
     should_quit: bool,
     click_targets: Vec<ClickTarget>,
@@ -553,6 +787,8 @@ impl App {
             visible_rows: 1,
             mode: Mode::Normal,
             wizard: Wizard::new(),
+            info: None,
+            pending_external: None,
             message: String::new(),
             should_quit: false,
             click_targets: Vec::new(),
@@ -573,11 +809,25 @@ impl App {
         &self.wizard
     }
 
+    pub fn info(&self) -> Option<&SandboxDetails> {
+        self.info.as_ref()
+    }
+
     pub fn message(&self) -> &str {
         &self.message
     }
 
-    pub fn sandboxes(&self) -> &[String] {
+    pub fn set_message(&mut self, message: impl Into<String>) {
+        self.message = message.into();
+    }
+
+    /// Taken by the event loop when an Exec button was clicked. The terminal
+    /// is suspended before the returned command is run.
+    pub fn take_external_command(&mut self) -> Option<PendingCommand> {
+        self.pending_external.take()
+    }
+
+    pub fn sandboxes(&self) -> &[Sandbox] {
         &self.sandboxes
     }
 
@@ -642,6 +892,11 @@ impl App {
             ClickAction::OpenWizard if self.mode == Mode::Normal => self.open_wizard(),
             ClickAction::CloseWizard if self.mode == Mode::Wizard => self.close_wizard(),
             ClickAction::CreateSandbox if self.mode == Mode::Wizard => self.create_from_button(),
+            ClickAction::Stop(index) if self.mode == Mode::Normal => self.stop_sandbox(index),
+            ClickAction::Exec(index) if self.mode == Mode::Normal => self.exec_sandbox(index),
+            ClickAction::Remove(index) if self.mode == Mode::Normal => self.remove_sandbox(index),
+            ClickAction::Info(index) if self.mode == Mode::Normal => self.open_info(index),
+            ClickAction::CloseInfo if self.mode == Mode::Info => self.close_info(),
             _ => {}
         }
     }
@@ -665,6 +920,22 @@ impl App {
                 KeyCode::End => self.select(self.block_count() - 1),
                 KeyCode::Enter if self.is_new_sandbox_selected() => self.open_wizard(),
                 KeyCode::Char('r') | KeyCode::Char('R') => self.refresh_sandboxes(),
+                KeyCode::Char('s') | KeyCode::Char('S') if !self.is_new_sandbox_selected() => {
+                    let index = self.selected;
+                    self.stop_sandbox(index);
+                }
+                KeyCode::Char('x') | KeyCode::Char('X') if !self.is_new_sandbox_selected() => {
+                    let index = self.selected;
+                    self.exec_sandbox(index);
+                }
+                KeyCode::Char('d') | KeyCode::Char('D') if !self.is_new_sandbox_selected() => {
+                    let index = self.selected;
+                    self.remove_sandbox(index);
+                }
+                KeyCode::Char('i') | KeyCode::Char('I') if !self.is_new_sandbox_selected() => {
+                    let index = self.selected;
+                    self.open_info(index);
+                }
                 _ => {}
             },
             Mode::Wizard => match self.wizard.handle_key(key, &mut self.message) {
@@ -675,7 +946,61 @@ impl App {
                     self.finish_wizard(pending, &name);
                 }
             },
+            Mode::Info => match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('i') => {
+                    self.close_info()
+                }
+                _ => {}
+            },
         }
+    }
+
+    fn open_info(&mut self, index: usize) {
+        let Some(sandbox) = self.sandboxes.get(index).cloned() else {
+            return;
+        };
+        self.selected = index;
+        self.info = Some(inspect_sandbox(&sandbox));
+        self.mode = Mode::Info;
+    }
+
+    fn close_info(&mut self) {
+        self.mode = Mode::Normal;
+        self.info = None;
+        self.message.clear();
+    }
+
+    fn stop_sandbox(&mut self, index: usize) {
+        let Some(name) = self.sandbox_name(index) else {
+            return;
+        };
+        let command = PendingCommand::new("sbx", &["stop", &name]);
+        self.run_sbx(command, format!("Sandbox '{name}' stopped."));
+    }
+
+    fn exec_sandbox(&mut self, index: usize) {
+        let Some(name) = self.sandbox_name(index) else {
+            return;
+        };
+        self.pending_external = Some(PendingCommand::new(
+            "sbx",
+            &["exec", "-it", &name, "bash"],
+        ));
+        self.message = format!("Opening external terminal for '{name}'...");
+    }
+
+    fn remove_sandbox(&mut self, index: usize) {
+        let Some(name) = self.sandbox_name(index) else {
+            return;
+        };
+        // The TUI has no TTY to answer sbx's confirmation prompt, so removal
+        // is explicit and non-interactive here.
+        let command = PendingCommand::new("sbx", &["remove", &name, "--force"]);
+        self.run_sbx(command, format!("Sandbox '{name}' removed."));
+    }
+
+    fn sandbox_name(&self, index: usize) -> Option<String> {
+        self.sandboxes.get(index).map(|sandbox| sandbox.name.clone())
     }
 
     fn open_wizard(&mut self) {
@@ -708,7 +1033,7 @@ impl App {
     }
 
     fn finish_wizard(&mut self, pending: PendingCommand, name: &str) {
-        self.execute(pending, name);
+        self.run_sbx(pending, format!("Sandbox '{name}' created."));
         self.mode = Mode::Normal;
         self.wizard = Wizard::new();
     }
@@ -770,19 +1095,19 @@ impl App {
 
     fn refresh_sandboxes(&mut self) {
         self.message.clear();
-        match list_sandboxes() {
-            Ok(names) => self.sandboxes = names,
+        match fetch_sandboxes() {
+            Ok(sandboxes) => self.sandboxes = sandboxes,
             Err(error) => self.message = format!("Could not list sandboxes: {error}"),
         }
         self.clamp_navigation();
     }
 
-    fn execute(&mut self, pending: PendingCommand, name: &str) {
+    fn run_sbx(&mut self, pending: PendingCommand, success: String) {
         match pending.run() {
             Ok(output) if output.status.success() => {
                 self.refresh_sandboxes();
                 if self.message.is_empty() {
-                    self.message = format!("Sandbox '{name}' created.");
+                    self.message = success;
                 }
             }
             Ok(output) => {
@@ -790,8 +1115,8 @@ impl App {
                 let detail = stderr
                     .lines()
                     .find(|line| !line.trim().is_empty())
-                    .unwrap_or("sbx create failed");
-                self.message = format!("Could not create sandbox: {detail}");
+                    .unwrap_or("sbx command failed");
+                self.message = format!("Could not run sbx: {detail}");
             }
             Err(error) => self.message = format!("Could not run sbx: {error}"),
         }
@@ -801,8 +1126,20 @@ impl App {
 #[cfg(test)]
 impl App {
     pub fn with_sandboxes(names: &[&str]) -> Self {
+        Self::with_sandbox_statuses(
+            &names
+                .iter()
+                .map(|name| (*name, "running"))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    pub fn with_sandbox_statuses(entries: &[(&str, &str)]) -> Self {
         let mut app = Self::new();
-        app.sandboxes = names.iter().map(|name| (*name).to_owned()).collect();
+        app.sandboxes = entries
+            .iter()
+            .map(|(name, status)| Sandbox::new((*name).to_owned(), (*status).to_owned()))
+            .collect();
         app.clamp_navigation();
         app
     }
@@ -854,5 +1191,43 @@ mod tests {
             wizard.preview(),
             "DOCKER_SANDBOXES_ROOT_SIZE=40g DOCKER_SANDBOXES_DOCKER_SIZE=20g sbx create --name demo-tui opencode --cpus 2 --memory 4g"
         );
+    }
+
+    #[test]
+    fn sandbox_status_detects_running() {
+        assert!(Sandbox::new("a".into(), "running".into()).is_running());
+        assert!(Sandbox::new("a".into(), "● running (detached)".into()).is_running());
+        assert!(!Sandbox::new("a".into(), "stopped".into()).is_running());
+        assert!(!Sandbox::new("a".into(), "unknown".into()).is_running());
+    }
+
+    #[test]
+    fn sandbox_actions_build_expected_commands() {
+        assert_eq!(
+            PendingCommand::new("sbx", &["stop", "demo"]).preview(),
+            "sbx stop demo"
+        );
+        assert_eq!(
+            PendingCommand::new("sbx", &["exec", "-it", "demo", "bash"]).preview(),
+            "sbx exec -it demo bash"
+        );
+        assert_eq!(
+            PendingCommand::new("sbx", &["remove", "demo", "--force"]).preview(),
+            "sbx remove demo --force"
+        );
+    }
+
+    #[test]
+    fn json_lookup_finds_nested_resource_fields() {
+        let value: Value = serde_json::from_str(
+            r#"{"name":"demo","resources":{"cpus":2,"memory":"4g"},"sizes":{"rootfs":"20g","docker":"10g"}}"#,
+        )
+        .unwrap();
+        assert_eq!(json_text(&value, &["name"]).as_deref(), Some("demo"));
+        assert_eq!(json_text(&value, &["cpus"]).as_deref(), Some("2"));
+        assert_eq!(json_text(&value, &["memory"]).as_deref(), Some("4g"));
+        assert_eq!(json_text(&value, &["rootfs"]).as_deref(), Some("20g"));
+        assert_eq!(json_text(&value, &["docker"]).as_deref(), Some("10g"));
+        assert_eq!(json_text(&value, &["missing"]), None);
     }
 }

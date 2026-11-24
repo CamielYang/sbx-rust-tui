@@ -70,6 +70,18 @@ fn run(terminal: &mut Tui, app: &mut App) -> Result<()> {
     while !app.should_quit() {
         terminal.draw(|frame| ui::render(frame, app))?;
 
+        // Exec opens a real terminal, so leave the alternate screen and raw
+        // mode first, then rebuild the TUI once the child is done.
+        if let Some(pending) = app.take_external_command() {
+            restore_terminal(terminal)?;
+            let result = pending.run_in_external_terminal();
+            *terminal = init_terminal()?;
+            match result {
+                Ok(()) => app.set_message("External terminal closed."),
+                Err(error) => app.set_message(format!("Could not open terminal: {error}")),
+            }
+        }
+
         if event::poll(Duration::from_millis(100))? {
             match event::read()? {
                 // Ignore key-release and repeat events; handle each press once.
