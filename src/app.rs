@@ -79,7 +79,6 @@ pub struct App {
     pending_external: Option<PendingCommand>,
     creation: Option<workers::Creation>,
     spinner_index: usize,
-    message: String,
     toasts: ToasterState<'static>,
     started: Instant,
     should_quit: bool,
@@ -112,7 +111,6 @@ impl App {
             pending_external: None,
             creation: None,
             spinner_index: 0,
-            message: String::new(),
             toasts: ToasterState::new(),
             started: Instant::now(),
             should_quit: false,
@@ -217,8 +215,23 @@ impl App {
         }
     }
 
-    pub fn message(&self) -> &str {
-        &self.message
+    /// Text of the newest toast. Tests use this to check what the user was
+    /// told; the UI itself shows notifications only as toasts.
+    #[cfg(test)]
+    pub fn message(&self) -> String {
+        self.toasts()
+            .entries()
+            .last()
+            .map(|entry| {
+                let toast = entry.toast();
+                match toast.description() {
+                    Some(detail) if !detail.is_empty() => {
+                        format!("{}: {detail}", toast.title())
+                    }
+                    _ => toast.title().to_owned(),
+                }
+            })
+            .unwrap_or_default()
     }
 
     pub fn now(&self) -> Duration {
@@ -234,10 +247,6 @@ impl App {
     }
 
     fn notify(&mut self, toast: Toast<'static>, detail: Option<String>) {
-        self.message = match detail {
-            Some(ref detail) if !detail.is_empty() => format!("{}: {detail}", toast.title()),
-            _ => toast.title().to_owned(),
-        };
         let toast = match detail {
             Some(detail) if !detail.is_empty() => toast.with_description(detail),
             _ => toast,

@@ -25,7 +25,6 @@ impl App {
             result: receiver,
         });
         self.spinner_index = 0;
-        self.message = format!("Creating sandbox '{name}'...");
         self.toasts.push(
             Toast::loading(format!("Creating sandbox '{name}'"))
                 .with_id(CREATE_TOAST)

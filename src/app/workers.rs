@@ -158,7 +158,6 @@ impl App {
                 .persistent(),
             now,
         );
-        self.message = format!("Creating sandbox '{name}'...");
     }
 
     pub(super) fn finish_creation(&mut self, result: io::Result<std::process::Output>, name: &str) {

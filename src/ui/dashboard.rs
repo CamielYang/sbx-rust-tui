@@ -308,27 +308,14 @@ fn place_button(
 
 pub(super) fn paint_footer(
     ctx: &mut DeclareCtx<'_, App, Msg>,
-    app: &App,
     theme: &Theme,
     area: Rect,
 ) {
-    let message = app.message();
-    let color = if message.contains("Could not") || message.contains("Invalid") {
-        theme.destructive
-    } else if message.contains("Warning") {
-        theme.warning
-    } else {
-        theme.muted_foreground
-    };
-    let message = if message.is_empty() {
-        "N new · R refresh · S start/stop · X exec · P ports · I info · D remove · Ctrl+C quit"
-    } else {
-        message
-    };
+    // Notifications live in toasts; the footer is a permanent shortcut legend.
     ctx.paint_widget(
         Paragraph::new(Line::from(Span::styled(
-            format!(" {message}"),
-            Style::default().fg(color),
+            " N new · R refresh · S start/stop · X exec · P ports · I info · D remove · Ctrl+C quit",
+            Style::default().fg(theme.muted_foreground),
         ))),
         area,
     );

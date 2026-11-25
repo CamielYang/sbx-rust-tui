@@ -28,8 +28,8 @@ The screen uses ratcn components and its Tokyo Night theme:
   those commands runs until you explicitly confirm it,
 - a **Published ports** dialog for running sandboxes, with a table of published
   mappings and an **Add port** button at the top,
-- a footer with the latest message and keyboard shortcuts,
-- transient toast notifications in the top-right corner.
+- a footer that always shows the keyboard shortcuts,
+- transient toast notifications in the top-right corner for messages.
 
 Focus, hover, hit-testing, and modal layering are handled by ratcn's runtime;
 `App` owns all state and applies the messages components emit.
@@ -38,7 +38,7 @@ Sandbox names and statuses come from `sbx ls --format json` at startup and are
 refreshed after create/start/stop/remove, when `R` is pressed, and every five
 seconds. Older `sbx` versions without structured output fall back to `sbx ls -q`
 and show status `unknown`. If `sbx` is missing or fails, the last known list is
-kept and the error appears in the footer and as a toast. While the Info dialog
+kept and the error appears as a toast. While the Info dialog
 is open, its live metrics are re-collected every ten seconds on a worker thread.
 The ports dialog reads `sbx port ls <name> --format json` when it opens and
 again after a successful publish; a read failure is shown inside the dialog.
@@ -48,7 +48,7 @@ again after a successful publish; a read failure is shown inside the dialog.
 | Button | Command | Behaviour |
 | --- | --- | --- |
 | Start / Stop | `sbx run -d --name {name}` / `sbx stop {name}` | Opens a confirmation dialog first. `sbx` has no standalone `start` verb, so a stopped sandbox is started by re-attaching with `run --name`; `-d` leaves it running detached. |
-| Exec shell | `sbx exec -it {name} bash` | Suspends the TUI, opens an external terminal, and restores the TUI when it closes. On Linux it tries common terminal emulators in order; on macOS it uses Terminal.app; on Windows a new `cmd` window. If no terminal opens, the command is shown in the footer. |
+| Exec shell | `sbx exec -it {name} bash` | Suspends the TUI, opens an external terminal, and restores the TUI when it closes. On Linux it tries common terminal emulators in order; on macOS it uses Terminal.app; on Windows a new `cmd` window. If no terminal opens, the command is shown in a toast. |
 | Publish ports | `sbx port ls {name} --format json`, then `sbx port publish {name} {host}:{sandbox}` | Opens the published-ports dialog for a running sandbox; **Add port** validates the two fields and publishes the mapping, then refreshes the table. |
 | Info | `sbx inspect {name} --format json` then `sbx exec {name} -- sh -c …` | Opens a themed dialog with status, CPU as `{cores} ({usage}%)`, and memory/root/Docker usage as `used / total`. Guest metrics are collected when Info opens and every ten seconds while it stays open; `sbx inspect` supplies fallback values. Missing values render as `—`; errors appear as a note. |
 | Remove | `sbx remove {name} --force` | Opens a confirmation dialog first; `--force` avoids `sbx`'s own prompt, which the TUI cannot answer. |
@@ -114,7 +114,7 @@ Creation runs on a worker thread. While it is in flight, a persistent loading
 toast and themed progress bar animate, all inputs and buttons are disabled, and
 repeated keys cannot start a second sandbox. `Ctrl+C` still quits. On success
 the dialog closes, the list refreshes, and a success toast appears; on failure
-the dialog stays open with the invalid field marked and the error in the footer.
+the dialog stays open with the invalid field marked and the error in a toast.
 
 ## Published ports dialog
 
@@ -130,7 +130,7 @@ Pressing **Add port** validates both as numbers from 1 to 65535 and runs
 `sbx port publish {name} {host}:{sandbox}`. With the defaults unchanged, that is
 `sbx port publish {name} 8080:3000`. On success the table is re-read and a toast
 confirms the mapping; on failure the dialog stays open and shows the error in
-its status line and in the footer. The dialog closes with `Esc` or **Close**.
+its status line and as a toast. The dialog closes with `Esc` or **Close**.
 More ports than fit are counted in the status line.
 
 ## Mouse

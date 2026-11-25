@@ -449,7 +449,7 @@ fn polling_info_installs_fresh_metrics_and_drops_stale_ones() {
 }
 
 #[test]
-fn status_tick_updates_modal_without_clearing_message() {
+fn status_tick_updates_modal_without_clearing_toast() {
     let mut app = App::with_sandbox_statuses(&[("alpha", "stopped")]);
     app.notify_info("keep me", None);
     app.info = Some(SandboxDetails {

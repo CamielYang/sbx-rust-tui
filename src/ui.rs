@@ -163,7 +163,7 @@ pub fn declare(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme) {
     paint_header(ctx, app, &theme, vertical[0]);
     paint_toolbar(ctx, app, &theme, vertical[2]);
     paint_body(ctx, app, &theme, vertical[4]);
-    paint_footer(ctx, app, &theme, vertical[6]);
+    paint_footer(ctx, &theme, vertical[6]);
 
     // Modals are declared last so their layers cover the dashboard. Ids come
     // from App's ModalState, which Ratcn validates against this declaration.

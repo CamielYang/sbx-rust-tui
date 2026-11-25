@@ -42,6 +42,19 @@ fn renders_dashboard_with_themated_controls() {
 }
 
 #[test]
+fn footer_keeps_controls_when_a_notification_arrives() {
+    let mut app = App::with_sandbox_statuses(&[("alpha", "running")]);
+    app.notify_error("Could not run sbx", "boom");
+
+    let screen = render(&app);
+    assert!(screen.contains(
+        "N new · R refresh · S start/stop · X exec · P ports · I info · D remove · Ctrl+C quit"
+    ));
+    assert!(!screen.contains("Could not run sbx"));
+    assert!(app.message().contains("boom"));
+}
+
+#[test]
 fn actions_pane_labels_status_and_spaces_it_from_buttons() {
     let app = App::with_sandbox_statuses(&[("alpha", "running")]);
     let screen = render(&app);
