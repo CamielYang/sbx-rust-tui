@@ -570,7 +570,7 @@ pub(super) fn workspace_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
         .description("Choose where the sandbox workspace should live")
         .outer_width(66)
         .on_dismiss(|| Msg::CancelWorkspace)
-        .content(12, move |ctx| {
+        .content(18, move |ctx| {
             let rows = Layout::vertical([
                 Constraint::Length(1),
                 Constraint::Length(1),
