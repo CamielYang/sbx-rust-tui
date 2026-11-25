@@ -45,11 +45,6 @@ impl App {
         SPINNER_FRAMES[self.spinner_index % SPINNER_FRAMES.len()]
     }
 
-    /// Fraction for the themed progress bar shown in the create dialog.
-    pub fn progress(&self) -> f64 {
-        (self.spinner_index % SPINNER_FRAMES.len()) as f64 / (SPINNER_FRAMES.len() - 1) as f64
-    }
-
     /// Advance the spinner once per rendered frame, but only while a sandbox
     /// is actually being created.
     pub fn tick(&mut self) {

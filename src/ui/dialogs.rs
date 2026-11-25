@@ -4,7 +4,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
-use ratcn::{Button, Dialog, InputState, ListItem, ProgressWidget, Select, Theme};
+use ratcn::{Button, Dialog, InputState, ListItem, Select, Theme};
 
 use super::dashboard::{REMOVE_RED, START_GREEN, STOP_ORANGE, action_style};
 use super::widgets::{detail_line, field_row, input, join_usage};
@@ -12,6 +12,10 @@ use super::*;
 use crate::app::{AGENTS, FormField, PendingAction, PortField, PortMapping, SandboxDetails};
 
 // --- create dialog ----------------------------------------------------------
+
+/// Six form fields plus the status and creation message, with a blank row
+/// between each one.
+const CREATE_CONTENT_ROWS: usize = 8;
 
 pub(super) fn create_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
     let theme = *theme;
@@ -97,7 +101,6 @@ pub(super) fn create_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
     } else {
         theme.muted_foreground
     };
-    let progress = app.progress();
     let creating_message = if creating {
         format!(
             "{}  Creating sandbox '{}'…",
@@ -113,31 +116,31 @@ pub(super) fn create_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
         .description("Create a Docker Sandbox with sbx")
         .outer_width(70)
         .on_dismiss(|| Msg::CancelWizard)
-        .content(9, move |ctx| {
-            let rows = Layout::vertical(vec![Constraint::Length(1); 9]).split(ctx.area());
-            field_row(ctx, rows[0], "Name", name, theme);
-            field_row(ctx, rows[1], "Agent", agent, theme);
-            field_row(ctx, rows[2], "Root size (GB)", root, theme);
-            field_row(ctx, rows[3], "Docker data (GB)", docker, theme);
-            field_row(ctx, rows[4], "CPUs", cpus, theme);
-            field_row(ctx, rows[5], "Memory", memory, theme);
+        .content((CREATE_CONTENT_ROWS * 2 - 1) as u16, move |ctx| {
+            let rows = Layout::vertical(vec![Constraint::Length(1); CREATE_CONTENT_ROWS * 2 - 1])
+                .split(ctx.area());
+            let row = |index: usize| rows[index * 2];
+            field_row(ctx, row(0), "Name", name, theme);
+            field_row(ctx, row(1), "Agent", agent, theme);
+            field_row(ctx, row(2), "Root size (GB)", root, theme);
+            field_row(ctx, row(3), "Docker data (GB)", docker, theme);
+            field_row(ctx, row(4), "CPUs", cpus, theme);
+            field_row(ctx, row(5), "Memory", memory, theme);
 
             ctx.paint_widget(
                 Paragraph::new(Line::from(Span::styled(
                     format!(" {status}"),
                     Style::default().fg(status_color),
                 ))),
-                rows[6],
+                row(6),
             );
             ctx.paint_widget(
                 Paragraph::new(Line::from(Span::styled(
                     format!(" {creating_message}"),
                     Style::default().fg(theme.primary),
                 ))),
-                rows[7],
+                row(7),
             );
-            // One bare bar: the row above carries the creation message.
-            ctx.paint_widget(ProgressWidget::new(progress).themed(&theme), rows[8]);
         })
         .action(
             "cancel",

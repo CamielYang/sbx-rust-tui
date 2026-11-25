@@ -113,7 +113,7 @@ fn run(terminal: &mut Tui, app: &mut App) -> Result<()> {
 
         let now = Instant::now();
         if now >= next_status_check {
-            // Skip the synchronous `sbx ls` while creating so the progress bar
+            // Skip the synchronous `sbx ls` while creating so the spinner
             // keeps animating; the next tick after completion refreshes.
             if !app.is_creating() {
                 app.refresh_statuses();

@@ -106,6 +106,17 @@ fn renders_create_dialog() {
     assert!(screen.contains("opencode"));
     assert!(!screen.contains("Ready to create"));
 
+    // Each field gets its own row with a blank row between neighbours.
+    let rows: Vec<&str> = screen.lines().collect();
+    let name_row = rows.iter().position(|row| row.contains("Name")).unwrap();
+    let agent_row = rows.iter().position(|row| row.contains("Agent")).unwrap();
+    assert_eq!(agent_row, name_row + 2);
+    assert!(
+        rows[name_row + 1]
+            .trim_matches(|c: char| c == '│' || c.is_whitespace())
+            .is_empty()
+    );
+
     // The agent dropdown is a popup layer inside the modal; it must be
     // declarable without colliding with the dialog's own ids.
     app.set_agent_open(true);
