@@ -92,6 +92,12 @@ Inside the wizard modal:
 | `y` / `Enter` | Create the sandbox on the review step |
 | `n` / `Esc` | Return to the memory step from review |
 
+While `sbx create` runs, the modal shows a spinner and "Creating sandbox …";
+keys, clicks, and the wizard's close button are ignored so repeated presses
+cannot start a second sandbox. `Ctrl+C` still quits. On success the wizard
+closes and the grid refreshes; on failure it stays on **Review** with the error
+in the footer so the settings can be corrected or the wizard cancelled.
+
 ## Mouse
 
 Mouse capture is enabled on startup and disabled when the app exits (including on
@@ -146,10 +152,10 @@ The two size variables are passed only to the child process via
 
 ## Notes / possible next steps
 
-- Sandbox creation, starting, stopping, removal, and inspection run
-  synchronously; the UI is blocked while those `sbx` commands run. Moving
-  execution to a worker thread
-  with a channel would fix that.
+- Sandbox creation runs on a worker thread so the modal can animate a spinner
+  and ignore input until `sbx create` finishes. Starting, stopping, removal,
+  and inspection still run synchronously; the UI is blocked while those `sbx`
+  commands run. Moving them to worker threads would fix that too.
 - Live resource values in the info modal come from `nproc`, `/proc/meminfo`, and
   `df -k` inside the microVM via `sbx exec {name} -- sh -c …`. Used space is
   `total - available` (memory uses `MemAvailable` when present). These commands

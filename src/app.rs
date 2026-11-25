@@ -1,5 +1,7 @@
 use std::io;
 use std::process::Command as ProcessCommand;
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
 use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -20,6 +22,9 @@ pub const AGENTS: &[&str] = &[
 ];
 
 pub const GRID_COLUMNS: usize = 3;
+
+/// Advanced once per event-loop frame while `sbx create` runs in the worker.
+pub const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// How often the dashboard re-reads `sbx ls` to keep running-state dots fresh.
 /// VM metrics are deliberately not part of this tick; they are only collected
@@ -964,6 +969,13 @@ fn json_text(value: &Value, keys: &[&str]) -> Option<String> {
 
 // --- app --------------------------------------------------------------------
 
+/// A `sbx create` running on a worker thread. The UI keeps rendering (and
+/// ignoring input) until the result arrives on the channel.
+struct Creation {
+    name: String,
+    result: Receiver<io::Result<std::process::Output>>,
+}
+
 pub struct App {
     sandboxes: Vec<Sandbox>,
     selected: usize,
@@ -973,6 +985,8 @@ pub struct App {
     wizard: Wizard,
     info: Option<SandboxDetails>,
     pending_external: Option<PendingCommand>,
+    creation: Option<Creation>,
+    spinner_index: usize,
     message: String,
     should_quit: bool,
     click_targets: Vec<ClickTarget>,
@@ -989,6 +1003,8 @@ impl App {
             wizard: Wizard::new(),
             info: None,
             pending_external: None,
+            creation: None,
+            spinner_index: 0,
             message: String::new(),
             should_quit: false,
             click_targets: Vec::new(),
@@ -1025,6 +1041,49 @@ impl App {
     /// is suspended before the returned command is run.
     pub fn take_external_command(&mut self) -> Option<PendingCommand> {
         self.pending_external.take()
+    }
+
+    /// True from the moment the create button/key is pressed until the worker
+    /// thread reports back. Input is ignored during this window.
+    pub fn is_creating(&self) -> bool {
+        self.creation.is_some()
+    }
+
+    pub fn creating_name(&self) -> Option<&str> {
+        self.creation.as_ref().map(|creation| creation.name.as_str())
+    }
+
+    pub fn spinner(&self) -> &'static str {
+        SPINNER_FRAMES[self.spinner_index % SPINNER_FRAMES.len()]
+    }
+
+    /// Advance the spinner once per rendered frame, but only while a sandbox
+    /// is actually being created.
+    pub fn tick(&mut self) {
+        if self.is_creating() {
+            self.spinner_index = self.spinner_index.wrapping_add(1);
+        }
+    }
+
+    /// Pick up a finished `sbx create` without blocking the event loop.
+    pub fn poll_creation(&mut self) {
+        let (name, result) = {
+            let Some(creation) = self.creation.as_ref() else {
+                return;
+            };
+            let result = match creation.result.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Some(Err(io::Error::other("creation worker stopped")))
+                }
+                Err(mpsc::TryRecvError::Empty) => None,
+            };
+            (creation.name.clone(), result)
+        };
+        if let Some(result) = result {
+            self.creation = None;
+            self.finish_creation(result, &name);
+        }
     }
 
     pub fn sandboxes(&self) -> &[Sandbox] {
@@ -1066,6 +1125,11 @@ impl App {
 
     /// Handle a mouse event against the most recently rendered hit regions.
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        // Ignore clicks while creation is in flight; the modal's buttons are
+        // drawn disabled so there is no second way to start a create.
+        if self.is_creating() {
+            return;
+        }
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 // Reverse order: modal widgets are drawn last and must win
@@ -1113,6 +1177,11 @@ impl App {
     pub fn handle_key(&mut self, key: KeyEvent) {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
+            return;
+        }
+        // Ignore repeated Enter/y, navigation, and even Esc while `sbx create`
+        // runs. Ctrl+C above stays available as the escape hatch.
+        if self.is_creating() {
             return;
         }
 
@@ -1268,9 +1337,16 @@ impl App {
     }
 
     fn finish_wizard(&mut self, pending: PendingCommand, name: &str) {
-        self.run_sbx(pending, format!("Sandbox '{name}' created."));
-        self.mode = Mode::Normal;
-        self.wizard = Wizard::new();
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = sender.send(pending.run());
+        });
+        self.creation = Some(Creation {
+            name: name.to_owned(),
+            result: receiver,
+        });
+        self.spinner_index = 0;
+        self.message = format!("Creating sandbox '{name}'...");
     }
 
     fn select(&mut self, index: usize) {
@@ -1356,7 +1432,11 @@ impl App {
     }
 
     fn run_sbx(&mut self, pending: PendingCommand, success: String) {
-        match pending.run() {
+        self.handle_sbx_result(pending.run(), success);
+    }
+
+    fn handle_sbx_result(&mut self, result: io::Result<std::process::Output>, success: String) {
+        match result {
             Ok(output) if output.status.success() => {
                 self.refresh_sandboxes();
                 if self.message.is_empty() {
@@ -1374,10 +1454,45 @@ impl App {
             Err(error) => self.message = format!("Could not run sbx: {error}"),
         }
     }
+
+    fn finish_creation(&mut self, result: io::Result<std::process::Output>, name: &str) {
+        let succeeded = matches!(&result, Ok(output) if output.status.success());
+        self.handle_sbx_result(result, format!("Sandbox '{name}' created."));
+        if succeeded {
+            self.mode = Mode::Normal;
+            self.wizard = Wizard::new();
+        }
+        // On failure the wizard stays open on Review so the user can retry or
+        // back out; the footer carries the error from handle_sbx_result.
+    }
 }
 
 #[cfg(test)]
 impl App {
+    /// Put the app into the same state `finish_wizard` does, without spawning
+    /// a real `sbx` process. The sender is dropped, so `poll_creation` observes
+    /// a disconnected worker.
+    pub fn begin_creation_for_test(&mut self, name: &str) {
+        let (sender, receiver) = mpsc::channel();
+        drop(sender);
+        self.creation = Some(Creation {
+            name: name.to_owned(),
+            result: receiver,
+        });
+        self.spinner_index = 0;
+        self.message = format!("Creating sandbox '{name}'...");
+        self.mode = Mode::Wizard;
+    }
+
+    pub fn complete_creation_for_test(
+        &mut self,
+        name: &str,
+        result: io::Result<std::process::Output>,
+    ) {
+        self.creation = None;
+        self.finish_creation(result, name);
+    }
+
     pub fn with_sandboxes(names: &[&str]) -> Self {
         Self::with_sandbox_statuses(
             &names
@@ -1444,6 +1559,107 @@ mod tests {
             wizard.preview(),
             "DOCKER_SANDBOXES_ROOT_SIZE=40g DOCKER_SANDBOXES_DOCKER_SIZE=20g sbx create --name demo-tui opencode --cpus 2 --memory 4g"
         );
+    }
+
+    #[cfg(unix)]
+    fn fake_output(success: bool, stderr: &str) -> std::process::Output {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(if success { 0 } else { 1 }),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    #[cfg(windows)]
+    fn fake_output(success: bool, stderr: &str) -> std::process::Output {
+        use std::os::windows::process::ExitStatusExt;
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(if success { 0 } else { 1 }),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn creation_ignores_input_until_worker_reports() {
+        let mut app = App::with_sandboxes(&[]);
+        app.begin_creation_for_test("demo");
+        assert!(app.is_creating());
+        assert_eq!(app.creating_name(), Some("demo"));
+
+        for key in [
+            KeyCode::Char('q'),
+            KeyCode::Esc,
+            KeyCode::Enter,
+            KeyCode::Char('y'),
+        ] {
+            app.handle_key(KeyEvent::new(key, KeyModifiers::NONE));
+        }
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(app.is_creating());
+        assert!(matches!(app.mode(), Mode::Wizard));
+
+        // Ctrl+C remains available as an escape hatch.
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.should_quit());
+
+        // The test worker's channel is disconnected: poll reports the failure
+        // instead of leaving the UI stuck in the creating state.
+        app.poll_creation();
+        assert!(!app.is_creating());
+        assert!(matches!(app.mode(), Mode::Wizard));
+        assert!(app.message().contains("creation worker stopped"));
+    }
+
+    #[test]
+    fn finish_wizard_starts_creation_without_blocking() {
+        let mut app = App::with_sandboxes(&[]);
+        #[cfg(unix)]
+        let pending = PendingCommand::new("true", &[]);
+        #[cfg(windows)]
+        let pending = PendingCommand::new("cmd", &["/C", "exit", "0"]);
+        app.finish_wizard(pending, "demo");
+        assert!(app.is_creating());
+        assert_eq!(app.creating_name(), Some("demo"));
+    }
+
+    #[test]
+    fn creation_success_closes_wizard() {
+        let mut app = App::with_sandboxes(&[]);
+        app.begin_creation_for_test("demo");
+        app.complete_creation_for_test("demo", Ok(fake_output(true, "")));
+        assert!(!app.is_creating());
+        assert!(matches!(app.mode(), Mode::Normal));
+    }
+
+    #[test]
+    fn creation_failure_keeps_wizard_open_for_retry() {
+        let mut app = App::with_sandboxes(&[]);
+        app.begin_creation_for_test("demo");
+        app.complete_creation_for_test("demo", Err(io::Error::other("boom")));
+        assert!(!app.is_creating());
+        assert!(matches!(app.mode(), Mode::Wizard));
+        assert!(app.message().contains("Could not run sbx: boom"));
+    }
+
+    #[test]
+    fn spinner_advances_only_while_creating() {
+        let mut app = App::with_sandboxes(&[]);
+        app.tick();
+        let idle = app.spinner();
+        app.tick();
+        assert_eq!(app.spinner(), idle);
+
+        app.begin_creation_for_test("demo");
+        let first = app.spinner();
+        app.tick();
+        assert_ne!(app.spinner(), first);
     }
 
     #[test]

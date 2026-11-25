@@ -32,7 +32,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     render_footer(frame, footer_area, app);
 
     match mode {
-        Mode::Wizard => render_modal(frame, body, app.wizard(), &mut click_targets),
+        Mode::Wizard => render_modal(frame, body, app, &mut click_targets),
         Mode::Info => {
             if let Some(details) = app.info() {
                 render_info_modal(frame, body, details, &mut click_targets);
@@ -240,7 +240,7 @@ fn render_modal_chrome(
     frame: &mut Frame,
     rect: Rect,
     title: &str,
-    close_action: ClickAction,
+    close_action: Option<ClickAction>,
     click_targets: &mut Vec<ClickTarget>,
 ) -> Option<Rect> {
     frame.render_widget(Clear, rect);
@@ -261,22 +261,27 @@ fn render_modal_chrome(
             width: close_width,
             height: 1,
         };
-        frame.render_widget(
-            Paragraph::new("[X]").style(
-                Style::default()
-                    .fg(Color::Red)
-                    .bg(Color::Black)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            close_rect,
-        );
-        // Include the adjacent border corner in the hit area: users tend to
-        // click the very top-right cell of the modal.
-        let close_hit_area = Rect {
-            width: (close_width + 1).min(rect.width),
-            ..close_rect
+        let close_style = match close_action {
+            Some(_) => Style::default()
+                .fg(Color::Red)
+                .bg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+            None => Style::default()
+                .fg(Color::DarkGray)
+                .bg(Color::Black)
+                .add_modifier(Modifier::DIM),
         };
-        click_targets.push(ClickTarget::new(close_hit_area, close_action));
+        frame.render_widget(Paragraph::new("[X]").style(close_style), close_rect);
+        // Include the adjacent border corner in the hit area: users tend to
+        // click the very top-right cell of the modal. While creating, the
+        // button stays visible but is dimmed and has no hit region.
+        if let Some(action) = close_action {
+            let close_hit_area = Rect {
+                width: (close_width + 1).min(rect.width),
+                ..close_rect
+            };
+            click_targets.push(ClickTarget::new(close_hit_area, action));
+        }
     }
 
     Some(inner)
@@ -285,27 +290,35 @@ fn render_modal_chrome(
 fn render_modal(
     frame: &mut Frame,
     area: Rect,
-    wizard: &Wizard,
+    app: &App,
     click_targets: &mut Vec<ClickTarget>,
 ) {
     let Some(rect) = modal_rect(area) else {
         return;
     };
-    let Some(inner) = render_modal_chrome(
-        frame,
-        rect,
-        " New Sandbox ",
-        ClickAction::CloseWizard,
-        click_targets,
-    ) else {
+    let creating = app.is_creating();
+    let close_action = if creating {
+        None
+    } else {
+        Some(ClickAction::CloseWizard)
+    };
+    let Some(inner) = render_modal_chrome(frame, rect, " New Sandbox ", close_action, click_targets)
+    else {
         return;
     };
 
     // Reserve the last inner row for the Create button.
     let [content_area, button_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
-    let paragraph = Paragraph::new(wizard_lines(wizard)).wrap(Wrap { trim: false });
-    frame.render_widget(paragraph, content_area);
+    let lines = if creating {
+        creation_lines(app)
+    } else {
+        wizard_lines(app.wizard())
+    };
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        content_area,
+    );
 
     let label = "[ Create Sandbox ]";
     let button_width = (label.len() as u16).min(button_area.width);
@@ -316,7 +329,8 @@ fn render_modal(
             width: button_width,
             height: 1,
         };
-        let button_style = if wizard.is_ready() {
+        let create_enabled = app.wizard().is_ready() && !creating;
+        let button_style = if create_enabled {
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Yellow)
@@ -332,10 +346,34 @@ fn render_modal(
                 .style(button_style),
             button_rect,
         );
-        if wizard.is_ready() {
+        if create_enabled {
             click_targets.push(ClickTarget::new(button_rect, ClickAction::CreateSandbox));
         }
     }
+}
+
+/// Modal body shown while `sbx create` runs on the worker thread. The glyph is
+/// swapped by `App::tick` on each event-loop iteration.
+fn creation_lines(app: &App) -> Vec<Line<'static>> {
+    let name = app.creating_name().unwrap_or("sandbox");
+    vec![
+        Line::from(Span::styled(
+            format!("Creating sandbox '{name}'..."),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled(app.spinner(), Style::default().fg(Color::Yellow)),
+            Span::raw("  Please wait, this may take a moment."),
+        ]),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "Input is paused until creation finishes.",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ]
 }
 
 fn render_info_modal(
@@ -351,7 +389,7 @@ fn render_info_modal(
         frame,
         rect,
         " Sandbox Info ",
-        ClickAction::CloseInfo,
+        Some(ClickAction::CloseInfo),
         click_targets,
     ) else {
         return;
@@ -566,16 +604,20 @@ fn agent_options(selected: usize) -> Vec<Line<'static>> {
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
-    let hints = match app.mode() {
-        Mode::Normal => {
-            " click: Stop/Start, Exec, Remove, Info   s toggles stop/start   x/d/i keys   wheel scroll   ←/→/↑/↓ move   r refresh   q quit "
+    let hints = if app.is_creating() {
+        " creating sandbox   please wait - input is paused (Ctrl+C to quit) "
+    } else {
+        match app.mode() {
+            Mode::Normal => {
+                " click: Stop/Start, Exec, Remove, Info   s toggles stop/start   x/d/i keys   wheel scroll   ←/→/↑/↓ move   r refresh   q quit "
+            }
+            Mode::Wizard => match app.wizard().step() {
+                WizardStep::Agent => " ↑/↓ choose agent   ↵ next   Esc back / click [X] close ",
+                WizardStep::Confirm => " ↵/y create   n/Esc back   click Create Sandbox ",
+                _ => " type value   Ctrl+U clear   ↵ next   Esc back / click [X] close ",
+            },
+            Mode::Info => " Esc/q/i/↵ or click [X] close ",
         }
-        Mode::Wizard => match app.wizard().step() {
-            WizardStep::Agent => " ↑/↓ choose agent   ↵ next   Esc back / click [X] close ",
-            WizardStep::Confirm => " ↵/y create   n/Esc back   click Create Sandbox ",
-            _ => " type value   Ctrl+U clear   ↵ next   Esc back / click [X] close ",
-        },
-        Mode::Info => " Esc/q/i/↵ or click [X] close ",
     };
 
     let line = Line::from(vec![
@@ -839,6 +881,28 @@ mod tests {
                 .any(|target| target.action == ClickAction::CreateSandbox)
         );
         assert!(!screen.contains("sbx create"));
+    }
+
+    #[test]
+    fn creation_shows_spinner_and_disables_modal_actions() {
+        let mut app = App::with_sandboxes(&[]);
+        app.begin_creation_for_test("demo");
+
+        let first = snapshot(90, 24, &mut app).join("\n");
+        assert!(first.contains("Creating sandbox 'demo'"));
+        assert!(first.contains(app.spinner()));
+        assert!(first.contains("Input is paused"));
+        assert!(first.contains("please wait"));
+        assert!(
+            app.click_targets().iter().all(|target| !matches!(
+                target.action,
+                ClickAction::CloseWizard | ClickAction::CreateSandbox
+            ))
+        );
+
+        app.tick();
+        let second = snapshot(90, 24, &mut app).join("\n");
+        assert_ne!(first, second, "spinner frame should change on tick");
     }
 
     #[test]

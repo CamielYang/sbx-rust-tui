@@ -70,6 +70,10 @@ fn run(terminal: &mut Tui, app: &mut App) -> Result<()> {
     let mut next_status_check = Instant::now() + STATUS_REFRESH_INTERVAL;
 
     while !app.should_quit() {
+        // Collect a finished create (if any) before drawing, then advance the
+        // spinner so the modal shows a new frame each iteration.
+        app.poll_creation();
+        app.tick();
         terminal.draw(|frame| ui::render(frame, app))?;
 
         // Exec opens a real terminal, so leave the alternate screen and raw
@@ -88,7 +92,11 @@ fn run(terminal: &mut Tui, app: &mut App) -> Result<()> {
         // 100 ms, so this fires close to the five-second mark.
         let now = Instant::now();
         if now >= next_status_check {
-            app.refresh_statuses();
+            // Skip the synchronous `sbx ls` while creating so the spinner
+            // keeps animating; the next tick after completion refreshes.
+            if !app.is_creating() {
+                app.refresh_statuses();
+            }
             next_status_check = now + STATUS_REFRESH_INTERVAL;
         }
 
