@@ -139,10 +139,14 @@ impl Form {
 
     #[cfg(test)]
     pub fn preview(&self) -> String {
-        self.pending_command().preview()
+        format!(
+            "{} && {}",
+            self.create_command().preview(),
+            self.keep_alive_command().preview()
+        )
     }
 
-    pub fn pending_command(&self) -> PendingCommand {
+    pub fn create_command(&self) -> PendingCommand {
         let name = self.name.value().trim();
         let agent = AGENTS[self.agent_index];
         let mut args = vec![
@@ -181,6 +185,13 @@ impl Form {
             args,
             env,
         }
+    }
+
+    /// Keep the newly created sandbox active. `sbx create` can leave it idle and
+    /// it may close; detaching a run keeps it around for later attach/exec.
+    pub fn keep_alive_command(&self) -> PendingCommand {
+        let name = self.name.value().trim();
+        PendingCommand::new("sbx", &["run", "-d", "--name", name])
     }
 }
 

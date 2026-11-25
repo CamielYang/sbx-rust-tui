@@ -35,9 +35,9 @@ impl App {
             );
             return;
         }
-        let pending = self.form.pending_command();
+        let commands = vec![self.form.create_command(), self.form.keep_alive_command()];
         let name = self.form.name.value().trim().to_owned();
-        self.start_creation(pending, &name);
+        self.start_creation(commands, &name);
     }
 
     pub fn open_info(&mut self, name: &str) {

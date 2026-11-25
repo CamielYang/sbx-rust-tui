@@ -1,4 +1,4 @@
-//! Background work: `sbx create` and the Info dialog's guest-side metrics.
+//! Background work: sandbox creation and the Info dialog's guest-side metrics.
 //! Both run on worker threads so the event loop keeps rendering.
 
 use std::io;
@@ -11,10 +11,10 @@ use super::{App, Sandbox, SandboxDetails, inspect_sandbox, sandbox::push_error};
 
 pub(super) const CREATE_TOAST: &str = "create-sandbox";
 
-/// Advanced once per event-loop frame while `sbx create` runs in the worker.
+/// Advanced once per event-loop frame while sandbox creation runs in the worker.
 pub(super) const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-/// A `sbx create` running on a worker thread. The UI keeps rendering (and
+/// A sandbox creation running on a worker thread. The UI keeps rendering (and
 /// ignoring input) until the result arrives on the channel.
 pub(super) struct Creation {
     pub(super) name: String,
@@ -53,7 +53,7 @@ impl App {
         }
     }
 
-    /// Pick up a finished `sbx create` without blocking the event loop.
+    /// Pick up a finished sandbox creation without blocking the event loop.
     pub fn poll_creation(&mut self) {
         let (name, result) = {
             let Some(creation) = self.creation.as_ref() else {
@@ -141,10 +141,22 @@ impl App {
         });
     }
 
-    pub(super) fn start_creation(&mut self, pending: super::PendingCommand, name: &str) {
+    pub(super) fn start_creation(&mut self, commands: Vec<super::PendingCommand>, name: &str) {
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
-            let _ = sender.send(pending.run());
+            let mut result = None;
+            for pending in commands {
+                let output = pending.run();
+                let failed = match &output {
+                    Ok(output) => !output.status.success(),
+                    Err(_) => true,
+                };
+                result = Some(output);
+                if failed {
+                    break;
+                }
+            }
+            let _ = sender.send(result.unwrap_or_else(|| Err(io::Error::other("no creation command"))));
         });
         self.creation = Some(Creation {
             name: name.to_owned(),

@@ -38,7 +38,7 @@ fn memory_validation() {
 }
 
 #[test]
-fn form_builds_expected_command() {
+fn form_builds_expected_commands() {
     let mut form = Form::new();
     form.name = InputState::new("sandbox-name");
     form.root_size = InputState::new("40");
@@ -47,8 +47,16 @@ fn form_builds_expected_command() {
     form.memory = InputState::new("4g");
 
     assert_eq!(
-        form.preview(),
+        form.create_command().preview(),
         "DOCKER_SANDBOXES_ROOT_SIZE=40g DOCKER_SANDBOXES_DOCKER_SIZE=20g sbx create --name sandbox-name opencode --cpus 2 --memory 4g"
+    );
+    assert_eq!(
+        form.keep_alive_command().preview(),
+        "sbx run -d --name sandbox-name"
+    );
+    assert_eq!(
+        form.preview(),
+        "DOCKER_SANDBOXES_ROOT_SIZE=40g DOCKER_SANDBOXES_DOCKER_SIZE=20g sbx create --name sandbox-name opencode --cpus 2 --memory 4g && sbx run -d --name sandbox-name"
     );
     assert!(form.first_error().is_none());
 }
@@ -139,10 +147,16 @@ fn creation_ignores_input_until_worker_reports() {
 fn start_creation_does_not_block() {
     let mut app = App::with_sandboxes(&[]);
     #[cfg(unix)]
-    let pending = PendingCommand::new("true", &[]);
+    let commands = vec![
+        PendingCommand::new("true", &[]),
+        PendingCommand::new("true", &[]),
+    ];
     #[cfg(windows)]
-    let pending = PendingCommand::new("cmd", &["/C", "exit", "0"]);
-    app.start_creation(pending, "demo");
+    let commands = vec![
+        PendingCommand::new("cmd", &["/C", "exit", "0"]),
+        PendingCommand::new("cmd", &["/C", "exit", "0"]),
+    ];
+    app.start_creation(commands, "demo");
     assert!(app.is_creating());
     assert_eq!(app.creating_name(), Some("demo"));
 }
