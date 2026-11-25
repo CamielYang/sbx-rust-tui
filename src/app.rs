@@ -22,10 +22,11 @@ pub const AGENTS: &[&str] = &[
     "shell",
 ];
 
-/// Stable ids for the three ratcn modal layers.
+/// Stable ids for the ratcn modal layers.
 pub const CREATE_DIALOG: &str = "create-dialog";
 pub const INFO_DIALOG: &str = "info-dialog";
 pub const CONFIRM_DIALOG: &str = "confirm-dialog";
+pub const PORTS_DIALOG: &str = "ports-dialog";
 
 const CREATE_TOAST: &str = "create-sandbox";
 
@@ -210,6 +211,7 @@ pub enum Mode {
     Wizard,
     Info,
     Confirm,
+    Ports,
 }
 
 // --- create form -------------------------------------------------------------
@@ -519,6 +521,158 @@ impl Sandbox {
     pub fn is_running(&self) -> bool {
         self.status.trim().to_ascii_lowercase().contains("running")
     }
+}
+
+// --- published ports --------------------------------------------------------
+
+/// One row of the published-ports table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PortMapping {
+    pub host_port: u16,
+    pub sandbox_port: u16,
+    pub protocol: String,
+    pub host_ip: Option<String>,
+}
+
+/// The ports currently published for the sandbox named in the dialog.
+#[derive(Clone, Debug)]
+pub struct PortsView {
+    pub name: String,
+    pub ports: Vec<PortMapping>,
+    pub error: Option<String>,
+}
+
+/// Which end of a `host:sandbox` mapping is being edited.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PortField {
+    Host,
+    Sandbox,
+}
+
+impl PortField {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Host => "Host port",
+            Self::Sandbox => "Sandbox port",
+        }
+    }
+}
+
+/// The two editable ports behind the modal's **Add port** button. The defaults
+/// match `sbx port publish <name> 8080:3000` so the button is useful on its own.
+#[derive(Clone)]
+pub struct PortForm {
+    host: InputState,
+    sandbox: InputState,
+}
+
+impl PortForm {
+    fn new() -> Self {
+        Self {
+            host: InputState::new("8080"),
+            sandbox: InputState::new("3000"),
+        }
+    }
+
+    pub fn host(&self) -> &InputState {
+        &self.host
+    }
+
+    pub fn sandbox(&self) -> &InputState {
+        &self.sandbox
+    }
+
+    fn port(&self, field: PortField) -> Result<u16, String> {
+        let state = match field {
+            PortField::Host => &self.host,
+            PortField::Sandbox => &self.sandbox,
+        };
+        parse_port(state.value())
+    }
+
+    /// True when an input cannot be turned into a usable port.
+    pub fn invalid(&self, field: PortField) -> bool {
+        self.port(field).is_err()
+    }
+
+    pub fn first_error(&self) -> Option<String> {
+        [PortField::Host, PortField::Sandbox]
+            .into_iter()
+            .find_map(|field| {
+                self.port(field)
+                    .err()
+                    .map(|error| format!("{}: {error}", field.label()))
+            })
+    }
+
+    fn pending_command(&self, name: &str) -> PendingCommand {
+        // Callers validate first; the fallbacks keep this helper total.
+        let host = self.port(PortField::Host).unwrap_or(0);
+        let sandbox = self.port(PortField::Sandbox).unwrap_or(0);
+        PendingCommand::new(
+            "sbx",
+            &["port", "publish", name, &format!("{host}:{sandbox}")],
+        )
+    }
+}
+
+fn parse_port(value: &str) -> Result<u16, String> {
+    let value = value.trim();
+    match value.parse::<u16>() {
+        Ok(port) if port > 0 => Ok(port),
+        _ => Err("Enter a port between 1 and 65535.".to_owned()),
+    }
+}
+
+/// Read published ports with `sbx port ls <name> --format json`. The input is
+/// an array (or an object with a `ports` array), as emitted by current `sbx`.
+pub fn fetch_ports(name: &str) -> Result<Vec<PortMapping>, String> {
+    let output = ProcessCommand::new("sbx")
+        .args(["port", "ls", name, "--format", "json"])
+        .output()
+        .map_err(|error| format!("Could not run sbx port ls: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(if stderr.is_empty() {
+            format!("sbx port ls exited with {}.", output.status)
+        } else {
+            stderr
+        });
+    }
+
+    parse_ports(&output.stdout)
+}
+
+fn parse_ports(stdout: &[u8]) -> Result<Vec<PortMapping>, String> {
+    let value: Value = serde_json::from_slice(stdout)
+        .map_err(|error| format!("Could not parse sbx port ls output: {error}"))?;
+    let rows = value
+        .as_array()
+        .or_else(|| value.get("ports").and_then(Value::as_array))
+        .ok_or_else(|| "Unexpected sbx port ls output.".to_owned())?;
+
+    Ok(rows
+        .iter()
+        .filter_map(|row| {
+            let host = json_text(row, &["host_port", "hostPort", "host"])?;
+            let sandbox = json_text(
+                row,
+                &[
+                    "sandbox_port",
+                    "sandboxPort",
+                    "guest_port",
+                    "container_port",
+                    "port",
+                ],
+            )?;
+            Some(PortMapping {
+                host_port: parse_port(&host).ok()?,
+                sandbox_port: parse_port(&sandbox).ok()?,
+                protocol: json_text(row, &["protocol"]).unwrap_or_else(|| "tcp".to_owned()),
+                host_ip: json_text(row, &["host_ip", "hostIp"]),
+            })
+        })
+        .collect())
 }
 
 /// Resource details shown in the info modal. Values come from live commands
@@ -915,6 +1069,8 @@ pub struct App {
     form: Form,
     info: Option<SandboxDetails>,
     info_refresh: Option<InfoRefresh>,
+    ports: Option<PortsView>,
+    port_form: PortForm,
     pending_action: Option<PendingAction>,
     pending_external: Option<PendingCommand>,
     creation: Option<Creation>,
@@ -926,6 +1082,9 @@ pub struct App {
     /// In tests, `perform_action` records instead of running `sbx`.
     #[cfg(test)]
     confirmed_for_test: Option<PendingAction>,
+    /// In tests, publishing records the command instead of running `sbx`.
+    #[cfg(test)]
+    published_for_test: Option<String>,
 }
 
 impl App {
@@ -940,6 +1099,8 @@ impl App {
             form: Form::new(),
             info: None,
             info_refresh: None,
+            ports: None,
+            port_form: PortForm::new(),
             pending_action: None,
             pending_external: None,
             creation: None,
@@ -950,6 +1111,8 @@ impl App {
             should_quit: false,
             #[cfg(test)]
             confirmed_for_test: None,
+            #[cfg(test)]
+            published_for_test: None,
         };
         app.refresh_sandboxes();
         app
@@ -972,6 +1135,8 @@ impl App {
             Mode::Info
         } else if self.modals.is_open(CONFIRM_DIALOG) {
             Mode::Confirm
+        } else if self.modals.is_open(PORTS_DIALOG) {
+            Mode::Ports
         } else {
             Mode::Normal
         }
@@ -1022,6 +1187,25 @@ impl App {
 
     pub fn info(&self) -> Option<&SandboxDetails> {
         self.info.as_ref()
+    }
+
+    pub fn ports(&self) -> Option<&PortsView> {
+        self.ports.as_ref()
+    }
+
+    pub fn port_form(&self) -> &PortForm {
+        &self.port_form
+    }
+
+    pub fn port_invalid(&self, field: PortField) -> bool {
+        self.port_form.invalid(field)
+    }
+
+    pub fn set_port_state(&mut self, field: PortField, state: InputState) {
+        match field {
+            PortField::Host => self.port_form.host = state,
+            PortField::Sandbox => self.port_form.sandbox = state,
+        }
     }
 
     pub fn message(&self) -> &str {
@@ -1260,6 +1444,7 @@ impl App {
             KeyCode::Char('x') | KeyCode::Char('X') => self.exec_selected(),
             KeyCode::Char('d') | KeyCode::Char('D') => self.remove_selected(),
             KeyCode::Char('i') | KeyCode::Char('I') => self.open_selected_info(),
+            KeyCode::Char('p') | KeyCode::Char('P') => self.open_ports_selected(),
             _ => {}
         }
     }
@@ -1328,6 +1513,120 @@ impl App {
         // dialog opened later for a different sandbox.
         self.info = None;
         self.info_refresh = None;
+    }
+
+    /// Show the published ports of the sandbox the Actions pane targets.
+    pub fn open_ports_selected(&mut self) {
+        if let Some(name) = self.selected_name()
+            && self.is_running(&name)
+        {
+            self.open_ports(&name);
+        }
+    }
+
+    /// Open (or refill) the ports dialog. Listing ports is a quick local `sbx`
+    /// call, so the table is ready on the first frame; a failure is shown in
+    /// the dialog instead of blocking it.
+    pub fn open_ports(&mut self, name: &str) {
+        if !self.is_running(name) {
+            return;
+        }
+        self.select_named(name);
+        self.port_form = PortForm::new();
+        let (ports, error) = match fetch_ports(name) {
+            Ok(ports) => (ports, None),
+            Err(error) => (Vec::new(), Some(error)),
+        };
+        self.ports = Some(PortsView {
+            name: name.to_owned(),
+            ports,
+            error,
+        });
+        let _ = self.modals.open(PORTS_DIALOG, &mut self.focus);
+    }
+
+    pub fn close_ports(&mut self) {
+        if self
+            .modals
+            .top()
+            .is_some_and(|id| id.as_str() == PORTS_DIALOG)
+        {
+            self.modals.close(&mut self.focus);
+        }
+        self.ports = None;
+    }
+
+    /// Re-read the table after a publish, keeping the dialog open.
+    #[cfg_attr(test, allow(dead_code))]
+    fn refresh_ports(&mut self) {
+        let Some(view) = self.ports.as_mut() else {
+            return;
+        };
+        let name = view.name.clone();
+        match fetch_ports(&name) {
+            Ok(ports) => {
+                view.ports = ports;
+                view.error = None;
+            }
+            Err(error) => view.error = Some(error),
+        }
+    }
+
+    /// The **Add port** button: validate both fields, then run
+    /// `sbx port publish <name> <host>:<sandbox>` and refresh the table.
+    pub fn publish_port(&mut self) {
+        if self.mode() != Mode::Ports {
+            return;
+        }
+        let Some(name) = self.ports.as_ref().map(|view| view.name.clone()) else {
+            return;
+        };
+        if let Some(error) = self.port_form.first_error() {
+            if let Some(view) = self.ports.as_mut() {
+                view.error = Some(error.clone());
+            }
+            self.notify_error("Invalid port", error);
+            return;
+        }
+
+        let pending = self.port_form.pending_command(&name);
+
+        #[cfg(test)]
+        {
+            self.published_for_test = Some(pending.preview());
+        }
+
+        #[cfg(not(test))]
+        let host = self.port_form.port(PortField::Host).unwrap_or(0);
+        #[cfg(not(test))]
+        let sandbox = self.port_form.port(PortField::Sandbox).unwrap_or(0);
+
+        #[cfg(not(test))]
+        match pending.run() {
+            Ok(output) if output.status.success() => {
+                self.refresh_ports();
+                self.notify_success(format!("Published {host}:{sandbox} for '{name}'."), None);
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let detail = stderr
+                    .lines()
+                    .find(|line| !line.trim().is_empty())
+                    .unwrap_or("sbx port publish failed")
+                    .to_owned();
+                if let Some(view) = self.ports.as_mut() {
+                    view.error = Some(detail.clone());
+                }
+                self.notify_error("Could not publish port", detail);
+            }
+            Err(error) => {
+                let detail = error.to_string();
+                if let Some(view) = self.ports.as_mut() {
+                    view.error = Some(detail.clone());
+                }
+                self.notify_error("Could not publish port", detail);
+            }
+        }
     }
 
     pub fn toggle_selected(&mut self) {
@@ -1416,7 +1715,6 @@ impl App {
         #[cfg(test)]
         {
             self.confirmed_for_test = Some(action);
-            return;
         }
         #[cfg(not(test))]
         match action {
@@ -1621,6 +1919,22 @@ impl App {
     pub fn show_info_for_test(&mut self, details: SandboxDetails) {
         self.info = Some(details);
         let _ = self.modals.open(INFO_DIALOG, &mut self.focus);
+    }
+
+    /// Open the ports dialog with a known table, without calling `sbx`.
+    pub fn show_ports_for_test(&mut self, name: &str, ports: Vec<PortMapping>) {
+        self.select_named(name);
+        self.ports = Some(PortsView {
+            name: name.to_owned(),
+            ports,
+            error: None,
+        });
+        let _ = self.modals.open(PORTS_DIALOG, &mut self.focus);
+    }
+
+    /// The command the ports dialog handed to `perform_action`-style test hook.
+    pub fn take_published_for_test(&mut self) -> Option<String> {
+        self.published_for_test.take()
     }
 
     /// Queue a fake metrics result so `poll_info` can be tested without
@@ -2100,5 +2414,129 @@ mod tests {
         assert!(app.sandboxes()[0].is_running());
         assert_eq!(app.info().unwrap().status, "running");
         assert_eq!(app.message(), "keep me");
+    }
+
+    #[test]
+    fn port_listing_parser_reads_published_ports() {
+        let rows = br#"[
+            {"host_ip":"127.0.0.1","host_port":60002,"sandbox_port":3000,"protocol":"tcp4"},
+            {"host_ip":"127.0.0.1","host_port":60003,"sandbox_port":3001,"protocol":"tcp4"}
+        ]"#;
+        assert_eq!(
+            parse_ports(rows).unwrap(),
+            vec![
+                PortMapping {
+                    host_port: 60002,
+                    sandbox_port: 3000,
+                    protocol: "tcp4".to_owned(),
+                    host_ip: Some("127.0.0.1".to_owned()),
+                },
+                PortMapping {
+                    host_port: 60003,
+                    sandbox_port: 3001,
+                    protocol: "tcp4".to_owned(),
+                    host_ip: Some("127.0.0.1".to_owned()),
+                },
+            ]
+        );
+        assert_eq!(
+            parse_ports(br#"{"ports":[{"host_port":8080,"sandbox_port":80}]}"#).unwrap()[0]
+                .protocol,
+            "tcp"
+        );
+    }
+
+    #[test]
+    fn port_form_builds_publish_command() {
+        let form = PortForm::new();
+        assert_eq!(
+            form.pending_command("demo").preview(),
+            "sbx port publish demo 8080:3000"
+        );
+        assert!(!form.invalid(PortField::Host));
+        assert!(!form.invalid(PortField::Sandbox));
+
+        let mut form = form;
+        form.host = InputState::new("9000");
+        form.sandbox = InputState::new("3001");
+        assert_eq!(
+            form.pending_command("demo").preview(),
+            "sbx port publish demo 9000:3001"
+        );
+    }
+
+    #[test]
+    fn port_validation_rejects_bad_values() {
+        let mut form = PortForm::new();
+        for value in ["0", "65536", "abc", ""] {
+            form.host = InputState::new(value);
+            assert!(form.invalid(PortField::Host), "accepted port {value:?}");
+        }
+        form.host = InputState::new("8080");
+        form.sandbox = InputState::new("abc");
+        assert_eq!(
+            form.first_error().as_deref(),
+            Some("Sandbox port: Enter a port between 1 and 65535.")
+        );
+    }
+
+    #[test]
+    fn ports_dialog_only_opens_for_running_sandbox() {
+        let mut app = App::with_sandbox_statuses(&[("alpha", "stopped")]);
+        app.open_ports_selected();
+        assert!(matches!(app.mode(), Mode::Normal));
+        assert!(app.ports().is_none());
+
+        app.apply_statuses(vec![Sandbox::new("alpha".to_owned(), "running".to_owned())]);
+        app.show_ports_for_test("alpha", Vec::new());
+        assert!(matches!(app.mode(), Mode::Ports));
+        assert!(app.modals_ref().is_open(PORTS_DIALOG));
+    }
+
+    #[test]
+    fn publish_port_records_the_command() {
+        let mut app = App::with_sandboxes(&["alpha"]);
+        app.show_ports_for_test(
+            "alpha",
+            vec![PortMapping {
+                host_port: 60002,
+                sandbox_port: 3000,
+                protocol: "tcp4".to_owned(),
+                host_ip: None,
+            }],
+        );
+        assert_eq!(app.ports().unwrap().ports.len(), 1);
+
+        app.publish_port();
+        assert_eq!(
+            app.take_published_for_test().as_deref(),
+            Some("sbx port publish alpha 8080:3000")
+        );
+
+        app.set_port_state(PortField::Host, InputState::new("9000"));
+        app.set_port_state(PortField::Sandbox, InputState::new("3001"));
+        app.publish_port();
+        assert_eq!(
+            app.take_published_for_test().as_deref(),
+            Some("sbx port publish alpha 9000:3001")
+        );
+    }
+
+    #[test]
+    fn invalid_ports_are_not_published() {
+        let mut app = App::with_sandboxes(&["alpha"]);
+        app.show_ports_for_test("alpha", Vec::new());
+        app.set_port_state(PortField::Host, InputState::new("nope"));
+        app.publish_port();
+
+        assert!(app.take_published_for_test().is_none());
+        assert!(app.message().contains("Invalid port"));
+        assert!(
+            app.ports()
+                .unwrap()
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("Host port"))
+        );
     }
 }

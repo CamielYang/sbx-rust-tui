@@ -20,11 +20,14 @@ The screen uses ratcn components and its Tokyo Night theme:
 - a scrollable sandbox list with running/stopped indicators,
 - an **Actions** pane whose colored buttons follow the sandbox you click or
   commit with Enter: **Start** (green) and **Remove** (red) for a stopped
-  sandbox, **Stop** (orange), **Exec shell** (gray), **Remove** (red), and
-  **Info** (blue) for a running one. Every button changes shade on focus and
-  hover, and actions that do not apply are hidden rather than disabled,
+  sandbox, **Stop** (orange), **Exec shell** (gray), **Publish ports** (cyan),
+  **Info** (blue), and **Remove** (red) for a running one. Every button changes
+  shade on focus and hover, and actions that do not apply are hidden rather
+  than disabled,
 - a confirmation dialog for **Start**, **Stop**, and **Remove**, so none of
   those commands runs until you explicitly confirm it,
+- a **Published ports** dialog for running sandboxes, with a table of published
+  mappings and an **Add port** button at the top,
 - a footer with the latest message and keyboard shortcuts,
 - transient toast notifications in the top-right corner.
 
@@ -37,6 +40,8 @@ seconds. Older `sbx` versions without structured output fall back to `sbx ls -q`
 and show status `unknown`. If `sbx` is missing or fails, the last known list is
 kept and the error appears in the footer and as a toast. While the Info dialog
 is open, its live metrics are re-collected every ten seconds on a worker thread.
+The ports dialog reads `sbx port ls <name> --format json` when it opens and
+again after a successful publish; a read failure is shown inside the dialog.
 
 ### Actions
 
@@ -44,6 +49,7 @@ is open, its live metrics are re-collected every ten seconds on a worker thread.
 | --- | --- | --- |
 | Start / Stop | `sbx exec {name} -- true` / `sbx stop {name}` | Opens a confirmation dialog first. `sbx` has no standalone `start` verb, so a stopped sandbox is started with a no-op `exec`. |
 | Exec shell | `sbx exec -it {name} bash` | Suspends the TUI, opens an external terminal, and restores the TUI when it closes. On Linux it tries common terminal emulators in order; on macOS it uses Terminal.app; on Windows a new `cmd` window. If no terminal opens, the command is shown in the footer. |
+| Publish ports | `sbx port ls {name} --format json`, then `sbx port publish {name} {host}:{sandbox}` | Opens the published-ports dialog for a running sandbox; **Add port** validates the two fields and publishes the mapping, then refreshes the table. |
 | Info | `sbx inspect {name} --format json` then `sbx exec {name} -- sh -c …` | Opens a themed dialog with status, CPU as `{cores} ({usage}%)`, and memory/root/Docker usage as `used / total`. Guest metrics are collected when Info opens and every ten seconds while it stays open; `sbx inspect` supplies fallback values. Missing values render as `—`; errors appear as a note. |
 | Remove | `sbx remove {name} --force` | Opens a confirmation dialog first; `--force` avoids `sbx`'s own prompt, which the TUI cannot answer. |
 
@@ -66,7 +72,7 @@ the list cursor.
 | `N` | Open the create dialog |
 | `R` | Refresh the sandbox list |
 | `S` | Ask to start a stopped sandbox, or stop a running one |
-| `X` / `D` / `I` | Exec / ask to remove / Inspect the selected sandbox (`X` and `I` need a running sandbox) |
+| `X` / `P` / `I` / `D` | Exec / publish ports / Inspect / ask to remove the selected sandbox (`X`, `P`, and `I` need a running sandbox) |
 | `q` / `Esc` / `Ctrl+C` | Quit (terminal is always restored) |
 
 Global shortcuts apply only on the dashboard; while a dialog is open, keys are
@@ -110,6 +116,23 @@ repeated keys cannot start a second sandbox. `Ctrl+C` still quits. On success
 the dialog closes, the list refreshes, and a success toast appears; on failure
 the dialog stays open with the invalid field marked and the error in the footer.
 
+## Published ports dialog
+
+Open it with **Publish ports** or `P` on a running sandbox. The table lists the
+mappings returned by `sbx port ls {name} --format json`, with columns for the
+host port, sandbox port, and protocol. An **Add port** button sits at the top of
+the dialog, next to two inputs:
+
+1. **Host port** — the port on the host, default `8080`.
+2. **Sandbox port** — the port inside the sandbox, default `3000`.
+
+Pressing **Add port** validates both as numbers from 1 to 65535 and runs
+`sbx port publish {name} {host}:{sandbox}`. With the defaults unchanged, that is
+`sbx port publish {name} 8080:3000`. On success the table is re-read and a toast
+confirms the mapping; on failure the dialog stays open and shows the error in
+its status line and in the footer. The dialog closes with `Esc` or **Close**.
+More ports than fit are counted in the status line.
+
 ## Mouse
 
 Mouse input is enabled on startup and disabled on exit (including on panic).
@@ -143,6 +166,7 @@ default is `4g` and host-memory warnings are skipped.
 
 - Start, Stop, and Remove run only after confirmation, and those `sbx` commands
   still run synchronously, so the UI is briefly blocked while they execute.
+  `sbx port ls` and `sbx port publish` are also synchronous but short.
 - Live resource values come from `nproc`, two `/proc/stat` samples one second
   apart, `/proc/meminfo`, and `df -k` inside the microVM via
   `sbx exec {name} -- sh -c …`. CPU usage is the percentage of all cores busy

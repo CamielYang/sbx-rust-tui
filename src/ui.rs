@@ -17,8 +17,8 @@ use ratcn::{
 };
 
 use crate::app::{
-    AGENTS, App, CONFIRM_DIALOG, CREATE_DIALOG, FormField, INFO_DIALOG, PendingAction, Sandbox,
-    SandboxDetails,
+    AGENTS, App, CONFIRM_DIALOG, CREATE_DIALOG, FormField, INFO_DIALOG, PORTS_DIALOG,
+    PendingAction, PortField, PortMapping, Sandbox, SandboxDetails,
 };
 
 /// Every interaction ratcn can emit.
@@ -42,6 +42,10 @@ pub enum Msg {
     ExecSelected,
     InfoSelected,
     RemoveSelected,
+    OpenPorts,
+    ClosePorts,
+    PortsChanged(PortField, InputState),
+    PublishPort,
     ConfirmAction,
     CancelAction,
     CloseInfo,
@@ -52,6 +56,7 @@ const ACTION_STOP: &str = "action-stop";
 const ACTION_EXEC: &str = "action-exec";
 const ACTION_REMOVE: &str = "action-remove";
 const ACTION_INFO: &str = "action-info";
+const ACTION_PORTS: &str = "action-ports";
 
 /// Apply one runtime message. Creation locks the controls: late focus messages
 /// are kept so the runtime stays in sync, but everything else is discarded
@@ -84,6 +89,10 @@ pub fn apply(app: &mut App, msg: Msg) {
         Msg::ExecSelected => app.exec_selected(),
         Msg::InfoSelected => app.open_selected_info(),
         Msg::RemoveSelected => app.remove_selected(),
+        Msg::OpenPorts => app.open_ports_selected(),
+        Msg::ClosePorts => app.close_ports(),
+        Msg::PortsChanged(field, state) => app.set_port_state(field, state),
+        Msg::PublishPort => app.publish_port(),
         Msg::ConfirmAction => app.confirm_action(),
         Msg::CancelAction => app.cancel_action(),
         Msg::CloseInfo => app.close_info(),
@@ -104,7 +113,7 @@ pub fn settle_focus(app: &mut App) {
     let running = selected.is_some_and(Sandbox::is_running);
     let valid = match id {
         ACTION_START => !running && selected.is_some(),
-        ACTION_STOP | ACTION_EXEC | ACTION_INFO => running,
+        ACTION_STOP | ACTION_EXEC | ACTION_INFO | ACTION_PORTS => running,
         ACTION_REMOVE => selected.is_some(),
         _ => false,
     };
@@ -147,6 +156,9 @@ pub fn declare(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme) {
     }
     if app.modals_ref().is_open(CONFIRM_DIALOG) {
         ctx.modal(CONFIRM_DIALOG, confirm_dialog(app), area);
+    }
+    if app.modals_ref().is_open(PORTS_DIALOG) {
+        ctx.modal(PORTS_DIALOG, ports_dialog(app, &theme), area);
     }
 }
 
@@ -294,6 +306,7 @@ const STOP_ORANGE: Color = Color::Rgb(255, 158, 100);
 const EXEC_GRAY: Color = Color::Rgb(122, 132, 166);
 const REMOVE_RED: Color = Color::Rgb(247, 118, 142);
 const INFO_BLUE: Color = Color::Rgb(122, 162, 247);
+const PORTS_CYAN: Color = Color::Rgb(115, 200, 211);
 
 /// A filled button keeps its action hue in every state. Focus deepens the fill,
 /// hover lifts it, and both change visibly even when the button is focused —
@@ -325,8 +338,9 @@ type Action = (&'static str, &'static str, Color, fn() -> Msg);
 const RUNNING_ACTIONS: &[Action] = &[
     (ACTION_STOP, "Stop", STOP_ORANGE, || Msg::StopSelected),
     (ACTION_EXEC, "Exec shell", EXEC_GRAY, || Msg::ExecSelected),
-    (ACTION_REMOVE, "Remove", REMOVE_RED, || Msg::RemoveSelected),
+    (ACTION_PORTS, "Publish ports", PORTS_CYAN, || Msg::OpenPorts),
     (ACTION_INFO, "Info", INFO_BLUE, || Msg::InfoSelected),
+    (ACTION_REMOVE, "Remove", REMOVE_RED, || Msg::RemoveSelected),
 ];
 
 const STOPPED_ACTIONS: &[Action] = &[
@@ -346,6 +360,7 @@ fn paint_actions(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme, a
 
     let rows = Layout::vertical([
         Constraint::Length(2),
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -427,7 +442,7 @@ fn paint_footer(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme, ar
         theme.muted_foreground
     };
     let message = if message.is_empty() {
-        "N new · R refresh · S start/stop · X exec · I info · D remove · Ctrl+C quit"
+        "N new · R refresh · S start/stop · X exec · P ports · I info · D remove · Ctrl+C quit"
     } else {
         message
     };
@@ -590,11 +605,26 @@ fn text_input(
     disabled: bool,
     invalid: bool,
 ) -> Input<App, Msg> {
+    input(
+        move |state| Msg::FormChanged(field, state),
+        read,
+        placeholder,
+        disabled,
+        invalid,
+    )
+}
+
+/// An input bound to an app field through a caller-supplied message, so the
+/// create form and the ports dialog can share the same themed widget.
+fn input(
+    on_change: impl Fn(InputState) -> Msg + 'static,
+    read: impl Fn(&App) -> &InputState + 'static,
+    placeholder: &'static str,
+    disabled: bool,
+    invalid: bool,
+) -> Input<App, Msg> {
     Input::new()
-        .value(
-            move |state| read(state),
-            move |state| Msg::FormChanged(field, state),
-        )
+        .value(move |state| read(state), on_change)
         .placeholder(placeholder)
         .disabled(disabled)
         .invalid(invalid)
@@ -745,10 +775,167 @@ fn join_usage(used: Option<&str>, total: Option<&str>) -> Option<String> {
     }
 }
 
+// --- published ports dialog -------------------------------------------------
+
+/// A table of `sbx port ls` rows with an Add port button above it. The two
+/// inputs default to the example mapping (`8080:3000`), so pressing the button
+/// publishes that mapping directly or any pair typed into the fields.
+fn ports_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
+    let Some(view) = app.ports() else {
+        return Dialog::new()
+            .title("Published ports")
+            .description("Ports are no longer available.")
+            .on_dismiss(|| Msg::ClosePorts)
+            .action("close", Button::new("Close").on_press(|| Msg::ClosePorts));
+    };
+
+    let theme = *theme;
+    let name = view.name.clone();
+    let ports = view.ports.clone();
+    let error = view.error.clone();
+    let host = input(
+        |state| Msg::PortsChanged(PortField::Host, state),
+        |state: &App| state.port_form().host(),
+        "8080",
+        false,
+        app.port_invalid(PortField::Host),
+    );
+    let sandbox = input(
+        |state| Msg::PortsChanged(PortField::Sandbox, state),
+        |state: &App| state.port_form().sandbox(),
+        "3000",
+        false,
+        app.port_invalid(PortField::Sandbox),
+    );
+    let add_button = Button::new("+ Add port").on_press(|| Msg::PublishPort);
+    let button_width = add_button.width();
+
+    Dialog::new()
+        .title(format!("Published ports · {name}"))
+        .description("Ports published to the host")
+        .outer_width(72)
+        .on_dismiss(|| Msg::ClosePorts)
+        .content(12, move |ctx| {
+            let rows = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(0),
+                Constraint::Length(1),
+            ])
+            .split(ctx.area());
+
+            // The button leads the dialog; the hint sits beside it.
+            let top =
+                Layout::horizontal([Constraint::Length(button_width + 2), Constraint::Min(0)])
+                    .split(rows[0]);
+            ctx.component("ports-add", add_button, top[0]);
+            ctx.paint_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    "  Host port : Sandbox port",
+                    Style::default().fg(theme.muted_foreground),
+                ))),
+                top[1],
+            );
+
+            let fields = Layout::horizontal([
+                Constraint::Length(11),
+                Constraint::Length(12),
+                Constraint::Length(2),
+                Constraint::Length(14),
+                Constraint::Length(12),
+                Constraint::Min(0),
+            ])
+            .split(rows[1]);
+            ctx.paint_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    " Host port",
+                    Style::default().fg(theme.muted_foreground),
+                ))),
+                fields[0],
+            );
+            ctx.component("ports-host", host, fields[1]);
+            ctx.paint_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    " Sandbox port",
+                    Style::default().fg(theme.muted_foreground),
+                ))),
+                fields[3],
+            );
+            ctx.component("ports-sandbox", sandbox, fields[4]);
+
+            ctx.paint_widget(Paragraph::new(port_header_line(&theme)), rows[2]);
+
+            let table = rows[3];
+            let visible = table.height as usize;
+            if ports.is_empty() {
+                ctx.paint_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        "  No published ports.",
+                        Style::default().fg(theme.muted_foreground),
+                    ))),
+                    table,
+                );
+            } else {
+                for (index, mapping) in ports.iter().take(visible).enumerate() {
+                    let row = Rect::new(table.x, table.y + index as u16, table.width, 1);
+                    ctx.paint_widget(Paragraph::new(port_row_line(mapping, &theme)), row);
+                }
+            }
+
+            let status = match error {
+                Some(error) => {
+                    Span::styled(format!(" {error}"), Style::default().fg(theme.destructive))
+                }
+                None if ports.len() > visible => Span::styled(
+                    format!("  Showing {visible} of {} published ports", ports.len()),
+                    Style::default().fg(theme.muted_foreground),
+                ),
+                None => Span::styled(
+                    format!("  sbx port publish {name} <host>:<sandbox>"),
+                    Style::default().fg(theme.muted_foreground),
+                ),
+            };
+            ctx.paint_widget(Paragraph::new(Line::from(status)), rows[4]);
+        })
+        .action(
+            "close",
+            Button::new("Close").ghost().on_press(|| Msg::ClosePorts),
+        )
+}
+
+fn port_header_line(theme: &Theme) -> Line<'static> {
+    let style = Style::default()
+        .fg(theme.muted_foreground)
+        .add_modifier(Modifier::BOLD);
+    Line::from(vec![
+        Span::styled(format!(" {:<16}", "HOST PORT"), style),
+        Span::styled(format!("{:<18}", "SANDBOX PORT"), style),
+        Span::styled("PROTOCOL", style),
+    ])
+}
+
+fn port_row_line(mapping: &PortMapping, theme: &Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!(" {:<16}", mapping.host_port),
+            Style::default().fg(theme.foreground),
+        ),
+        Span::styled(
+            format!("{:<18}", mapping.sandbox_port),
+            Style::default().fg(theme.foreground),
+        ),
+        Span::styled(
+            mapping.protocol.clone(),
+            Style::default().fg(theme.muted_foreground),
+        ),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{INFO_DIALOG, SandboxDetails};
+    use crate::app::{INFO_DIALOG, PORTS_DIALOG, PortMapping, SandboxDetails};
     use ratatui::{Terminal, backend::TestBackend};
     use ratcn::runtime::Ratcn;
 
@@ -882,6 +1069,38 @@ mod tests {
         assert!(screen.contains("Sandbox"));
         assert!(screen.contains("4 (37%)"));
         assert!(screen.contains("1.0 GiB / 2.0 GiB"));
+    }
+
+    #[test]
+    fn renders_ports_dialog_with_table_and_add_button() {
+        let mut app = App::with_sandboxes(&["alpha"]);
+        app.show_ports_for_test(
+            "alpha",
+            vec![
+                PortMapping {
+                    host_port: 60002,
+                    sandbox_port: 3000,
+                    protocol: "tcp4".to_owned(),
+                    host_ip: Some("127.0.0.1".to_owned()),
+                },
+                PortMapping {
+                    host_port: 60003,
+                    sandbox_port: 3001,
+                    protocol: "tcp4".to_owned(),
+                    host_ip: None,
+                },
+            ],
+        );
+        assert!(app.modals_ref().is_open(PORTS_DIALOG));
+        let screen = render(&app);
+        assert!(screen.contains("Published ports"));
+        assert!(screen.contains("+ Add port"));
+        assert!(screen.contains("HOST PORT"));
+        assert!(screen.contains("SANDBOX PORT"));
+        assert!(screen.contains("PROTOCOL"));
+        assert!(screen.contains("60002"));
+        assert!(screen.contains("60003"));
+        assert!(screen.contains("tcp4"));
     }
 
     #[test]
@@ -1024,15 +1243,15 @@ mod interaction_tests {
         let mut ratcn = new_runtime();
         let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
         draw(&mut terminal, &app, &mut ratcn);
-        // "Exec shell" sets the shared width: 10 label cells + 4 of padding.
-        for (row, fill) in [(5, STOP_ORANGE), (6, EXEC_GRAY)] {
-            for x in 65..79 {
+        // "Publish ports" sets the shared width: 13 label cells + 4 of padding.
+        for (row, fill) in [(5, STOP_ORANGE), (6, EXEC_GRAY), (7, PORTS_CYAN)] {
+            for x in 65..82 {
                 assert_eq!(cell_bg(&terminal, x, row), fill, "fill at ({x}, {row})");
             }
             assert_ne!(
-                cell_bg(&terminal, 79, row),
+                cell_bg(&terminal, 82, row),
                 fill,
-                "button must stop at x=79"
+                "button must stop at x=82"
             );
         }
     }
@@ -1124,6 +1343,48 @@ mod interaction_tests {
         assert!(screen.contains("Confirm stop"));
         assert!(screen.contains("Stop sandbox 'alpha'?"));
         assert!(screen.contains("Cancel"));
+    }
+
+    #[test]
+    fn clicking_publish_ports_opens_the_ports_dialog() {
+        let mut app = App::with_sandboxes(&["alpha"]);
+        let mut ratcn = new_runtime();
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        draw(&mut terminal, &app, &mut ratcn);
+
+        // Action rows: Stop (5), Exec shell (6), Publish ports (7).
+        let emitted = click(&mut terminal, &mut app, &mut ratcn, 70, 7);
+        assert!(
+            emitted
+                .iter()
+                .any(|message| matches!(message, Msg::OpenPorts))
+        );
+        assert!(app.modals_ref().is_open(PORTS_DIALOG));
+        let screen = screen(&terminal);
+        assert!(screen.contains("Published ports"));
+        assert!(screen.contains("+ Add port"));
+    }
+
+    #[test]
+    fn add_port_button_publishes_the_default_mapping() {
+        let mut app = App::with_sandboxes(&["alpha"]);
+        app.show_ports_for_test("alpha", Vec::new());
+        let mut ratcn = new_runtime();
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        draw(&mut terminal, &app, &mut ratcn);
+
+        let (x, y) = position_from_bottom(&screen(&terminal), "+ Add port")
+            .expect("add button is on screen");
+        let emitted = click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+        assert!(
+            emitted
+                .iter()
+                .any(|message| matches!(message, Msg::PublishPort))
+        );
+        assert_eq!(
+            app.take_published_for_test().as_deref(),
+            Some("sbx port publish alpha 8080:3000")
+        );
     }
 
     #[test]
