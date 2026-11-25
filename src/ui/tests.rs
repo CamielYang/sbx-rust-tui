@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::test_support::TempWorkspaceDir;
 use crate::app::{INFO_DIALOG, PORTS_DIALOG, PortMapping, SandboxDetails};
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 use ratcn::runtime::Ratcn;
@@ -250,6 +251,43 @@ fn renders_create_dialog() {
     // is near the default selection rather than the top of the list.
     assert!(screen.contains("cursor"));
     assert!(screen.contains("opencode"));
+}
+
+#[test]
+fn workspace_option_reveals_mode_path_and_change_button_when_enabled() {
+    let mut app = App::with_sandboxes(&[]);
+    app.open_wizard();
+    let path = app.form().workspace_path().to_owned();
+    let screen = render(&app);
+    assert!(screen.contains("Add workspace"));
+    assert!(!screen.contains(&path));
+    assert!(!screen.contains("Change"));
+    assert!(!screen.contains("Mode"));
+
+    app.set_add_workspace(true);
+    let screen = render(&app);
+    assert!(screen.contains(&path));
+    assert!(screen.contains("Change"));
+    assert!(screen.contains("Mode"));
+    assert!(screen.contains("mount"));
+    assert!(!screen.contains("clone"));
+}
+
+#[test]
+fn renders_workspace_picker_with_folders_and_create_here() {
+    let temp = TempWorkspaceDir::new();
+    temp.make_dir("projects");
+    let mut app = App::with_sandboxes(&[]);
+    app.open_wizard();
+    app.set_workspace_path_for_test(temp.path());
+    app.open_workspace_picker();
+
+    let screen = render(&app);
+    assert!(screen.contains("Select workspace"));
+    assert!(screen.contains(&temp.path().to_string_lossy().into_owned()));
+    assert!(screen.contains(".."));
+    assert!(screen.contains("projects"));
+    assert!(screen.contains("Create here"));
 }
 
 #[test]

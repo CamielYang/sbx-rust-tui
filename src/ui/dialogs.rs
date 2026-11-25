@@ -5,12 +5,18 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratcn::color::{away_from, dim};
-use ratcn::{Button, ButtonStyle, ButtonVariant, Dialog, InputState, ListItem, Select, Theme};
+use ratcn::{
+    Button, ButtonStyle, ButtonVariant, Checkbox, Cycle, Dialog, InputState, List, ListItem,
+    Select, Theme,
+};
 
 use super::dashboard::{REMOVE_RED, START_GREEN, STOP_ORANGE, action_style};
 use super::widgets::{detail_line, field_row, input, join_usage};
 use super::*;
-use crate::app::{AGENTS, FormField, PendingAction, PortField, PortMapping, SandboxDetails};
+use crate::app::{
+    AGENTS, FormField, PendingAction, PortField, PortMapping, SandboxDetails, WORKSPACE_PARENT,
+    WorkspaceMode, WorkspacePicker,
+};
 
 /// The confirmation dialog's focused Cancel sets the look for every dismiss
 /// action: a quiet raised fill that stays visible even while another control
@@ -34,9 +40,10 @@ fn cancel_button<M>(label: impl Into<String>, on_press: impl Fn() -> M + 'static
 
 // --- create dialog ----------------------------------------------------------
 
-/// Six form fields plus the status and creation message, with a blank row
-/// between each one.
-const CREATE_CONTENT_ROWS: usize = 8;
+/// Six inputs, the workspace toggle, the status, and the creation message.
+/// The workspace mode and path rows are added only while the toggle is on;
+/// every logical row gets a blank row after it so the controls breathe.
+const CREATE_BASE_ROWS: usize = 9;
 
 pub(super) fn create_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
     let theme = *theme;
@@ -98,6 +105,25 @@ pub(super) fn create_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
     )
     .max_visible_items(6)
     .disabled(creating);
+    let add_workspace = Checkbox::new("Add workspace")
+        .checked(
+            |state: &App| state.form().add_workspace(),
+            Msg::AddWorkspaceChanged,
+        )
+        .disabled(creating);
+    let workspace_enabled = form.add_workspace();
+    let workspace_path = form.workspace_path().to_owned();
+    let change_workspace = Button::new("Change")
+        .ghost()
+        .on_press(|| Msg::ChangeWorkspace)
+        .disabled(creating);
+    let change_width = change_workspace.width();
+    let mode = Cycle::new(WorkspaceMode::OPTIONS)
+        .selection(
+            |state: &App| state.form().workspace_mode().index(),
+            Msg::WorkspaceModeChanged,
+        )
+        .disabled(creating);
 
     // The untouched empty name is not an error yet; the Create button still
     // validates it when pressed.
@@ -131,14 +157,17 @@ pub(super) fn create_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
     } else {
         String::new()
     };
+    let path_rows = 2 * usize::from(workspace_enabled);
+    let content_rows = CREATE_BASE_ROWS + path_rows;
+    let status_index = 7 + path_rows;
 
     Dialog::new()
         .title("New sandbox")
         .description("Create a Docker Sandbox with sbx")
         .outer_width(70)
         .on_dismiss(|| Msg::CancelWizard)
-        .content((CREATE_CONTENT_ROWS * 2 - 1) as u16, move |ctx| {
-            let rows = Layout::vertical(vec![Constraint::Length(1); CREATE_CONTENT_ROWS * 2 - 1])
+        .content((content_rows * 2 - 1) as u16, move |ctx| {
+            let rows = Layout::vertical(vec![Constraint::Length(1); content_rows * 2 - 1])
                 .split(ctx.area());
             let row = |index: usize| rows[index * 2];
             field_row(ctx, row(0), "Name", name, theme);
@@ -147,20 +176,46 @@ pub(super) fn create_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
             field_row(ctx, row(3), "Docker data (GB)", docker, theme);
             field_row(ctx, row(4), "CPUs", cpus, theme);
             field_row(ctx, row(5), "Memory", memory, theme);
+            field_row(ctx, row(6), "Add workspace", add_workspace, theme);
+
+            if workspace_enabled {
+                field_row(ctx, row(7), "Mode", mode, theme);
+                let columns = Layout::horizontal([
+                    Constraint::Length(20),
+                    Constraint::Min(0),
+                    Constraint::Length(change_width),
+                ])
+                .split(row(8));
+                ctx.paint_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        " Workspace",
+                        Style::default().fg(theme.muted_foreground),
+                    ))),
+                    columns[0],
+                );
+                ctx.paint_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        workspace_path,
+                        Style::default().fg(theme.foreground),
+                    ))),
+                    columns[1],
+                );
+                ctx.component("workspace-change", change_workspace, columns[2]);
+            }
 
             ctx.paint_widget(
                 Paragraph::new(Line::from(Span::styled(
                     format!(" {status}"),
                     Style::default().fg(status_color),
                 ))),
-                row(6),
+                row(status_index),
             );
             ctx.paint_widget(
                 Paragraph::new(Line::from(Span::styled(
                     format!(" {creating_message}"),
                     Style::default().fg(theme.primary),
                 ))),
-                row(7),
+                row(status_index + 1),
             );
         })
         .action(
@@ -462,4 +517,101 @@ fn port_row_line(mapping: &PortMapping, theme: &Theme) -> Line<'static> {
             Style::default().fg(theme.foreground),
         ),
     ])
+}
+
+// --- workspace picker dialog ------------------------------------------------
+
+/// A folder browser stacked above the create dialog. Rows are folders to enter,
+/// with `..` first for going back; **Create here** commits the folder currently
+/// being browsed instead of the row under the cursor.
+pub(super) fn workspace_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
+    let theme = *theme;
+    let Some(picker) = app.workspace_picker() else {
+        return Dialog::new()
+            .title("Select workspace")
+            .description("The folder browser is no longer available.")
+            .on_dismiss(|| Msg::CancelWorkspace)
+            .action("close", cancel_button("Close", || Msg::CancelWorkspace));
+    };
+
+    let folder = picker.dir().to_string_lossy().into_owned();
+    let error = picker.error().map(str::to_owned);
+    let entries: Vec<ListItem<String>> = picker
+        .entries()
+        .iter()
+        .map(|name| ListItem::new(name.clone(), name.clone()))
+        .collect();
+    let folder_count = entries.len().saturating_sub(usize::from(
+        entries
+            .first()
+            .is_some_and(|item| item.value().as_str() == WORKSPACE_PARENT),
+    ));
+    // Browsing a row moves the cursor and enters a folder on commit. Nothing is
+    // "selected" in this list, so the rows stay free of radio markers.
+    let folders = List::new(entries)
+        .item_focus(
+            |state: &App| {
+                state
+                    .workspace_picker()
+                    .and_then(|picker| picker.focused())
+                    .map(str::to_owned)
+            },
+            Msg::WorkspaceEntryFocused,
+        )
+        .selection(|_: &App| None::<String>, Msg::WorkspaceEntrySelected)
+        .scroll(
+            |state: &App| state.workspace_picker().map_or(0, WorkspacePicker::scroll),
+            Msg::WorkspaceScrolled,
+        )
+        .focus_symbol("> ");
+
+    Dialog::new()
+        .title("Select workspace")
+        .description("Choose where the sandbox workspace should live")
+        .outer_width(66)
+        .on_dismiss(|| Msg::CancelWorkspace)
+        .content(18, move |ctx| {
+            let rows = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(0),
+                Constraint::Length(1),
+            ])
+            .split(ctx.area());
+            ctx.paint_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(" Folder  ", Style::default().fg(theme.muted_foreground)),
+                    Span::styled(folder, Style::default().fg(theme.foreground)),
+                ])),
+                rows[0],
+            );
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.border))
+                .style(Style::default().bg(theme.surface));
+            let inner = block.inner(rows[2]);
+            ctx.paint_widget(block, rows[2]);
+            if inner.height > 0 && inner.width > 0 {
+                ctx.component("workspace-folders", folders, inner);
+            }
+
+            let status = match error {
+                Some(error) => {
+                    Span::styled(format!(" {error}"), Style::default().fg(theme.destructive))
+                }
+                None => Span::styled(
+                    format!(
+                        " {folder_count} folders · Enter opens · Create here selects this folder"
+                    ),
+                    Style::default().fg(theme.muted_foreground),
+                ),
+            };
+            ctx.paint_widget(Paragraph::new(Line::from(status)), rows[3]);
+        })
+        .action("cancel", cancel_button("Cancel", || Msg::CancelWorkspace))
+        .action(
+            "create-here",
+            Button::new("Create here").on_press(|| Msg::CreateWorkspaceHere),
+        )
 }

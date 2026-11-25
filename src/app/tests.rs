@@ -1,10 +1,13 @@
+use std::ffi::OsStr;
 use std::io;
+use std::path::PathBuf;
 
 use super::form::{
     parse_memory_mib, validate_cpus, validate_gb_size, validate_memory, validate_name,
 };
 use super::ports::parse_ports;
 use super::sandbox::{VmMetrics, format_size, json_text, parse_vm_metrics};
+use super::test_support::TempWorkspaceDir;
 use super::*;
 use serde_json::Value;
 
@@ -62,6 +65,35 @@ fn form_builds_expected_commands() {
 }
 
 #[test]
+fn workspace_mode_controls_the_clone_flag_and_path_position() {
+    let mut form = Form::new();
+    form.name = InputState::new("sandbox-name");
+    form.cpus = InputState::new("2");
+    form.memory = InputState::new("4g");
+    form.workspace_path = "/work/repo".to_owned();
+    form.set_add_workspace(true);
+
+    assert_eq!(form.workspace_mode(), WorkspaceMode::Mount);
+    assert_eq!(
+        form.create_command().preview(),
+        "sbx create --name sandbox-name opencode --cpus 2 --memory 4g /work/repo"
+    );
+
+    form.set_workspace_mode(1);
+    assert_eq!(form.workspace_mode(), WorkspaceMode::Clone);
+    assert_eq!(
+        form.create_command().preview(),
+        "sbx create --name sandbox-name opencode --cpus 2 --memory 4g --clone /work/repo"
+    );
+
+    form.set_add_workspace(false);
+    assert_eq!(
+        form.create_command().preview(),
+        "sbx create --name sandbox-name opencode --cpus 2 --memory 4g"
+    );
+}
+
+#[test]
 fn selecting_an_agent_closes_the_picker() {
     let mut app = App::with_sandboxes(&[]);
     app.open_wizard();
@@ -72,6 +104,42 @@ fn selecting_an_agent_closes_the_picker() {
     assert_eq!(app.form().agent_index(), 0);
     assert_eq!(app.form().agent_focus(), 0);
     assert!(!app.form().agent_open());
+}
+
+#[test]
+fn windows_home_prefers_user_profile() {
+    let home = super::form::windows_home_from(
+        Some(OsStr::new(r"C:\Users\test")),
+        Some(OsStr::new("D:")),
+        Some(OsStr::new(r"\Users\other")),
+    );
+    assert_eq!(home, Some(PathBuf::from(r"C:\Users\test")));
+}
+
+#[test]
+fn windows_home_uses_home_drive_and_path_when_no_profile() {
+    let home = super::form::windows_home_from(
+        None,
+        Some(OsStr::new("C:")),
+        Some(OsStr::new(r"\Users\test")),
+    );
+    assert_eq!(home, Some(PathBuf::from("C:").join(r"\Users\test")));
+}
+
+#[test]
+fn windows_home_ignores_empty_variables() {
+    assert_eq!(
+        super::form::windows_home_from(Some(OsStr::new("")), None, None),
+        None
+    );
+    assert_eq!(
+        super::form::windows_home_from(
+            None,
+            Some(OsStr::new("")),
+            Some(OsStr::new(r"\Users\test"))
+        ),
+        None
+    );
 }
 
 #[test]
@@ -624,13 +692,17 @@ fn invalid_ports_are_not_published() {
 
 #[test]
 fn stderr_detail_prefers_error_line_and_try_hint() {
-    use std::os::unix::process::ExitStatusExt;
-    use std::process::{ExitStatus, Output};
+    use std::process::{Command, Output};
 
     use super::commands::stderr_detail;
 
+    let status = if cfg!(windows) {
+        Command::new("cmd").args(["/C", "exit 1"]).status().unwrap()
+    } else {
+        Command::new("false").status().unwrap()
+    };
     let output = Output {
-        status: ExitStatus::from_raw(256),
+        status,
         stdout: Vec::new(),
         stderr: b"    o opencode - now ships as a kit; resolving docker.io/sbx/opencode:latest\n\n  error: sandbox 'test' already exists; connect to the existing sandbox\n    try: sbx run --name test\n"
             .to_vec(),
@@ -640,4 +712,78 @@ fn stderr_detail_prefers_error_line_and_try_hint() {
         stderr_detail(&output, "sbx command failed"),
         "error: sandbox 'test' already exists; connect to the existing sandbox\ntry: sbx run --name test"
     );
+}
+
+#[test]
+fn workspace_picker_browses_folders_and_commits_the_current_one() {
+    let temp = TempWorkspaceDir::new();
+    let inner = temp.make_dir("inner");
+    temp.make_dir("alpha");
+    std::fs::write(temp.path().join("notes.txt"), "not a folder").unwrap();
+
+    let mut app = App::with_sandboxes(&[]);
+    app.open_wizard();
+    app.set_workspace_path_for_test(temp.path());
+    app.open_workspace_picker();
+
+    assert!(matches!(app.mode(), Mode::Workspace));
+    let picker = app.workspace_picker().unwrap();
+    assert_eq!(picker.dir(), temp.path());
+    assert_eq!(picker.entries(), [WORKSPACE_PARENT, "alpha", "inner"]);
+
+    app.select_workspace_entry("inner".to_owned());
+    let picker = app.workspace_picker().unwrap();
+    assert_eq!(picker.dir(), inner.as_path());
+    assert_eq!(picker.entries(), [WORKSPACE_PARENT]);
+
+    app.select_workspace_entry(WORKSPACE_PARENT.to_owned());
+    assert_eq!(app.workspace_picker().unwrap().dir(), temp.path());
+
+    app.choose_workspace_dir();
+    assert_eq!(
+        app.form().workspace_path(),
+        temp.path().to_string_lossy().as_ref()
+    );
+    assert!(app.workspace_picker().is_none());
+    assert!(app.modals_ref().is_open(CREATE_DIALOG));
+    assert!(matches!(app.mode(), Mode::Wizard));
+}
+
+#[test]
+fn workspace_picker_only_opens_from_the_wizard() {
+    let mut app = App::with_sandboxes(&[]);
+    app.open_workspace_picker();
+    assert!(app.workspace_picker().is_none());
+    assert!(matches!(app.mode(), Mode::Normal));
+}
+
+#[test]
+fn cancelling_the_picker_keeps_the_original_workspace_path() {
+    let temp = TempWorkspaceDir::new();
+    temp.make_dir("child");
+    let mut app = App::with_sandboxes(&[]);
+    app.open_wizard();
+    app.set_workspace_path_for_test(temp.path());
+    let original = app.form().workspace_path().to_owned();
+
+    app.open_workspace_picker();
+    app.select_workspace_entry("child".to_owned());
+    app.cancel_workspace_picker();
+
+    assert_eq!(app.form().workspace_path(), original);
+    assert!(app.workspace_picker().is_none());
+    assert!(app.modals_ref().is_open(CREATE_DIALOG));
+}
+
+#[test]
+fn workspace_picker_starts_at_the_nearest_existing_directory() {
+    let temp = TempWorkspaceDir::new();
+    let missing = temp.path().join("does-not-exist").join("workspace");
+
+    let mut app = App::with_sandboxes(&[]);
+    app.open_wizard();
+    app.set_workspace_path_for_test(&missing);
+    app.open_workspace_picker();
+
+    assert_eq!(app.workspace_picker().unwrap().dir(), temp.path());
 }

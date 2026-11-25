@@ -13,6 +13,7 @@ use ratcn::{InputState, Theme};
 
 use crate::app::{
     App, CONFIRM_DIALOG, CREATE_DIALOG, FormField, INFO_DIALOG, PORTS_DIALOG, PortField, Sandbox,
+    WORKSPACE_DIALOG,
 };
 
 mod dashboard;
@@ -20,7 +21,7 @@ mod dialogs;
 mod widgets;
 
 use self::dashboard::{paint_body, paint_footer, paint_header, paint_toolbar};
-use self::dialogs::{confirm_dialog, create_dialog, info_dialog, ports_dialog};
+use self::dialogs::{confirm_dialog, create_dialog, info_dialog, ports_dialog, workspace_dialog};
 
 // The UI tests reach these helpers through `use super::*`.
 #[cfg(test)]
@@ -51,6 +52,14 @@ pub enum Msg {
     AgentOpenChanged(bool),
     AgentFocused(usize),
     AgentSelected(usize),
+    AddWorkspaceChanged(bool),
+    WorkspaceModeChanged(usize),
+    ChangeWorkspace,
+    CancelWorkspace,
+    CreateWorkspaceHere,
+    WorkspaceEntryFocused(String, usize),
+    WorkspaceEntrySelected(String),
+    WorkspaceScrolled(usize),
     StartSelected,
     StopSelected,
     ExecSelected,
@@ -99,6 +108,14 @@ pub fn apply(app: &mut App, msg: Msg) {
         Msg::AgentOpenChanged(open) => app.set_agent_open(open),
         Msg::AgentFocused(index) => app.set_agent_focus(index),
         Msg::AgentSelected(index) => app.set_agent_index(index),
+        Msg::AddWorkspaceChanged(enabled) => app.set_add_workspace(enabled),
+        Msg::WorkspaceModeChanged(index) => app.set_workspace_mode(index),
+        Msg::ChangeWorkspace => app.open_workspace_picker(),
+        Msg::CancelWorkspace => app.cancel_workspace_picker(),
+        Msg::CreateWorkspaceHere => app.choose_workspace_dir(),
+        Msg::WorkspaceEntryFocused(name, scroll) => app.focus_workspace_entry(name, scroll),
+        Msg::WorkspaceEntrySelected(name) => app.select_workspace_entry(name),
+        Msg::WorkspaceScrolled(offset) => app.set_workspace_scroll(offset),
         Msg::StartSelected => app.start_selected(),
         Msg::StopSelected => app.stop_selected(),
         Msg::ExecSelected => app.exec_selected(),
@@ -178,6 +195,10 @@ pub fn declare(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme) {
     }
     if app.modals_ref().is_open(PORTS_DIALOG) {
         ctx.modal(PORTS_DIALOG, ports_dialog(app, &theme), area);
+    }
+    // Declared last: the picker stacks above the create wizard that opened it.
+    if app.modals_ref().is_open(WORKSPACE_DIALOG) {
+        ctx.modal(WORKSPACE_DIALOG, workspace_dialog(app, &theme), area);
     }
 }
 

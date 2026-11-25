@@ -2,6 +2,8 @@
 //! They keep the production code from growing shell-out branches for tests.
 
 use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 
 use ratcn::Toast;
@@ -77,6 +79,12 @@ impl App {
         let _ = self.modals.open(PORTS_DIALOG, &mut self.focus);
     }
 
+    /// Point the form at a test directory so the folder picker has real
+    /// contents without depending on the developer's home directory.
+    pub fn set_workspace_path_for_test(&mut self, path: &Path) {
+        self.form.workspace_path = path.to_string_lossy().into_owned();
+    }
+
     /// The command the ports dialog handed to the test hook.
     pub fn take_published_for_test(&mut self) -> Option<String> {
         self.published_for_test.take()
@@ -102,5 +110,41 @@ impl App {
     /// this instead of letting the app shell out to `sbx`.
     pub fn take_confirmed_for_test(&mut self) -> Option<PendingAction> {
         self.confirmed_for_test.take()
+    }
+}
+
+static NEXT_WORKSPACE_DIR: AtomicUsize = AtomicUsize::new(0);
+
+/// A real, isolated directory tree for folder-picker tests. Removed on drop so
+/// repeated runs do not leave clutter behind.
+pub struct TempWorkspaceDir {
+    root: PathBuf,
+}
+
+impl TempWorkspaceDir {
+    pub fn new() -> Self {
+        let root = std::env::temp_dir().join(format!(
+            "sbx-tui-workspace-{}-{}",
+            std::process::id(),
+            NEXT_WORKSPACE_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).expect("create temporary workspace directory");
+        Self { root }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn make_dir(&self, name: &str) -> PathBuf {
+        let path = self.root.join(name);
+        std::fs::create_dir_all(&path).expect("create child directory");
+        path
+    }
+}
+
+impl Drop for TempWorkspaceDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
     }
 }

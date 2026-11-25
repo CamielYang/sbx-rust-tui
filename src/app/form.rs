@@ -1,3 +1,6 @@
+use std::ffi::OsStr;
+use std::path::PathBuf;
+
 use ratcn::InputState;
 
 use super::{AGENTS, PendingCommand};
@@ -12,8 +15,33 @@ pub enum FormField {
     Memory,
 }
 
-/// Text and selection state for the create dialog. Ratcn's `Input` and
-/// `Select` components read and replace these values through messages.
+/// How the workspace chosen in the create dialog is attached to a sandbox.
+/// `mount` bind-mounts the host directory; `clone` copies the repository into
+/// the container and keeps its commits available through `sbx`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkspaceMode {
+    Mount,
+    Clone,
+}
+
+impl WorkspaceMode {
+    /// Labels for ratcn's `Cycle`, in cycling order.
+    pub const OPTIONS: [&'static str; 2] = ["mount", "clone"];
+
+    pub(super) fn from_index(index: usize) -> Self {
+        if index == 1 { Self::Clone } else { Self::Mount }
+    }
+
+    pub fn index(self) -> usize {
+        match self {
+            Self::Mount => 0,
+            Self::Clone => 1,
+        }
+    }
+}
+
+/// Text and selection state for the create dialog. Ratcn's `Input`, `Select`
+/// and `Cycle` components read and replace these values through messages.
 #[derive(Clone)]
 pub struct Form {
     pub(super) name: InputState,
@@ -24,6 +52,9 @@ pub struct Form {
     pub(super) docker_size: InputState,
     pub(super) cpus: InputState,
     pub(super) memory: InputState,
+    pub(super) add_workspace: bool,
+    pub(super) workspace_path: String,
+    pub(super) workspace_mode: WorkspaceMode,
 }
 
 impl Form {
@@ -43,6 +74,9 @@ impl Form {
             docker_size: InputState::new(""),
             cpus: InputState::new("2"),
             memory: InputState::new(default_memory()),
+            add_workspace: false,
+            workspace_path: default_workspace_path(),
+            workspace_mode: WorkspaceMode::Mount,
         }
     }
 
@@ -76,6 +110,27 @@ impl Form {
 
     pub fn memory(&self) -> &InputState {
         &self.memory
+    }
+
+    pub fn add_workspace(&self) -> bool {
+        self.add_workspace
+    }
+
+    pub fn workspace_path(&self) -> &str {
+        &self.workspace_path
+    }
+
+    pub fn workspace_mode(&self) -> WorkspaceMode {
+        self.workspace_mode
+    }
+
+    pub fn set_add_workspace(&mut self, enabled: bool) {
+        self.add_workspace = enabled;
+    }
+
+    pub fn set_workspace_mode(&mut self, index: usize) {
+        self.workspace_mode =
+            WorkspaceMode::from_index(index.min(WorkspaceMode::OPTIONS.len() - 1));
     }
 
     pub fn set_agent_index(&mut self, index: usize) {
@@ -178,6 +233,14 @@ impl Form {
                 "DOCKER_SANDBOXES_DOCKER_SIZE".to_owned(),
                 format!("{docker}g"),
             ));
+        }
+
+        if self.add_workspace {
+            if self.workspace_mode == WorkspaceMode::Clone {
+                args.push("--clone".to_owned());
+            }
+            // The workspace is the command's final positional argument.
+            args.push(self.workspace_path.trim().to_owned());
         }
 
         PendingCommand {
@@ -288,6 +351,58 @@ fn host_memory_mib() -> Option<u64> {
     let line = meminfo.lines().find(|line| line.starts_with("MemTotal:"))?;
     let kib = line.split_whitespace().nth(1)?.parse::<u64>().ok()?;
     Some(kib / 1024)
+}
+
+/// The workspace location offered before the user opens the folder picker.
+fn default_workspace_path() -> String {
+    home_dir()
+        .or_else(|| std::env::current_dir().ok())
+        .map(|path| path.to_string_lossy().into_owned())
+        // Rare, but keep a placeholder if even the current directory is gone.
+        .unwrap_or_else(|| "~".to_owned())
+}
+
+/// Windows does not normally define `HOME`, so check its home variables first
+/// there. Elsewhere `HOME` wins; the Windows variables are still a useful
+/// fallback when running under an unusual environment.
+fn home_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME");
+    let user_profile = std::env::var_os("USERPROFILE");
+    let home_drive = std::env::var_os("HOMEDRIVE");
+    let home_path = std::env::var_os("HOMEPATH");
+
+    let unix_home = non_empty(home.as_deref()).map(PathBuf::from);
+    let windows_home = windows_home_from(
+        user_profile.as_deref(),
+        home_drive.as_deref(),
+        home_path.as_deref(),
+    );
+
+    #[cfg(windows)]
+    let result = windows_home.or(unix_home);
+    #[cfg(not(windows))]
+    let result = unix_home.or(windows_home);
+    result
+}
+
+fn non_empty(value: Option<&OsStr>) -> Option<&OsStr> {
+    value.filter(|value| !value.is_empty())
+}
+
+/// `USERPROFILE` is the modern Windows home; older setups only provide the
+/// `HOMEDRIVE` + `HOMEPATH` pair.
+pub(super) fn windows_home_from(
+    user_profile: Option<&OsStr>,
+    home_drive: Option<&OsStr>,
+    home_path: Option<&OsStr>,
+) -> Option<PathBuf> {
+    if let Some(profile) = non_empty(user_profile) {
+        return Some(PathBuf::from(profile));
+    }
+    match (non_empty(home_drive), non_empty(home_path)) {
+        (Some(drive), Some(path)) => Some(PathBuf::from(drive).join(path)),
+        _ => None,
+    }
 }
 
 fn default_memory() -> String {
