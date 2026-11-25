@@ -832,13 +832,13 @@ fn ports_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
                 Constraint::Length(add_width),
                 Constraint::Length(6),
                 Constraint::Length(12),
-                Constraint::Length(6),
+                Constraint::Length(9),
                 Constraint::Length(12),
                 Constraint::Min(0),
             ])
             .split(rows[0]);
             ctx.component("ports-add", add_button, add[0]);
-            for (area, label) in [(add[1], " host "), (add[3], " port ")] {
+            for (area, label) in [(add[1], " host "), (add[3], " sandbox ")] {
                 ctx.paint_widget(
                     Paragraph::new(Line::from(Span::styled(
                         label,
@@ -884,9 +884,9 @@ fn ports_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
                     let row = Rect::new(inner.x, inner.y + 1 + index as u16, inner.width, 1);
                     ctx.paint_widget(Paragraph::new(port_row_line(mapping, &theme)), row);
 
+                    // Start at the ACTION column, not the far edge of the box.
                     let width = unpublish_width.min(columns[2].width);
-                    let button_area =
-                        Rect::new(columns[2].x + columns[2].width - width, row.y, width, 1);
+                    let button_area = Rect::new(columns[2].x, row.y, width, 1);
                     let (host_port, sandbox_port) = (mapping.host_port, mapping.sandbox_port);
                     ctx.component(
                         format!("ports-unpublish-{index}"),
@@ -926,7 +926,9 @@ fn port_header_line(theme: &Theme) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!(" {:<16}", "HOST PORT"), style),
         Span::styled(format!("{:<18}", "SANDBOX PORT"), style),
-        Span::styled("ACTION", style),
+        // Two leading cells match the button's own padding, so the label sits
+        // directly above the button text.
+        Span::styled("  ACTION", style),
     ])
 }
 
@@ -1107,7 +1109,7 @@ mod tests {
         assert!(screen.contains("Published ports"));
         assert!(screen.contains("+ Add port"));
         assert!(screen.contains(" host "));
-        assert!(screen.contains(" port "));
+        assert!(screen.contains(" sandbox "));
         assert!(screen.contains("HOST PORT"));
         assert!(screen.contains("SANDBOX PORT"));
         assert!(!screen.contains("PROTOCOL"));
