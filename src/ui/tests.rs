@@ -253,6 +253,22 @@ fn renders_create_dialog() {
 }
 
 #[test]
+fn workspace_option_reveals_path_and_change_button_when_enabled() {
+    let mut app = App::with_sandboxes(&[]);
+    app.open_wizard();
+    let path = app.form().workspace_path().to_owned();
+    let screen = render(&app);
+    assert!(screen.contains("Add workspace"));
+    assert!(!screen.contains(&path));
+    assert!(!screen.contains("Change"));
+
+    app.set_add_workspace(true);
+    let screen = render(&app);
+    assert!(screen.contains(&path));
+    assert!(screen.contains("Change"));
+}
+
+#[test]
 fn renders_info_dialog() {
     let mut app = App::with_sandbox_statuses(&[("alpha", "running")]);
     app.show_info_for_test(SandboxDetails {

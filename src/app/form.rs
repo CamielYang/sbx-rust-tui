@@ -24,6 +24,8 @@ pub struct Form {
     pub(super) docker_size: InputState,
     pub(super) cpus: InputState,
     pub(super) memory: InputState,
+    pub(super) add_workspace: bool,
+    pub(super) workspace_path: String,
 }
 
 impl Form {
@@ -43,6 +45,8 @@ impl Form {
             docker_size: InputState::new(""),
             cpus: InputState::new("2"),
             memory: InputState::new(default_memory()),
+            add_workspace: false,
+            workspace_path: default_workspace_path(),
         }
     }
 
@@ -76,6 +80,18 @@ impl Form {
 
     pub fn memory(&self) -> &InputState {
         &self.memory
+    }
+
+    pub fn add_workspace(&self) -> bool {
+        self.add_workspace
+    }
+
+    pub fn workspace_path(&self) -> &str {
+        &self.workspace_path
+    }
+
+    pub fn set_add_workspace(&mut self, enabled: bool) {
+        self.add_workspace = enabled;
     }
 
     pub fn set_agent_index(&mut self, index: usize) {
@@ -288,6 +304,13 @@ fn host_memory_mib() -> Option<u64> {
     let line = meminfo.lines().find(|line| line.starts_with("MemTotal:"))?;
     let kib = line.split_whitespace().nth(1)?.parse::<u64>().ok()?;
     Some(kib / 1024)
+}
+
+/// The standard workspace location offered by the create dialog. A path picker
+/// will replace this later; until then the user's home directory is the default.
+fn default_workspace_path() -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "~".to_owned());
+    format!("{home}/workspace")
 }
 
 fn default_memory() -> String {

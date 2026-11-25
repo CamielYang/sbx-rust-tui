@@ -192,6 +192,10 @@ impl App {
         self.form.set_agent_open(open);
     }
 
+    pub fn set_add_workspace(&mut self, enabled: bool) {
+        self.form.set_add_workspace(enabled);
+    }
+
     pub fn info(&self) -> Option<&SandboxDetails> {
         self.info.as_ref()
     }

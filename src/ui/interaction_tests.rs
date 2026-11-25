@@ -276,6 +276,37 @@ fn clicking_publish_ports_opens_the_ports_dialog() {
 }
 
 #[test]
+fn workspace_checkbox_reveals_the_path_and_change_button() {
+    let mut app = App::with_sandboxes(&[]);
+    app.open_wizard();
+    let mut ratcn = new_runtime();
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    draw(&mut terminal, &app, &mut ratcn);
+
+    let (x, y) = position_from_bottom(&screen(&terminal), "Add workspace")
+        .expect("workspace checkbox is on screen");
+    let emitted = click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+    assert!(
+        emitted
+            .iter()
+            .any(|message| matches!(message, Msg::AddWorkspaceChanged(true)))
+    );
+    assert!(app.form().add_workspace());
+    let path = app.form().workspace_path().to_owned();
+    assert!(screen(&terminal).contains(&path));
+
+    // The button is live but intentionally inert until the path picker exists.
+    let (x, y) = position_from_bottom(&screen(&terminal), "Change").expect("change button");
+    let emitted = click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+    assert!(
+        emitted
+            .iter()
+            .any(|message| matches!(message, Msg::ChangeWorkspace))
+    );
+    assert_eq!(app.form().workspace_path(), path);
+}
+
+#[test]
 fn add_port_button_publishes_the_default_mapping() {
     let mut app = App::with_sandboxes(&["alpha"]);
     app.show_ports_for_test("alpha", Vec::new());

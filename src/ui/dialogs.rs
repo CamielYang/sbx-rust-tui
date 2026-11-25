@@ -5,7 +5,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratcn::color::{away_from, dim};
-use ratcn::{Button, ButtonStyle, ButtonVariant, Dialog, InputState, ListItem, Select, Theme};
+use ratcn::{
+    Button, ButtonStyle, ButtonVariant, Checkbox, Dialog, InputState, ListItem, Select, Theme,
+};
 
 use super::dashboard::{REMOVE_RED, START_GREEN, STOP_ORANGE, action_style};
 use super::widgets::{detail_line, field_row, input, join_usage};
@@ -34,9 +36,10 @@ fn cancel_button<M>(label: impl Into<String>, on_press: impl Fn() -> M + 'static
 
 // --- create dialog ----------------------------------------------------------
 
-/// Six form fields plus the status and creation message, with a blank row
-/// between each one.
-const CREATE_CONTENT_ROWS: usize = 8;
+/// Six inputs, the workspace toggle, the status, and the creation message.
+/// The workspace path row is added only while the toggle is on; every logical
+/// row gets a blank row after it so the controls breathe.
+const CREATE_BASE_ROWS: usize = 9;
 
 pub(super) fn create_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
     let theme = *theme;
@@ -98,6 +101,19 @@ pub(super) fn create_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
     )
     .max_visible_items(6)
     .disabled(creating);
+    let add_workspace = Checkbox::new("Add workspace")
+        .checked(
+            |state: &App| state.form().add_workspace(),
+            Msg::AddWorkspaceChanged,
+        )
+        .disabled(creating);
+    let workspace_enabled = form.add_workspace();
+    let workspace_path = form.workspace_path().to_owned();
+    let change_workspace = Button::new("Change")
+        .ghost()
+        .on_press(|| Msg::ChangeWorkspace)
+        .disabled(creating);
+    let change_width = change_workspace.width();
 
     // The untouched empty name is not an error yet; the Create button still
     // validates it when pressed.
@@ -131,14 +147,17 @@ pub(super) fn create_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
     } else {
         String::new()
     };
+    let path_rows = usize::from(workspace_enabled);
+    let content_rows = CREATE_BASE_ROWS + path_rows;
+    let status_index = 7 + path_rows;
 
     Dialog::new()
         .title("New sandbox")
         .description("Create a Docker Sandbox with sbx")
         .outer_width(70)
         .on_dismiss(|| Msg::CancelWizard)
-        .content((CREATE_CONTENT_ROWS * 2 - 1) as u16, move |ctx| {
-            let rows = Layout::vertical(vec![Constraint::Length(1); CREATE_CONTENT_ROWS * 2 - 1])
+        .content((content_rows * 2 - 1) as u16, move |ctx| {
+            let rows = Layout::vertical(vec![Constraint::Length(1); content_rows * 2 - 1])
                 .split(ctx.area());
             let row = |index: usize| rows[index * 2];
             field_row(ctx, row(0), "Name", name, theme);
@@ -147,20 +166,45 @@ pub(super) fn create_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
             field_row(ctx, row(3), "Docker data (GB)", docker, theme);
             field_row(ctx, row(4), "CPUs", cpus, theme);
             field_row(ctx, row(5), "Memory", memory, theme);
+            field_row(ctx, row(6), "Add workspace", add_workspace, theme);
+
+            if workspace_enabled {
+                let columns = Layout::horizontal([
+                    Constraint::Length(20),
+                    Constraint::Min(0),
+                    Constraint::Length(change_width),
+                ])
+                .split(row(7));
+                ctx.paint_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        " Workspace",
+                        Style::default().fg(theme.muted_foreground),
+                    ))),
+                    columns[0],
+                );
+                ctx.paint_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        workspace_path,
+                        Style::default().fg(theme.foreground),
+                    ))),
+                    columns[1],
+                );
+                ctx.component("workspace-change", change_workspace, columns[2]);
+            }
 
             ctx.paint_widget(
                 Paragraph::new(Line::from(Span::styled(
                     format!(" {status}"),
                     Style::default().fg(status_color),
                 ))),
-                row(6),
+                row(status_index),
             );
             ctx.paint_widget(
                 Paragraph::new(Line::from(Span::styled(
                     format!(" {creating_message}"),
                     Style::default().fg(theme.primary),
                 ))),
-                row(7),
+                row(status_index + 1),
             );
         })
         .action(

@@ -51,6 +51,9 @@ pub enum Msg {
     AgentOpenChanged(bool),
     AgentFocused(usize),
     AgentSelected(usize),
+    AddWorkspaceChanged(bool),
+    /// Placeholder for the path picker the Change button will open.
+    ChangeWorkspace,
     StartSelected,
     StopSelected,
     ExecSelected,
@@ -99,6 +102,11 @@ pub fn apply(app: &mut App, msg: Msg) {
         Msg::AgentOpenChanged(open) => app.set_agent_open(open),
         Msg::AgentFocused(index) => app.set_agent_focus(index),
         Msg::AgentSelected(index) => app.set_agent_index(index),
+        Msg::AddWorkspaceChanged(enabled) => app.set_add_workspace(enabled),
+        Msg::ChangeWorkspace => {
+            // The path picker is not implemented yet; the button is wired so
+            // it can be driven by a dialog in a later change.
+        }
         Msg::StartSelected => app.start_selected(),
         Msg::StopSelected => app.stop_selected(),
         Msg::ExecSelected => app.exec_selected(),
