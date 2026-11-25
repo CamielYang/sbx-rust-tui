@@ -12,8 +12,8 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratcn::color::{DISABLED_DIM, FOCUS_SHIFT, HOVER_SHIFT, away_from, dim, nearest_to};
 use ratcn::runtime::{ChildId, Component, DeclareCtx, FocusState};
 use ratcn::{
-    Button, ButtonStyle, Dialog, Input, InputState, List, ListItem, ListItemState, ProgressWidget,
-    Select, Theme,
+    Button, ButtonStyle, Dialog, Input, InputState, List, ListItem, ListItemState, ListStyle,
+    ProgressWidget, Select, Theme,
 };
 
 use crate::app::{
@@ -230,6 +230,16 @@ fn paint_body(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme, area
     paint_actions(ctx, app, theme, columns[1]);
 }
 
+/// Hovering shows the cursor row, and hover focus puts focus on the list. Let
+/// that row carry the feedback: the well stays at one color through rest,
+/// focus, and hover.
+fn sandbox_list_style(theme: &Theme) -> ListStyle {
+    let mut style = ListStyle::from_theme(theme);
+    style.focused_background = style.background;
+    style.hovered_background = style.background;
+    style
+}
+
 fn paint_sandbox_list(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme, area: Rect) {
     let theme = *theme;
     let block = Block::default()
@@ -255,6 +265,7 @@ fn paint_sandbox_list(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &The
     };
 
     let list = List::new(items)
+        .style(sandbox_list_style)
         .item_focus(|state: &App| state.focused_name(), Msg::SandboxFocused)
         .selection(|state: &App| state.selected_name(), Msg::SandboxSelected)
         .scroll(|state: &App| state.list_offset(), Msg::SandboxScrolled)
@@ -1270,6 +1281,40 @@ mod interaction_tests {
                 "button must stop at x=82"
             );
         }
+    }
+
+    #[test]
+    fn hovering_the_sandbox_list_only_highlights_the_row() {
+        let mut app = App::with_sandbox_statuses(&[("alpha", "running"), ("beta", "stopped")]);
+        let mut ratcn = new_runtime().hover_focus();
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        draw(&mut terminal, &app, &mut ratcn);
+
+        // A cell below the rows belongs to the list's backdrop, not a row.
+        let resting_box = cell_bg(&terminal, 30, 10);
+        let resting_row = cell_bg(&terminal, 6, 3);
+
+        let moved = Event::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Moved,
+            column: 6,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        });
+        if let EventResult::Emit(message) = ratcn.handle_event(moved, &app) {
+            apply(&mut app, message);
+        }
+        draw(&mut terminal, &app, &mut ratcn);
+
+        assert_eq!(
+            cell_bg(&terminal, 30, 10),
+            resting_box,
+            "hover must not recolor the whole sandbox box"
+        );
+        assert_ne!(
+            cell_bg(&terminal, 6, 3),
+            resting_row,
+            "hover must still highlight the sandbox row"
+        );
     }
 
     #[test]
