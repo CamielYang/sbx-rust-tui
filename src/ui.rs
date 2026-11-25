@@ -182,20 +182,27 @@ fn render_block(
     .alignment(Alignment::Left);
     frame.render_widget(Paragraph::new(title_line), title_area);
 
-    let columns = Layout::horizontal([
-        Constraint::Ratio(1, 4),
-        Constraint::Ratio(1, 4),
-        Constraint::Ratio(1, 4),
-        Constraint::Ratio(1, 4),
-    ])
+    // A running sandbox can be stopped, used and inspected. A stopped one
+    // only offers the actions that make sense before it is started again.
+    let buttons: Vec<(&str, Color, ClickAction)> = if sandbox.is_running() {
+        vec![
+            ("Stop", Color::LightRed, ClickAction::Stop(index)),
+            ("Exec", Color::LightGreen, ClickAction::Exec(index)),
+            ("Remove", Color::Red, ClickAction::Remove(index)),
+            ("Info", Color::LightBlue, ClickAction::Info(index)),
+        ]
+    } else {
+        vec![
+            ("Start", Color::LightGreen, ClickAction::Start(index)),
+            ("Remove", Color::Red, ClickAction::Remove(index)),
+        ]
+    };
+
+    let columns = Layout::horizontal(
+        (0..buttons.len()).map(|_| Constraint::Ratio(1, buttons.len() as u32)),
+    )
     .split(buttons_area);
 
-    let buttons = [
-        ("Stop", Color::LightRed, ClickAction::Stop(index)),
-        ("Exec", Color::LightGreen, ClickAction::Exec(index)),
-        ("Remove", Color::Red, ClickAction::Remove(index)),
-        ("Info", Color::LightBlue, ClickAction::Info(index)),
-    ];
     for (cell, (label, color, action)) in columns.iter().zip(buttons) {
         let text = button_label(label, cell.width);
         let style = Style::default().fg(color).add_modifier(dim);
@@ -561,7 +568,7 @@ fn agent_options(selected: usize) -> Vec<Line<'static>> {
 fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     let hints = match app.mode() {
         Mode::Normal => {
-            " click: Stop/Exec/Remove/Info   s/x/d/i keys   wheel scroll   ←/→/↑/↓ move   r refresh   q quit "
+            " click: Stop/Start, Exec, Remove, Info   s toggles stop/start   x/d/i keys   wheel scroll   ←/→/↑/↓ move   r refresh   q quit "
         }
         Mode::Wizard => match app.wizard().step() {
             WizardStep::Agent => " ↑/↓ choose agent   ↵ next   Esc back / click [X] close ",
@@ -640,9 +647,11 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_blocks_have_four_button_targets() {
+    fn running_blocks_have_four_button_targets() {
         let mut app = App::with_sandboxes(&["alpha", "beta"]);
-        snapshot(90, 24, &mut app);
+        let rows = snapshot(90, 24, &mut app);
+        // The first grid row starts at y = 3; its button row is y = 5.
+        let buttons = rows[5].as_str();
 
         for action in [
             ClickAction::Stop(0),
@@ -655,6 +664,39 @@ mod tests {
                 "missing click target for {action:?}"
             );
         }
+        assert!(buttons.contains("Stop"));
+        assert!(buttons.contains("Exec"));
+        assert!(buttons.contains("Info"));
+        assert!(!buttons.contains("Start"));
+    }
+
+    #[test]
+    fn stopped_blocks_only_show_start_and_remove() {
+        let mut app = App::with_sandbox_statuses(&[("alpha", "stopped")]);
+        let rows = snapshot(90, 24, &mut app);
+        let buttons = rows[5].as_str();
+
+        for action in [ClickAction::Start(0), ClickAction::Remove(0)] {
+            assert!(
+                app.click_targets().iter().any(|target| target.action == action),
+                "missing click target for {action:?}"
+            );
+        }
+        for action in [
+            ClickAction::Stop(0),
+            ClickAction::Exec(0),
+            ClickAction::Info(0),
+        ] {
+            assert!(
+                !app.click_targets().iter().any(|target| target.action == action),
+                "unexpected click target for {action:?}"
+            );
+        }
+        assert!(buttons.contains("Start"));
+        assert!(buttons.contains("Remove"));
+        assert!(!buttons.contains("Exec"));
+        assert!(!buttons.contains("Info"));
+        assert!(!buttons.contains("Stop"));
     }
 
     #[test]

@@ -15,9 +15,10 @@ The home screen has a centered **Docker Sandbox Builder** title, a grid of block
 (three columns per row) for the active sandboxes, and a trailing
 **+ New Sandbox** button. Each sandbox block shows a left-aligned name with a
 green dot when the sandbox is running, or a red dot when it is stopped/unknown.
-Below the name are four buttons in one row: **Stop**, **Exec**, **Remove**, and
-**Info**. Clicking the rest of a block selects it; clicking **+ New Sandbox**
-opens the create wizard as a modal over the dashboard.
+Below the name, a running sandbox offers **Stop**, **Exec**, **Remove**, and
+**Info**; a stopped sandbox offers only **Start** and **Remove**. Clicking the
+rest of a block selects it; clicking **+ New Sandbox** opens the create wizard
+as a modal over the dashboard.
 
 Sandbox names and statuses come from `sbx ls --format json` at startup and are
 refreshed after a sandbox is created, stopped, or removed (or when `r` is
@@ -31,10 +32,11 @@ known statuses and the error is shown in the footer for an explicit refresh.
 
 | Button | Command | Behaviour |
 | --- | --- | --- |
-| Stop | `sbx stop {name}` | Stops the sandbox, then refreshes the grid. |
-| Exec | `sbx exec -it {name} bash` | Leaves the TUI, opens an external terminal, runs the shell there, and restores the TUI when that terminal closes. On Linux it tries common terminal emulators in order (`x-terminal-emulator`, `gnome-terminal`, `konsole`, `xfce4-terminal`, `mate-terminal`, `kitty`, `alacritty`, `xterm`); on macOS it uses Terminal.app; on Windows a new `cmd` window. If no terminal can be opened, the footer shows the command to run manually. |
+| Start (stopped only) | `sbx exec {name} -- true` | Starts the sandbox with a no-op command, then refreshes the grid. `sbx` has no standalone `start` verb; `exec` starts a stopped sandbox. |
+| Stop (running only) | `sbx stop {name}` | Stops the sandbox, then refreshes the grid. |
+| Exec (running only) | `sbx exec -it {name} bash` | Leaves the TUI, opens an external terminal, runs the shell there, and restores the TUI when that terminal closes. On Linux it tries common terminal emulators in order (`x-terminal-emulator`, `gnome-terminal`, `konsole`, `xfce4-terminal`, `mate-terminal`, `kitty`, `alacritty`, `xterm`); on macOS it uses Terminal.app; on Windows a new `cmd` window. If no terminal can be opened, the footer shows the command to run manually. |
 | Remove | `sbx remove {name} --force` | Removes the sandbox, then refreshes the grid. `--force` is added because the TUI has no TTY for `sbx`'s confirmation prompt; removal is immediate and cannot be undone. |
-| Info | `sbx inspect {name} --format json` then `sbx exec {name} -- sh -c …` | Opens a modal with name, status, CPU count, and one row each for memory, root filesystem, and Docker filesystem, shown as `used / total`. The in-guest commands run only when Info is opened, so the numbers are fresh; `sbx inspect` supplies fallback totals when the guest cannot report them. Missing values appear as `n/a`, and command errors appear as a note in the modal. |
+| Info (running only) | `sbx inspect {name} --format json` then `sbx exec {name} -- sh -c …` | Opens a modal with name, status, CPU count, and one row each for memory, root filesystem, and Docker filesystem, shown as `used / total`. The in-guest commands run only when Info is opened, so the numbers are fresh; `sbx inspect` supplies fallback totals when the guest cannot report them. Missing values appear as `n/a`, and command errors appear as a note in the modal. |
 
 The Info modal closes with `Esc`, `q`, `i`, `Enter`, or its **[X]** button.
 
@@ -67,7 +69,8 @@ Two platform notes:
 | `Home` / `End` | First / last block |
 | `PgUp` / `PgDn` | Scroll the grid |
 | `Enter` (on **+ New Sandbox**) | Open the create wizard modal |
-| `s` / `x` / `d` / `i` | Stop / Exec / Remove / Inspect the selected sandbox |
+| `s` | Start a stopped sandbox, or stop a running one |
+| `x` / `d` / `i` | Exec / Remove / Inspect the selected sandbox (`x` and `i` are ignored when it is stopped) |
 | `r` | Refresh the sandbox list |
 | `q` / `Esc` / `Ctrl+C` | Quit (terminal is always restored) |
 
@@ -92,9 +95,10 @@ Inside the wizard modal:
 ## Mouse
 
 Mouse capture is enabled on startup and disabled when the app exits (including on
-panic). Click a sandbox block to select it, click one of its **Stop**, **Exec**,
-**Remove**, or **Info** buttons to act on it, click **+ New Sandbox** to open the
-wizard, and use the scroll wheel to move between grid rows. Exec temporarily
+panic). Click a sandbox block to select it, click one of its **Start**/**Stop**,
+**Exec**, **Remove**, or **Info** buttons to act on it (only **Start** and
+**Remove** are shown for a stopped sandbox), click **+ New Sandbox** to open
+the wizard, and use the scroll wheel to move between grid rows. Exec temporarily
 disables mouse capture so the external terminal behaves normally.
 
 The wizard modal has an **[X]** close button in its top-right corner and a
@@ -142,14 +146,16 @@ The two size variables are passed only to the child process via
 
 ## Notes / possible next steps
 
-- Sandbox creation, stopping, removal, and inspection run synchronously; the UI
-  is blocked while those `sbx` commands run. Moving execution to a worker thread
+- Sandbox creation, starting, stopping, removal, and inspection run
+  synchronously; the UI is blocked while those `sbx` commands run. Moving
+  execution to a worker thread
   with a channel would fix that.
 - Live resource values in the info modal come from `nproc`, `/proc/meminfo`, and
   `df -k` inside the microVM via `sbx exec {name} -- sh -c …`. Used space is
-  `total - available` (memory uses `MemAvailable` when present). Because
-  `sbx exec` starts a stopped sandbox, opening Info on one may bring it up
-  briefly. Values the guest does not report fall back to
+  `total - available` (memory uses `MemAvailable` when present). These commands
+  need a running sandbox — the same `exec` behaviour powers the **Start**
+  button — so Info is not offered on stopped blocks. Values the guest does not
+  report fall back to
   `sbx inspect --format json`, and anything still missing is shown as `n/a`.
 - The five-second ticker only re-reads `sbx ls`; it never re-runs the in-guest
   metrics commands, so leaving Info open does not add background load.

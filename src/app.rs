@@ -50,6 +50,7 @@ pub enum ClickAction {
     OpenWizard,
     CloseWizard,
     CreateSandbox,
+    Start(usize),
     Stop(usize),
     Exec(usize),
     Remove(usize),
@@ -1091,10 +1092,19 @@ impl App {
             ClickAction::OpenWizard if self.mode == Mode::Normal => self.open_wizard(),
             ClickAction::CloseWizard if self.mode == Mode::Wizard => self.close_wizard(),
             ClickAction::CreateSandbox if self.mode == Mode::Wizard => self.create_from_button(),
+            ClickAction::Start(index) if self.mode == Mode::Normal => self.start_sandbox(index),
             ClickAction::Stop(index) if self.mode == Mode::Normal => self.stop_sandbox(index),
-            ClickAction::Exec(index) if self.mode == Mode::Normal => self.exec_sandbox(index),
+            ClickAction::Exec(index)
+                if self.mode == Mode::Normal && self.sandbox_is_running(index) =>
+            {
+                self.exec_sandbox(index)
+            }
             ClickAction::Remove(index) if self.mode == Mode::Normal => self.remove_sandbox(index),
-            ClickAction::Info(index) if self.mode == Mode::Normal => self.open_info(index),
+            ClickAction::Info(index)
+                if self.mode == Mode::Normal && self.sandbox_is_running(index) =>
+            {
+                self.open_info(index)
+            }
             ClickAction::CloseInfo if self.mode == Mode::Info => self.close_info(),
             _ => {}
         }
@@ -1120,20 +1130,20 @@ impl App {
                 KeyCode::Enter if self.is_new_sandbox_selected() => self.open_wizard(),
                 KeyCode::Char('r') | KeyCode::Char('R') => self.refresh_sandboxes(),
                 KeyCode::Char('s') | KeyCode::Char('S') if !self.is_new_sandbox_selected() => {
-                    let index = self.selected;
-                    self.stop_sandbox(index);
+                    self.toggle_sandbox(self.selected);
                 }
-                KeyCode::Char('x') | KeyCode::Char('X') if !self.is_new_sandbox_selected() => {
-                    let index = self.selected;
-                    self.exec_sandbox(index);
+                KeyCode::Char('x') | KeyCode::Char('X')
+                    if !self.is_new_sandbox_selected() && self.sandbox_is_running(self.selected) =>
+                {
+                    self.exec_sandbox(self.selected);
                 }
                 KeyCode::Char('d') | KeyCode::Char('D') if !self.is_new_sandbox_selected() => {
-                    let index = self.selected;
-                    self.remove_sandbox(index);
+                    self.remove_sandbox(self.selected);
                 }
-                KeyCode::Char('i') | KeyCode::Char('I') if !self.is_new_sandbox_selected() => {
-                    let index = self.selected;
-                    self.open_info(index);
+                KeyCode::Char('i') | KeyCode::Char('I')
+                    if !self.is_new_sandbox_selected() && self.sandbox_is_running(self.selected) =>
+                {
+                    self.open_info(self.selected);
                 }
                 _ => {}
             },
@@ -1167,6 +1177,32 @@ impl App {
         self.mode = Mode::Normal;
         self.info = None;
         self.message.clear();
+    }
+
+    fn sandbox_is_running(&self, index: usize) -> bool {
+        self.sandboxes
+            .get(index)
+            .is_some_and(|sandbox| sandbox.is_running())
+    }
+
+    /// `s` follows the state shown on the block: start a stopped sandbox,
+    /// stop a running one.
+    fn toggle_sandbox(&mut self, index: usize) {
+        if self.sandbox_is_running(index) {
+            self.stop_sandbox(index);
+        } else {
+            self.start_sandbox(index);
+        }
+    }
+
+    fn start_sandbox(&mut self, index: usize) {
+        let Some(name) = self.sandbox_name(index) else {
+            return;
+        };
+        // `sbx` has no standalone start verb; exec starts a stopped sandbox.
+        // A no-op command leaves it running after the command exits.
+        let command = PendingCommand::new("sbx", &["exec", &name, "--", "true"]);
+        self.run_sbx(command, format!("Sandbox '{name}' started."));
     }
 
     fn stop_sandbox(&mut self, index: usize) {
@@ -1419,7 +1455,21 @@ mod tests {
     }
 
     #[test]
+    fn stopped_sandbox_ignores_running_only_keys() {
+        let mut app = App::with_sandbox_statuses(&[("alpha", "stopped")]);
+        for key in ['x', 'i'] {
+            app.handle_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE));
+        }
+        assert!(matches!(app.mode(), Mode::Normal));
+        assert!(app.take_external_command().is_none());
+    }
+
+    #[test]
     fn sandbox_actions_build_expected_commands() {
+        assert_eq!(
+            PendingCommand::new("sbx", &["exec", "demo", "--", "true"]).preview(),
+            "sbx exec demo -- true"
+        );
         assert_eq!(
             PendingCommand::new("sbx", &["stop", "demo"]).preview(),
             "sbx stop demo"
