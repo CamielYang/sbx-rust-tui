@@ -1,23 +1,29 @@
-use std::io;
-use std::sync::mpsc::{self, Receiver};
-use std::thread;
+//! Application state and the small, shared operations around it. Feature
+//! workflows live in child modules; they can still reach `App`'s private
+//! fields, so no getter churn is needed to split them out.
+
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratcn::runtime::{FocusState, ModalState};
 use ratcn::{InputState, Toast, ToasterState};
 
+mod actions;
 mod commands;
+mod dialogs;
 mod form;
 mod ports;
+mod ports_flow;
 mod sandbox;
+#[cfg(test)]
+mod test_support;
+mod workers;
 
+pub use self::actions::PendingAction;
 pub use self::commands::PendingCommand;
 pub use self::form::{Form, FormField};
-pub use self::ports::{PortField, PortForm, PortMapping, PortsView, fetch_ports};
+pub use self::ports::{PortField, PortForm, PortMapping, PortsView};
 pub use self::sandbox::{Sandbox, SandboxDetails, fetch_sandboxes, inspect_sandbox};
-
-use self::sandbox::push_error;
 
 pub const AGENTS: &[&str] = &[
     "claude",
@@ -38,11 +44,6 @@ pub const INFO_DIALOG: &str = "info-dialog";
 pub const CONFIRM_DIALOG: &str = "confirm-dialog";
 pub const PORTS_DIALOG: &str = "ports-dialog";
 
-const CREATE_TOAST: &str = "create-sandbox";
-
-/// Advanced once per event-loop frame while `sbx create` runs in the worker.
-pub const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
 /// How often the dashboard re-reads `sbx ls` to keep running-state dots fresh.
 pub const STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -60,42 +61,6 @@ pub enum Mode {
     Ports,
 }
 
-// --- app --------------------------------------------------------------------
-
-/// A `sbx create` running on a worker thread. The UI keeps rendering (and
-/// ignoring input) until the result arrives on the channel.
-struct Creation {
-    name: String,
-    result: Receiver<io::Result<std::process::Output>>,
-}
-
-/// One in-flight metrics collection for an open Info dialog. The guest-side
-/// CPU sample sleeps for a second, so this runs off the event-loop thread.
-struct InfoRefresh {
-    name: String,
-    result: Receiver<SandboxDetails>,
-}
-
-/// An action waiting for the user to confirm it in the modal dialog. Only the
-/// name is captured: the state is checked again when the user confirms, so a
-/// periodic status refresh cannot start a stopped sandbox by accident.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PendingAction {
-    Start(String),
-    Stop(String),
-    Remove(String),
-}
-
-impl PendingAction {
-    fn verb(&self) -> &'static str {
-        match self {
-            Self::Start(_) => "Start",
-            Self::Stop(_) => "Stop",
-            Self::Remove(_) => "Remove",
-        }
-    }
-}
-
 pub struct App {
     sandboxes: Vec<Sandbox>,
     /// The row the list cursor is on. Hover and arrow keys move it; the
@@ -107,12 +72,12 @@ pub struct App {
     modals: ModalState,
     form: Form,
     info: Option<SandboxDetails>,
-    info_refresh: Option<InfoRefresh>,
+    info_refresh: Option<workers::InfoRefresh>,
     ports: Option<PortsView>,
     port_form: PortForm,
     pending_action: Option<PendingAction>,
     pending_external: Option<PendingCommand>,
-    creation: Option<Creation>,
+    creation: Option<workers::Creation>,
     spinner_index: usize,
     message: String,
     toasts: ToasterState<'static>,
@@ -300,123 +265,6 @@ impl App {
         self.pending_external.take()
     }
 
-    /// True from the moment the create button is pressed until the worker
-    /// thread reports back. Input is ignored during this window.
-    pub fn is_creating(&self) -> bool {
-        self.creation.is_some()
-    }
-
-    pub fn creating_name(&self) -> Option<&str> {
-        self.creation
-            .as_ref()
-            .map(|creation| creation.name.as_str())
-    }
-
-    pub fn spinner(&self) -> &'static str {
-        SPINNER_FRAMES[self.spinner_index % SPINNER_FRAMES.len()]
-    }
-
-    /// Fraction for the themed progress bar shown in the create dialog.
-    pub fn progress(&self) -> f64 {
-        (self.spinner_index % SPINNER_FRAMES.len()) as f64 / (SPINNER_FRAMES.len() - 1) as f64
-    }
-
-    /// Advance the spinner once per rendered frame, but only while a sandbox
-    /// is actually being created.
-    pub fn tick(&mut self) {
-        if self.is_creating() {
-            self.spinner_index = self.spinner_index.wrapping_add(1);
-        }
-    }
-
-    /// Pick up a finished `sbx create` without blocking the event loop.
-    pub fn poll_creation(&mut self) {
-        let (name, result) = {
-            let Some(creation) = self.creation.as_ref() else {
-                return;
-            };
-            let result = match creation.result.try_recv() {
-                Ok(result) => Some(result),
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    Some(Err(io::Error::other("creation worker stopped")))
-                }
-                Err(mpsc::TryRecvError::Empty) => None,
-            };
-            (creation.name.clone(), result)
-        };
-        if let Some(result) = result {
-            self.creation = None;
-            self.finish_creation(result, &name);
-        }
-    }
-
-    /// Pick up a finished metrics collection without blocking the event loop.
-    /// Results for a sandbox that is no longer shown are dropped.
-    pub fn poll_info(&mut self) {
-        let Some(refresh) = self.info_refresh.as_ref() else {
-            return;
-        };
-        let result = match refresh.result.try_recv() {
-            Ok(details) => Some(details),
-            Err(mpsc::TryRecvError::Disconnected) => None,
-            Err(mpsc::TryRecvError::Empty) => return,
-        };
-        let name = refresh.name.clone();
-        self.info_refresh = None;
-        if self.info.as_ref().is_some_and(|info| info.name == name) {
-            match result {
-                Some(details) => self.info = Some(details),
-                None => {
-                    if let Some(info) = self.info.as_mut() {
-                        push_error(info, "Metrics worker stopped.".to_owned());
-                    }
-                }
-            }
-        }
-    }
-
-    /// True while the Info dialog is waiting for its metrics worker.
-    pub fn is_refreshing_info(&self) -> bool {
-        self.info_refresh.is_some()
-    }
-
-    /// Start a new metrics collection for the sandbox shown in Info. Called
-    /// when the dialog opens and on the ten-second ticker; overlapping runs are
-    /// skipped so slow guest commands cannot pile up.
-    pub fn refresh_info(&mut self) {
-        if self.is_refreshing_info() {
-            return;
-        }
-        let Some(name) = self.info.as_ref().map(|info| info.name.clone()) else {
-            return;
-        };
-        let Some(sandbox) = self
-            .sandboxes
-            .iter()
-            .find(|sandbox| sandbox.name == name)
-            .cloned()
-        else {
-            return;
-        };
-        self.start_info_refresh(&sandbox);
-    }
-
-    fn start_info_refresh(&mut self, sandbox: &Sandbox) {
-        if self.is_refreshing_info() {
-            return;
-        }
-        let name = sandbox.name.clone();
-        let sandbox = sandbox.clone();
-        let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
-            let _ = sender.send(inspect_sandbox(&sandbox));
-        });
-        self.info_refresh = Some(InfoRefresh {
-            name,
-            result: receiver,
-        });
-    }
-
     pub fn sandboxes(&self) -> &[Sandbox] {
         &self.sandboxes
     }
@@ -493,410 +341,6 @@ impl App {
         }
     }
 
-    pub fn open_wizard(&mut self) {
-        self.form = Form::new();
-        let _ = self.modals.open(CREATE_DIALOG, &mut self.focus);
-    }
-
-    /// Cancel via the dialog's close button or Escape.
-    pub fn cancel_wizard(&mut self) {
-        self.close_wizard();
-        self.notify_info("Create sandbox cancelled.", None);
-    }
-
-    fn close_wizard(&mut self) {
-        if self
-            .modals
-            .top()
-            .is_some_and(|id| id.as_str() == CREATE_DIALOG)
-        {
-            self.modals.close(&mut self.focus);
-        }
-        self.form = Form::new();
-    }
-
-    pub fn create_from_form(&mut self) {
-        if let Some((field, error)) = self.form.first_error() {
-            self.notify_error(
-                "Invalid sandbox setting",
-                format!("{}: {error}", field.label()),
-            );
-            return;
-        }
-        let pending = self.form.pending_command();
-        let name = self.form.name.value().trim().to_owned();
-        self.start_creation(pending, &name);
-    }
-
-    pub fn open_info(&mut self, name: &str) {
-        let Some(sandbox) = self.sandboxes.iter().find(|s| s.name == name).cloned() else {
-            return;
-        };
-        self.select_named(name);
-        // Show the known values immediately; the guest-side metrics arrive on
-        // a worker so the one-second CPU sample never freezes the TUI.
-        self.info = Some(SandboxDetails {
-            name: sandbox.name.clone(),
-            status: sandbox.status.clone(),
-            ..SandboxDetails::default()
-        });
-        self.info_refresh = None;
-        self.start_info_refresh(&sandbox);
-        let _ = self.modals.open(INFO_DIALOG, &mut self.focus);
-    }
-
-    pub fn close_info(&mut self) {
-        if self
-            .modals
-            .top()
-            .is_some_and(|id| id.as_str() == INFO_DIALOG)
-        {
-            self.modals.close(&mut self.focus);
-        }
-        // Invalidate any worker still running: its result must not land in a
-        // dialog opened later for a different sandbox.
-        self.info = None;
-        self.info_refresh = None;
-    }
-
-    /// Show the published ports of the sandbox the Actions pane targets.
-    pub fn open_ports_selected(&mut self) {
-        if let Some(name) = self.selected_name()
-            && self.is_running(&name)
-        {
-            self.open_ports(&name);
-        }
-    }
-
-    /// Open (or refill) the ports dialog. Listing ports is a quick local `sbx`
-    /// call, so the table is ready on the first frame; a failure is shown in
-    /// the dialog instead of blocking it.
-    pub fn open_ports(&mut self, name: &str) {
-        if !self.is_running(name) {
-            return;
-        }
-        self.select_named(name);
-        self.port_form = PortForm::new();
-        let (ports, error) = match fetch_ports(name) {
-            Ok(ports) => (ports, None),
-            Err(error) => (Vec::new(), Some(error)),
-        };
-        self.ports = Some(PortsView {
-            name: name.to_owned(),
-            ports,
-            error,
-        });
-        let _ = self.modals.open(PORTS_DIALOG, &mut self.focus);
-    }
-
-    pub fn close_ports(&mut self) {
-        if self
-            .modals
-            .top()
-            .is_some_and(|id| id.as_str() == PORTS_DIALOG)
-        {
-            self.modals.close(&mut self.focus);
-        }
-        self.ports = None;
-    }
-
-    /// Re-read the table after a publish, keeping the dialog open.
-    #[cfg_attr(test, allow(dead_code))]
-    fn refresh_ports(&mut self) {
-        let Some(view) = self.ports.as_mut() else {
-            return;
-        };
-        let name = view.name.clone();
-        match fetch_ports(&name) {
-            Ok(ports) => {
-                view.ports = ports;
-                view.error = None;
-            }
-            Err(error) => view.error = Some(error),
-        }
-    }
-
-    /// The **Add port** button: validate both fields, then run
-    /// `sbx port publish <name> <host>:<sandbox>` and refresh the table.
-    pub fn publish_port(&mut self) {
-        if self.mode() != Mode::Ports {
-            return;
-        }
-        let Some(name) = self.ports.as_ref().map(|view| view.name.clone()) else {
-            return;
-        };
-        if let Some(error) = self.port_form.first_error() {
-            if let Some(view) = self.ports.as_mut() {
-                view.error = Some(error.clone());
-            }
-            self.notify_error("Invalid port", error);
-            return;
-        }
-
-        let pending = self.port_form.pending_command(&name);
-
-        #[cfg(test)]
-        {
-            self.published_for_test = Some(pending.preview());
-        }
-
-        #[cfg(not(test))]
-        let host = self.port_form.port(PortField::Host).unwrap_or(0);
-        #[cfg(not(test))]
-        let sandbox = self.port_form.port(PortField::Sandbox).unwrap_or(0);
-
-        #[cfg(not(test))]
-        match pending.run() {
-            Ok(output) if output.status.success() => {
-                self.refresh_ports();
-                self.notify_success(format!("Published {host}:{sandbox} for '{name}'."), None);
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let detail = stderr
-                    .lines()
-                    .find(|line| !line.trim().is_empty())
-                    .unwrap_or("sbx port publish failed")
-                    .to_owned();
-                if let Some(view) = self.ports.as_mut() {
-                    view.error = Some(detail.clone());
-                }
-                self.notify_error("Could not publish port", detail);
-            }
-            Err(error) => {
-                let detail = error.to_string();
-                if let Some(view) = self.ports.as_mut() {
-                    view.error = Some(detail.clone());
-                }
-                self.notify_error("Could not publish port", detail);
-            }
-        }
-    }
-
-    /// The unpublish button on a table row: run
-    /// `sbx port unpublish <name> <host>:<sandbox>` and refresh the table.
-    pub fn unpublish_port(&mut self, host: u16, sandbox: u16) {
-        if self.mode() != Mode::Ports {
-            return;
-        }
-        let Some(name) = self.ports.as_ref().map(|view| view.name.clone()) else {
-            return;
-        };
-        let pending = PendingCommand::new(
-            "sbx",
-            &["port", "unpublish", &name, &format!("{host}:{sandbox}")],
-        );
-
-        #[cfg(test)]
-        {
-            self.unpublished_for_test = Some(pending.preview());
-        }
-
-        #[cfg(not(test))]
-        match pending.run() {
-            Ok(output) if output.status.success() => {
-                self.refresh_ports();
-                self.notify_success(format!("Unpublished {host}:{sandbox} for '{name}'."), None);
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let detail = stderr
-                    .lines()
-                    .find(|line| !line.trim().is_empty())
-                    .unwrap_or("sbx port unpublish failed")
-                    .to_owned();
-                if let Some(view) = self.ports.as_mut() {
-                    view.error = Some(detail.clone());
-                }
-                self.notify_error("Could not unpublish port", detail);
-            }
-            Err(error) => {
-                let detail = error.to_string();
-                if let Some(view) = self.ports.as_mut() {
-                    view.error = Some(detail.clone());
-                }
-                self.notify_error("Could not unpublish port", detail);
-            }
-        }
-    }
-
-    pub fn toggle_selected(&mut self) {
-        let Some(name) = self.selected_name() else {
-            return;
-        };
-        if self.is_running(&name) {
-            self.request_action(PendingAction::Stop(name));
-        } else {
-            self.request_action(PendingAction::Start(name));
-        }
-    }
-
-    /// The Actions pane only offers Start while a sandbox is stopped.
-    pub fn start_selected(&mut self) {
-        if let Some(name) = self.selected_name()
-            && !self.is_running(&name)
-        {
-            self.request_action(PendingAction::Start(name));
-        }
-    }
-
-    /// The Actions pane only offers Stop while a sandbox is running.
-    pub fn stop_selected(&mut self) {
-        if let Some(name) = self.selected_name()
-            && self.is_running(&name)
-        {
-            self.request_action(PendingAction::Stop(name));
-        }
-    }
-
-    /// Start/Stop/Remove never run directly from a button or shortcut: they
-    /// first park here so the user can confirm the action in a dialog.
-    fn request_action(&mut self, action: PendingAction) {
-        if self.mode() != Mode::Normal {
-            return;
-        }
-        self.pending_action = Some(action);
-        let _ = self.modals.open(CONFIRM_DIALOG, &mut self.focus);
-    }
-
-    /// The dialog's Cancel button or Escape.
-    pub fn cancel_action(&mut self) {
-        let Some(action) = self.pending_action.take() else {
-            return;
-        };
-        if self
-            .modals
-            .top()
-            .is_some_and(|id| id.as_str() == CONFIRM_DIALOG)
-        {
-            self.modals.close(&mut self.focus);
-        }
-        self.notify_info(format!("{} cancelled.", action.verb()), None);
-    }
-
-    /// The dialog's confirm button. Recheck the sandbox state before acting:
-    /// the five-second status ticker may have changed it while the dialog was
-    /// open, and a removed sandbox should never be acted on.
-    pub fn confirm_action(&mut self) {
-        let Some(action) = self.pending_action.take() else {
-            return;
-        };
-        if self
-            .modals
-            .top()
-            .is_some_and(|id| id.as_str() == CONFIRM_DIALOG)
-        {
-            self.modals.close(&mut self.focus);
-        }
-        let should_be_running = matches!(&action, PendingAction::Stop(_));
-        let still_valid = match &action {
-            PendingAction::Start(name) | PendingAction::Stop(name) => {
-                self.has_sandbox(name) && self.is_running(name) == should_be_running
-            }
-            PendingAction::Remove(name) => self.has_sandbox(name),
-        };
-        if still_valid {
-            self.perform_action(action);
-        } else {
-            self.notify_info("Sandbox state changed; action cancelled.", None);
-        }
-    }
-
-    fn perform_action(&mut self, action: PendingAction) {
-        #[cfg(test)]
-        {
-            self.confirmed_for_test = Some(action);
-        }
-        #[cfg(not(test))]
-        match action {
-            PendingAction::Start(name) => self.start_sandbox(&name),
-            PendingAction::Stop(name) => self.stop_sandbox(&name),
-            PendingAction::Remove(name) => self.remove_sandbox(&name),
-        }
-    }
-
-    #[cfg_attr(test, allow(dead_code))]
-    fn start_sandbox(&mut self, name: &str) {
-        let command = Self::start_command(name);
-        self.run_sbx(command, format!("Sandbox '{name}' started."));
-    }
-
-    /// `sbx` has no standalone start verb. `run --name` re-attaches to the
-    /// existing sandbox and starts it; `-d` leaves it running detached.
-    fn start_command(name: &str) -> PendingCommand {
-        PendingCommand::new("sbx", &["run", "-d", "--name", name])
-    }
-
-    #[cfg_attr(test, allow(dead_code))]
-    fn stop_sandbox(&mut self, name: &str) {
-        let command = PendingCommand::new("sbx", &["stop", name]);
-        self.run_sbx(command, format!("Sandbox '{name}' stopped."));
-    }
-
-    pub fn exec_selected(&mut self) {
-        let Some(name) = self.selected_name() else {
-            return;
-        };
-        if !self.is_running(&name) {
-            return;
-        }
-        self.pending_external = Some(PendingCommand::new("sbx", &["exec", "-it", &name, "bash"]));
-        self.notify_info(format!("Opening external terminal for '{name}'..."), None);
-    }
-
-    pub fn remove_selected(&mut self) {
-        if let Some(name) = self.selected_name() {
-            self.request_action(PendingAction::Remove(name));
-        }
-    }
-
-    #[cfg_attr(test, allow(dead_code))]
-    fn remove_sandbox(&mut self, name: &str) {
-        // The TUI has no TTY to answer sbx's confirmation prompt, so removal
-        // is explicit and non-interactive here.
-        let command = PendingCommand::new("sbx", &["remove", name, "--force"]);
-        self.run_sbx(command, format!("Sandbox '{name}' removed."));
-    }
-
-    pub fn open_selected_info(&mut self) {
-        if let Some(name) = self.selected_name()
-            && self.is_running(&name)
-        {
-            self.open_info(&name);
-        }
-    }
-
-    fn is_running(&self, name: &str) -> bool {
-        self.sandboxes
-            .iter()
-            .find(|sandbox| sandbox.name == name)
-            .is_some_and(Sandbox::is_running)
-    }
-
-    fn has_sandbox(&self, name: &str) -> bool {
-        self.sandboxes.iter().any(|sandbox| sandbox.name == name)
-    }
-
-    fn start_creation(&mut self, pending: PendingCommand, name: &str) {
-        let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
-            let _ = sender.send(pending.run());
-        });
-        self.creation = Some(Creation {
-            name: name.to_owned(),
-            result: receiver,
-        });
-        self.spinner_index = 0;
-        let now = self.now();
-        self.toasts.push(
-            Toast::loading(format!("Creating sandbox '{name}'"))
-                .with_id(CREATE_TOAST)
-                .persistent(),
-            now,
-        );
-        self.message = format!("Creating sandbox '{name}'...");
-    }
-
     pub fn refresh_sandboxes(&mut self) {
         match fetch_sandboxes() {
             Ok(sandboxes) => self.apply_statuses(sandboxes),
@@ -912,7 +356,7 @@ impl App {
         }
     }
 
-    fn apply_statuses(&mut self, sandboxes: Vec<Sandbox>) {
+    pub(super) fn apply_statuses(&mut self, sandboxes: Vec<Sandbox>) {
         if let Some(info) = self.info.as_mut()
             && let Some(fresh) = sandboxes.iter().find(|sandbox| sandbox.name == info.name)
         {
@@ -923,135 +367,6 @@ impl App {
         self.cursor = self.cursor.min(last);
         self.selected = self.selected.min(last);
         self.list_offset = self.list_offset.min(last);
-    }
-
-    #[cfg_attr(test, allow(dead_code))]
-    fn run_sbx(&mut self, pending: PendingCommand, success: String) {
-        self.handle_sbx_result(pending.run(), success);
-    }
-
-    fn handle_sbx_result(&mut self, result: io::Result<std::process::Output>, success: String) {
-        match result {
-            Ok(output) if output.status.success() => {
-                self.refresh_statuses();
-                self.notify_success(success, None);
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let detail = stderr
-                    .lines()
-                    .find(|line| !line.trim().is_empty())
-                    .unwrap_or("sbx command failed")
-                    .to_owned();
-                self.notify_error("Could not run sbx", detail);
-            }
-            Err(error) => self.notify_error("Could not run sbx", error.to_string()),
-        }
-    }
-
-    fn finish_creation(&mut self, result: io::Result<std::process::Output>, name: &str) {
-        let succeeded = matches!(&result, Ok(output) if output.status.success());
-        let _ = self.toasts.dismiss(CREATE_TOAST);
-        self.handle_sbx_result(result, format!("Sandbox '{name}' created."));
-        if succeeded {
-            self.close_wizard();
-        }
-        // On failure the dialog stays open so the settings can be corrected or
-        // the create can be retried.
-    }
-}
-
-#[cfg(test)]
-impl App {
-    /// Put the app into the same state `start_creation` does, without spawning
-    /// a real `sbx` process. The sender is dropped, so `poll_creation` observes
-    /// a disconnected worker.
-    pub fn begin_creation_for_test(&mut self, name: &str) {
-        let (sender, receiver) = mpsc::channel();
-        drop(sender);
-        self.creation = Some(Creation {
-            name: name.to_owned(),
-            result: receiver,
-        });
-        self.spinner_index = 0;
-        self.message = format!("Creating sandbox '{name}'...");
-        self.toasts.push(
-            Toast::loading(format!("Creating sandbox '{name}'"))
-                .with_id(CREATE_TOAST)
-                .persistent(),
-            self.now(),
-        );
-        let _ = self.modals.open(CREATE_DIALOG, &mut self.focus);
-    }
-
-    pub fn complete_creation_for_test(
-        &mut self,
-        name: &str,
-        result: io::Result<std::process::Output>,
-    ) {
-        self.creation = None;
-        self.finish_creation(result, name);
-    }
-
-    pub fn with_sandboxes(names: &[&str]) -> Self {
-        Self::with_sandbox_statuses(
-            &names
-                .iter()
-                .map(|name| (*name, "running"))
-                .collect::<Vec<_>>(),
-        )
-    }
-
-    pub fn with_sandbox_statuses(entries: &[(&str, &str)]) -> Self {
-        let mut app = Self::new();
-        app.sandboxes = entries
-            .iter()
-            .map(|(name, status)| Sandbox::new((*name).to_owned(), (*status).to_owned()))
-            .collect();
-        app
-    }
-
-    pub fn show_info_for_test(&mut self, details: SandboxDetails) {
-        self.info = Some(details);
-        let _ = self.modals.open(INFO_DIALOG, &mut self.focus);
-    }
-
-    /// Open the ports dialog with a known table, without calling `sbx`.
-    pub fn show_ports_for_test(&mut self, name: &str, ports: Vec<PortMapping>) {
-        self.select_named(name);
-        self.ports = Some(PortsView {
-            name: name.to_owned(),
-            ports,
-            error: None,
-        });
-        let _ = self.modals.open(PORTS_DIALOG, &mut self.focus);
-    }
-
-    /// The command the ports dialog handed to `perform_action`-style test hook.
-    pub fn take_published_for_test(&mut self) -> Option<String> {
-        self.published_for_test.take()
-    }
-
-    /// The command a row's unpublish button handed to the test hook.
-    pub fn take_unpublished_for_test(&mut self) -> Option<String> {
-        self.unpublished_for_test.take()
-    }
-
-    /// Queue a fake metrics result so `poll_info` can be tested without
-    /// running `sbx exec` inside the guest.
-    pub fn queue_info_result_for_test(&mut self, name: &str, details: SandboxDetails) {
-        let (sender, receiver) = mpsc::channel();
-        sender.send(details).expect("test channel");
-        self.info_refresh = Some(InfoRefresh {
-            name: name.to_owned(),
-            result: receiver,
-        });
-    }
-
-    /// The action a confirmed dialog handed to `perform_action`. Tests use
-    /// this instead of letting the app shell out to `sbx`.
-    pub fn take_confirmed_for_test(&mut self) -> Option<PendingAction> {
-        self.confirmed_for_test.take()
     }
 }
 

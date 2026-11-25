@@ -107,6 +107,17 @@ impl PendingCommand {
     }
 }
 
+/// First non-empty stderr line of a failed command, with a caller-supplied
+/// fallback when the child wrote nothing readable.
+pub(super) fn stderr_detail(output: &std::process::Output, fallback: &str) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    stderr
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or(fallback)
+        .to_owned()
+}
+
 fn quote_if_needed(part: &str) -> String {
     if part.contains(char::is_whitespace) {
         format!("'{part}'")
