@@ -151,6 +151,9 @@ fn draw(
     ratcn: &mut Ratcn<App, Msg>,
     theme: &Theme,
 ) -> Result<()> {
+    // A status tick may hide the action button that held focus; move focus to
+    // a control that is still on screen before ratcn resolves it.
+    ui::settle_focus(app);
     terminal.draw(|frame| {
         let now = app.now();
         app.prune_toasts(now);

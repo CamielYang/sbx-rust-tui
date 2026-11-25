@@ -18,8 +18,11 @@ The screen uses ratcn components and its Tokyo Night theme:
 - a header with the sandbox count,
 - a toolbar with **+ New sandbox**, **Refresh**, and **Quit** buttons,
 - a scrollable sandbox list with running/stopped indicators,
-- an **Actions** pane with **Start**/**Stop**, **Exec shell**, **Info**, and
-  **Remove** buttons for the selected sandbox,
+- an **Actions** pane whose colored buttons follow the sandbox you click or
+  commit with Enter: **Start** (green) and **Remove** (red) for a stopped
+  sandbox, **Stop** (orange), **Exec shell** (gray), **Remove** (red), and
+  **Info** (blue) for a running one. Every button changes shade on focus and
+  hover, and actions that do not apply are hidden rather than disabled,
 - a footer with the latest message and keyboard shortcuts,
 - transient toast notifications in the top-right corner.
 
@@ -42,7 +45,8 @@ kept and the error appears in the footer and as a toast.
 | Remove | `sbx remove {name} --force` | Removes immediately; `--force` avoids `sbx`'s confirmation prompt, which the TUI cannot answer. |
 
 Info is only available for running sandboxes. It closes with `Esc` or the
-**Close** button.
+**Close** button. Clicking a sandbox row (or pressing Enter on it) focuses that
+sandbox for the Actions pane; hovering merely moves the list cursor.
 
 ## Keys
 
@@ -51,7 +55,7 @@ Info is only available for running sandboxes. It closes with `Esc` or the
 | `Tab` / `Shift+Tab` | Move focus through toolbar buttons, the sandbox list, and action buttons |
 | `↑` / `↓` / `j` / `k` | Move the sandbox list cursor |
 | `PgUp` / `PgDn` / wheel | Scroll the sandbox list |
-| `Enter` / `Space` | Activate the focused button or row |
+| `Enter` / `Space` | Activate the focused button, or focus the cursor row for the Actions pane |
 | `N` | Open the create dialog |
 | `R` | Refresh the sandbox list |
 | `S` | Start a stopped sandbox, or stop a running one |
@@ -101,10 +105,11 @@ the dialog stays open with the invalid field marked and the error in the footer.
 ## Mouse
 
 Mouse input is enabled on startup and disabled on exit (including on panic).
-Click toolbar or action buttons, click a sandbox row to select it, use the wheel
-to scroll, and click dialog fields/buttons. The agent select opens a popup that
-ratcn keeps anchored to its field. Exec temporarily suspends the TUI so the
-external terminal behaves normally.
+Click toolbar or action buttons, click a sandbox row to focus it for the Actions
+pane, use the wheel to scroll, and click dialog fields/buttons. Hovering a row
+only moves the cursor, so the actions keep targeting the last clicked sandbox.
+The agent select opens a popup that ratcn keeps anchored to its field. Exec
+temporarily suspends the TUI so the external terminal behaves normally.
 
 ## Windows build (cross-compile from Linux)
 

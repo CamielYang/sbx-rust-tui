@@ -6,12 +6,14 @@
 //! single place where component messages become state changes.
 
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
-use ratcn::runtime::{Component, DeclareCtx, FocusState};
+use ratcn::color::{DISABLED_DIM, FOCUS_SHIFT, HOVER_SHIFT, away_from, dim, nearest_to};
+use ratcn::runtime::{ChildId, Component, DeclareCtx, FocusState};
 use ratcn::{
-    Button, Dialog, Input, InputState, List, ListItem, ListItemState, ProgressWidget, Select, Theme,
+    Button, ButtonStyle, Dialog, Input, InputState, List, ListItem, ListItemState, ProgressWidget,
+    Select, Theme,
 };
 
 use crate::app::{AGENTS, App, CREATE_DIALOG, FormField, INFO_DIALOG, Sandbox, SandboxDetails};
@@ -32,12 +34,19 @@ pub enum Msg {
     AgentOpenChanged(bool),
     AgentFocused(usize),
     AgentSelected(usize),
-    ToggleSelected,
+    StartSelected,
+    StopSelected,
     ExecSelected,
     InfoSelected,
     RemoveSelected,
     CloseInfo,
 }
+
+const ACTION_START: &str = "action-start";
+const ACTION_STOP: &str = "action-stop";
+const ACTION_EXEC: &str = "action-exec";
+const ACTION_REMOVE: &str = "action-remove";
+const ACTION_INFO: &str = "action-info";
 
 /// Apply one runtime message. Creation locks the controls: late focus messages
 /// are kept so the runtime stays in sync, but everything else is discarded
@@ -48,11 +57,10 @@ pub fn apply(app: &mut App, msg: Msg) {
     }
     match msg {
         Msg::FocusChanged(focus) => *app.focus_mut() = focus,
-        Msg::SandboxFocused(name, offset) => {
-            app.select_named(&name);
-            app.set_list_offset(offset);
-        }
-        Msg::SandboxSelected(name) => app.select_named(&name),
+        // Moving the cursor (hover or arrow keys) only moves the highlight.
+        // Clicking or Enter commits the row as the Actions pane's target.
+        Msg::SandboxFocused(name, offset) => app.focus_list_item(&name, offset),
+        Msg::SandboxSelected(name) => app.focus_sandbox(&name),
         Msg::SandboxScrolled(offset) => app.set_list_offset(offset),
         Msg::OpenWizard => app.open_wizard(),
         Msg::Refresh => {
@@ -66,11 +74,35 @@ pub fn apply(app: &mut App, msg: Msg) {
         Msg::AgentOpenChanged(open) => app.set_agent_open(open),
         Msg::AgentFocused(index) => app.set_agent_focus(index),
         Msg::AgentSelected(index) => app.set_agent_index(index),
-        Msg::ToggleSelected => app.toggle_selected(),
+        Msg::StartSelected => app.start_selected(),
+        Msg::StopSelected => app.stop_selected(),
         Msg::ExecSelected => app.exec_selected(),
         Msg::InfoSelected => app.open_selected_info(),
         Msg::RemoveSelected => app.remove_selected(),
         Msg::CloseInfo => app.close_info(),
+    }
+}
+
+/// A status tick can hide the action button holding keyboard focus. Ratcn
+/// leaves a path parked on a component that is no longer declared, and Tab
+/// cannot move from there, so hand focus back to the list instead.
+pub fn settle_focus(app: &mut App) {
+    let Some(id) = app.focus_ref().path().first().map(ChildId::as_str) else {
+        return;
+    };
+    if !id.starts_with("action-") {
+        return;
+    }
+    let selected = app.selected_sandbox();
+    let running = selected.is_some_and(Sandbox::is_running);
+    let valid = match id {
+        ACTION_START => !running && selected.is_some(),
+        ACTION_STOP | ACTION_EXEC | ACTION_INFO => running,
+        ACTION_REMOVE => selected.is_some(),
+        _ => false,
+    };
+    if !valid {
+        *app.focus_mut() = FocusState::intent(["sandbox-list"]);
     }
 }
 
@@ -199,7 +231,7 @@ fn paint_sandbox_list(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &The
     };
 
     let list = List::new(items)
-        .item_focus(|state: &App| state.selected_name(), Msg::SandboxFocused)
+        .item_focus(|state: &App| state.focused_name(), Msg::SandboxFocused)
         .selection(|state: &App| state.selected_name(), Msg::SandboxSelected)
         .scroll(|state: &App| state.list_offset(), Msg::SandboxScrolled)
         .focus_symbol("▸ ")
@@ -238,6 +270,52 @@ fn paint_sandbox_list(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &The
     ctx.component("sandbox-list", list, inner);
 }
 
+// Action hues, in the same saturated register as the Tokyo Night palette.
+const START_GREEN: Color = Color::Rgb(158, 206, 106);
+const STOP_ORANGE: Color = Color::Rgb(255, 158, 100);
+const EXEC_GRAY: Color = Color::Rgb(122, 132, 166);
+const REMOVE_RED: Color = Color::Rgb(247, 118, 142);
+const INFO_BLUE: Color = Color::Rgb(122, 162, 247);
+
+/// A filled button keeps its action hue in every state. Focus deepens the fill,
+/// hover lifts it, and both change visibly even when the button is focused —
+/// ratcn resolves hover before focus, so the pointer always wins.
+fn action_style(fill: Color) -> impl Fn(&Theme) -> ButtonStyle {
+    move |theme: &Theme| {
+        let pressed = nearest_to(theme.background);
+        let raised = away_from(theme.background);
+        ButtonStyle {
+            foreground: theme.background,
+            background: fill,
+            border: None,
+            focused_foreground: theme.background,
+            focused_background: dim(fill, pressed, FOCUS_SHIFT),
+            focused_border: None,
+            hovered_foreground: theme.background,
+            hovered_background: dim(fill, raised, HOVER_SHIFT),
+            hovered_border: None,
+            disabled_foreground: theme.muted_foreground,
+            disabled_background: dim(fill, theme.surface, DISABLED_DIM),
+            disabled_border: None,
+        }
+    }
+}
+
+/// (id, label, hue, message) for the actions valid in the current state.
+type Action = (&'static str, &'static str, Color, fn() -> Msg);
+
+const RUNNING_ACTIONS: &[Action] = &[
+    (ACTION_STOP, "Stop", STOP_ORANGE, || Msg::StopSelected),
+    (ACTION_EXEC, "Exec shell", EXEC_GRAY, || Msg::ExecSelected),
+    (ACTION_REMOVE, "Remove", REMOVE_RED, || Msg::RemoveSelected),
+    (ACTION_INFO, "Info", INFO_BLUE, || Msg::InfoSelected),
+];
+
+const STOPPED_ACTIONS: &[Action] = &[
+    (ACTION_START, "Start", START_GREEN, || Msg::StartSelected),
+    (ACTION_REMOVE, "Remove", REMOVE_RED, || Msg::RemoveSelected),
+];
+
 fn paint_actions(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -245,6 +323,8 @@ fn paint_actions(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme, a
         .border_style(Style::default().fg(theme.border))
         .style(Style::default().bg(theme.surface));
     let inner = block.inner(area);
+    // The pane's surface goes down first; buttons paint their fills on top.
+    ctx.paint_widget(block, area);
 
     let rows = Layout::vertical([
         Constraint::Length(2),
@@ -258,7 +338,6 @@ fn paint_actions(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme, a
 
     let selected = app.selected_sandbox();
     let running = selected.is_some_and(Sandbox::is_running);
-    let has_selection = selected.is_some();
     let locked = app.is_creating();
 
     let summary = match selected {
@@ -281,28 +360,22 @@ fn paint_actions(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme, a
     };
     ctx.paint_widget(Paragraph::new(summary), rows[0]);
 
-    let toggle = Button::new(if running { "Stop" } else { "Start" })
-        .on_press(|| Msg::ToggleSelected)
-        .disabled(!has_selection || locked);
-    let exec = Button::new("Exec shell")
-        .secondary()
-        .on_press(|| Msg::ExecSelected)
-        .disabled(!running || locked);
-    let info = Button::new("Info")
-        .secondary()
-        .on_press(|| Msg::InfoSelected)
-        .disabled(!running || locked);
-    let remove = Button::new("Remove")
-        .destructive()
-        .on_press(|| Msg::RemoveSelected)
-        .disabled(!has_selection || locked);
-
-    place_button(ctx, "action-toggle", toggle, rows[1]);
-    place_button(ctx, "action-exec", exec, rows[2]);
-    place_button(ctx, "action-info", info, rows[3]);
-    place_button(ctx, "action-remove", remove, rows[4]);
-
-    ctx.paint_widget(block, area);
+    // Only declare actions that mean something right now. A hidden action is
+    // not in the focus order and cannot be clicked by stale pointer state.
+    let actions = if selected.is_none() {
+        &[][..]
+    } else if running {
+        RUNNING_ACTIONS
+    } else {
+        STOPPED_ACTIONS
+    };
+    for (row, (id, label, fill, message)) in actions.iter().enumerate() {
+        let button = Button::new(*label)
+            .style(action_style(*fill))
+            .on_press(*message)
+            .disabled(locked);
+        place_button(ctx, id, button, rows[row + 1]);
+    }
 }
 
 fn place_button(
@@ -626,6 +699,45 @@ mod tests {
     }
 
     #[test]
+    fn running_actions_show_only_running_commands() {
+        let app = App::with_sandboxes(&["alpha"]);
+        let screen = render(&app);
+        for label in ["Stop", "Exec shell", "Remove", "Info"] {
+            assert!(screen.contains(label), "missing running action: {label}");
+        }
+        assert!(
+            !screen.contains("Start"),
+            "Start must be hidden while running"
+        );
+    }
+
+    #[test]
+    fn stopped_actions_show_only_stopped_commands() {
+        let app = App::with_sandbox_statuses(&[("alpha", "stopped")]);
+        let screen = render(&app);
+        assert!(screen.contains("Start"));
+        assert!(screen.contains("Remove"));
+        for label in ["Stop", "Exec shell", "Info"] {
+            assert!(
+                !screen.contains(label),
+                "unexpected running action: {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn action_styles_keep_their_hue_and_change_on_focus_and_hover() {
+        let theme = Theme::tokyo_night();
+        for fill in [START_GREEN, STOP_ORANGE, EXEC_GRAY, REMOVE_RED, INFO_BLUE] {
+            let style = action_style(fill)(&theme);
+            assert_eq!(style.background, fill);
+            assert_eq!(style.focused_foreground, theme.background);
+            assert_ne!(style.focused_background, fill, "focus must change the fill");
+            assert_ne!(style.hovered_background, fill, "hover must change the fill");
+        }
+    }
+
+    #[test]
     fn renders_create_dialog() {
         let mut app = App::with_sandboxes(&[]);
         app.open_wizard();
@@ -686,6 +798,153 @@ mod interaction_tests {
                 });
             })
             .unwrap();
+    }
+
+    fn cell_bg(terminal: &Terminal<TestBackend>, x: u16, y: u16) -> Color {
+        terminal
+            .backend()
+            .buffer()
+            .cell((x, y))
+            .expect("cell on screen")
+            .bg
+    }
+
+    fn screen(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        let width = buffer.area.width as usize;
+        buffer
+            .content()
+            .chunks(width)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn click(
+        terminal: &mut Terminal<TestBackend>,
+        app: &mut App,
+        ratcn: &mut Ratcn<App, Msg>,
+        column: u16,
+        row: u16,
+    ) -> Vec<Msg> {
+        let mut messages = Vec::new();
+        for kind in [
+            crossterm::event::MouseEventKind::Moved,
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+        ] {
+            let event = Event::Mouse(crossterm::event::MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            });
+            if let EventResult::Emit(message) = ratcn.handle_event(event, app) {
+                messages.push(message.clone());
+                apply(app, message);
+            }
+            draw(terminal, app, ratcn);
+        }
+        messages
+    }
+
+    #[test]
+    fn clicking_a_sandbox_focuses_its_actions() {
+        let mut app = App::with_sandbox_statuses(&[("alpha", "running"), ("beta", "stopped")]);
+        let mut ratcn = new_runtime();
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        draw(&mut terminal, &app, &mut ratcn);
+
+        // Hovering the cursor is not a commitment: the Actions pane still
+        // targets the sandbox that was selected before the pointer arrived.
+        let moved = Event::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Moved,
+            column: 6,
+            row: 4,
+            modifiers: KeyModifiers::NONE,
+        });
+        if let EventResult::Emit(message) = ratcn.handle_event(moved, &app) {
+            apply(&mut app, message);
+        }
+        assert_eq!(app.selected_name().as_deref(), Some("alpha"));
+
+        click(&mut terminal, &mut app, &mut ratcn, 6, 4);
+        assert_eq!(app.selected_name().as_deref(), Some("beta"));
+        assert!(app.focus_ref().contains_path(["sandbox-list"]));
+
+        let screen = screen(&terminal);
+        assert!(screen.contains("beta"));
+        assert!(screen.contains("Start"));
+        assert!(screen.contains("Remove"));
+        assert!(!screen.contains("Stop"));
+        assert!(!screen.contains("Exec shell"));
+        assert!(!screen.contains("Info"));
+    }
+
+    #[test]
+    fn hiding_an_action_does_not_park_focus_on_it() {
+        let mut app = App::with_sandbox_statuses(&[("alpha", "stopped")]);
+        *app.focus_mut() = FocusState::intent([ACTION_STOP]);
+        settle_focus(&mut app);
+        assert!(app.focus_ref().contains_path(["sandbox-list"]));
+
+        *app.focus_mut() = FocusState::intent([ACTION_START]);
+        settle_focus(&mut app);
+        assert!(app.focus_ref().contains_path([ACTION_START]));
+    }
+
+    #[test]
+    fn action_buttons_change_color_on_hover() {
+        let app = App::with_sandboxes(&["alpha"]);
+        let mut ratcn = new_runtime();
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        draw(&mut terminal, &app, &mut ratcn);
+        let resting = cell_bg(&terminal, 80, 5);
+        assert_eq!(resting, STOP_ORANGE);
+
+        let moved = Event::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Moved,
+            column: 80,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        });
+        ratcn.handle_event(moved, &app);
+        draw(&mut terminal, &app, &mut ratcn);
+        assert_ne!(cell_bg(&terminal, 80, 5), resting);
+    }
+
+    #[test]
+    fn action_buttons_emit_only_their_own_command() {
+        let mut running = App::with_sandboxes(&["alpha"]);
+        let mut ratcn = new_runtime();
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        draw(&mut terminal, &running, &mut ratcn);
+        let emitted = click(&mut terminal, &mut running, &mut ratcn, 80, 5);
+        assert!(
+            emitted
+                .iter()
+                .any(|message| matches!(message, Msg::StopSelected))
+        );
+        assert!(
+            !emitted
+                .iter()
+                .any(|message| matches!(message, Msg::StartSelected))
+        );
+
+        let mut stopped = App::with_sandbox_statuses(&[("alpha", "stopped")]);
+        let mut ratcn = new_runtime();
+        draw(&mut terminal, &stopped, &mut ratcn);
+        let emitted = click(&mut terminal, &mut stopped, &mut ratcn, 80, 5);
+        assert!(
+            emitted
+                .iter()
+                .any(|message| matches!(message, Msg::StartSelected))
+        );
+        assert!(
+            !emitted
+                .iter()
+                .any(|message| matches!(message, Msg::StopSelected))
+        );
     }
 
     #[test]

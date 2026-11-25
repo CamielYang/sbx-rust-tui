@@ -831,6 +831,9 @@ struct Creation {
 
 pub struct App {
     sandboxes: Vec<Sandbox>,
+    /// The row the list cursor is on. Hover and arrow keys move it; the
+    /// Actions pane follows `selected`, which a click commits.
+    cursor: usize,
     selected: usize,
     list_offset: usize,
     focus: FocusState,
@@ -850,6 +853,7 @@ impl App {
     pub fn new() -> Self {
         let mut app = Self {
             sandboxes: Vec::new(),
+            cursor: 0,
             selected: 0,
             list_offset: 0,
             focus: FocusState::default(),
@@ -1032,6 +1036,12 @@ impl App {
         &self.sandboxes
     }
 
+    /// The row the list cursor is on. Kept apart from the selected sandbox so
+    /// hovering a row does not silently retarget the Actions pane.
+    pub fn focused_name(&self) -> Option<String> {
+        self.sandboxes.get(self.cursor).map(|s| s.name.clone())
+    }
+
     pub fn selected_name(&self) -> Option<String> {
         self.sandboxes.get(self.selected).map(|s| s.name.clone())
     }
@@ -1048,9 +1058,26 @@ impl App {
         self.list_offset = offset.min(self.sandboxes.len().saturating_sub(1));
     }
 
+    /// Move the cursor (and the visible window) without changing which sandbox
+    /// the Actions pane acts on. Keyboard navigation and hover use this.
+    pub fn focus_list_item(&mut self, name: &str, offset: usize) {
+        if let Some(index) = self.sandboxes.iter().position(|s| s.name == name) {
+            self.cursor = index;
+        }
+        self.set_list_offset(offset);
+    }
+
+    /// Commit a sandbox as the target of the Actions pane and put keyboard
+    /// focus on the list so Tab continues into those actions.
+    pub fn focus_sandbox(&mut self, name: &str) {
+        self.select_named(name);
+        *self.focus_mut() = FocusState::intent(["sandbox-list"]);
+    }
+
     pub fn select_named(&mut self, name: &str) {
         if let Some(index) = self.sandboxes.iter().position(|s| s.name == name) {
             self.selected = index;
+            self.cursor = index;
         }
     }
 
@@ -1143,6 +1170,24 @@ impl App {
             self.stop_sandbox(&name);
         } else {
             self.start_sandbox(&name);
+        }
+    }
+
+    /// The Actions pane only offers Start while a sandbox is stopped.
+    pub fn start_selected(&mut self) {
+        if let Some(name) = self.selected_name()
+            && !self.is_running(&name)
+        {
+            self.start_sandbox(&name);
+        }
+    }
+
+    /// The Actions pane only offers Stop while a sandbox is running.
+    pub fn stop_selected(&mut self) {
+        if let Some(name) = self.selected_name()
+            && self.is_running(&name)
+        {
+            self.stop_sandbox(&name);
         }
     }
 
@@ -1240,6 +1285,7 @@ impl App {
         }
         self.sandboxes = sandboxes;
         let last = self.sandboxes.len().saturating_sub(1);
+        self.cursor = self.cursor.min(last);
         self.selected = self.selected.min(last);
         self.list_offset = self.list_offset.min(last);
     }
