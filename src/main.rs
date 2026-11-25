@@ -74,7 +74,7 @@ fn install_panic_hook() {
 }
 
 fn run(terminal: &mut Tui, app: &mut App) -> Result<()> {
-    let theme = Theme::tokyo_night();
+    let theme = Theme::default();
     let mut ratcn = Ratcn::new()
         .focus(|state: &App| state.focus_ref(), Msg::FocusChanged)
         .modals(|state: &App| state.modals_ref())
