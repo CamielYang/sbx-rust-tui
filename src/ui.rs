@@ -234,7 +234,9 @@ fn paint_sandbox_list(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &The
         .item_focus(|state: &App| state.focused_name(), Msg::SandboxFocused)
         .selection(|state: &App| state.selected_name(), Msg::SandboxSelected)
         .scroll(|state: &App| state.list_offset(), Msg::SandboxScrolled)
-        .focus_symbol("▸ ")
+        // The cursor glyph is drawn by `paint_item` below. Ratcn's own
+        // `focus_symbol` reserves its gutter only while the list has focus,
+        // which shifts every row when hover moves focus elsewhere.
         .paint_item(move |state: &App, row: ListItemState<'_, String>| {
             let sandbox = state
                 .sandboxes()
@@ -259,6 +261,12 @@ fn paint_sandbox_list(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &The
                 .map(|sandbox| sandbox.status.as_str())
                 .unwrap_or("empty");
             Line::from(vec![
+                // Two cells are reserved on every row, whether or not the
+                // cursor is visible, so the row text never shifts sideways.
+                Span::styled(
+                    if row.focused { "▸ " } else { "  " },
+                    Style::default().fg(theme.primary),
+                ),
                 Span::styled(if running { "● " } else { "○ " }, status_style),
                 Span::styled(row.label.to_owned(), name_style),
                 Span::styled("  ", Style::default()),
@@ -369,12 +377,20 @@ fn paint_actions(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme, a
     } else {
         STOPPED_ACTIONS
     };
+    // One width for every action, independent of which set is visible, so the
+    // column stays put when a sandbox changes state.
+    let button_width = RUNNING_ACTIONS
+        .iter()
+        .chain(STOPPED_ACTIONS.iter())
+        .map(|(_, label, _, _)| Button::<Msg>::new(*label).width())
+        .max()
+        .unwrap_or(0);
     for (row, (id, label, fill, message)) in actions.iter().enumerate() {
         let button = Button::new(*label)
             .style(action_style(*fill))
             .on_press(*message)
             .disabled(locked);
-        place_button(ctx, id, button, rows[row + 1]);
+        place_button(ctx, id, button, rows[row + 1], button_width);
     }
 }
 
@@ -383,10 +399,11 @@ fn place_button(
     id: &'static str,
     button: Button<Msg>,
     row: Rect,
+    width: u16,
 ) {
-    let width = button.width();
-    // All action buttons use ratcn's default Small size: a single row.
-    let area = row.centered(Constraint::Length(width), Constraint::Length(1));
+    // All action buttons use ratcn's default Small size: a single row. Pin
+    // them to the pane's left edge instead of centering each label width.
+    let area = Rect::new(row.x, row.y, width.min(row.width), 1);
     ctx.component(id, button, area);
 }
 
@@ -500,14 +517,14 @@ fn create_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
         theme.muted_foreground
     };
     let progress = app.progress();
-    let spinner = if creating {
+    let creating_message = if creating {
         format!(
             "{}  Creating sandbox '{}'…",
             app.spinner(),
             app.creating_name().unwrap_or("")
         )
     } else {
-        "Ready to create".to_owned()
+        String::new()
     };
 
     Dialog::new()
@@ -533,12 +550,12 @@ fn create_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
             );
             ctx.paint_widget(
                 Paragraph::new(Line::from(Span::styled(
-                    format!(" {spinner}"),
+                    format!(" {creating_message}"),
                     Style::default().fg(theme.primary),
                 ))),
                 rows[7],
             );
-            // One bare bar: the row above carries the spinner text.
+            // One bare bar: the row above carries the creation message.
             ctx.paint_widget(ProgressWidget::new(progress).themed(&theme), rows[8]);
         })
         .action(
@@ -698,6 +715,24 @@ mod tests {
         assert!(screen.contains("Remove"));
     }
 
+    fn column_of(rows: &str, needle: &str) -> Option<usize> {
+        rows.lines()
+            .find_map(|line| line.find(needle).map(|byte| line[..byte].chars().count()))
+    }
+
+    #[test]
+    fn sandbox_rows_do_not_shift_when_focus_moves() {
+        let mut app = App::with_sandboxes(&["alpha"]);
+        *app.focus_mut() = FocusState::intent(["sandbox-list"]);
+        let focused = render(&app);
+        *app.focus_mut() = FocusState::intent([ACTION_STOP]);
+        let unfocused = render(&app);
+
+        assert_eq!(column_of(&focused, "alpha"), column_of(&unfocused, "alpha"));
+        assert!(focused.contains("▸"), "the cursor glyph should still show");
+        assert!(!unfocused.contains("▸"));
+    }
+
     #[test]
     fn running_actions_show_only_running_commands() {
         let app = App::with_sandboxes(&["alpha"]);
@@ -747,6 +782,7 @@ mod tests {
         assert!(screen.contains("Create sandbox"));
         assert!(screen.contains("demo-tui"));
         assert!(screen.contains("opencode"));
+        assert!(!screen.contains("Ready to create"));
 
         // The agent dropdown is a popup layer inside the modal; it must be
         // declarable without colliding with the dialog's own ids.
@@ -894,23 +930,42 @@ mod interaction_tests {
     }
 
     #[test]
+    fn action_buttons_share_one_left_aligned_column() {
+        let app = App::with_sandboxes(&["alpha"]);
+        let mut ratcn = new_runtime();
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        draw(&mut terminal, &app, &mut ratcn);
+        // "Exec shell" sets the shared width: 10 label cells + 4 of padding.
+        for (row, fill) in [(5, STOP_ORANGE), (6, EXEC_GRAY)] {
+            for x in 65..79 {
+                assert_eq!(cell_bg(&terminal, x, row), fill, "fill at ({x}, {row})");
+            }
+            assert_ne!(
+                cell_bg(&terminal, 79, row),
+                fill,
+                "button must stop at x=79"
+            );
+        }
+    }
+
+    #[test]
     fn action_buttons_change_color_on_hover() {
         let app = App::with_sandboxes(&["alpha"]);
         let mut ratcn = new_runtime();
         let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
         draw(&mut terminal, &app, &mut ratcn);
-        let resting = cell_bg(&terminal, 80, 5);
+        let resting = cell_bg(&terminal, 70, 5);
         assert_eq!(resting, STOP_ORANGE);
 
         let moved = Event::Mouse(crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::Moved,
-            column: 80,
+            column: 70,
             row: 5,
             modifiers: KeyModifiers::NONE,
         });
         ratcn.handle_event(moved, &app);
         draw(&mut terminal, &app, &mut ratcn);
-        assert_ne!(cell_bg(&terminal, 80, 5), resting);
+        assert_ne!(cell_bg(&terminal, 70, 5), resting);
     }
 
     #[test]
@@ -919,7 +974,7 @@ mod interaction_tests {
         let mut ratcn = new_runtime();
         let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
         draw(&mut terminal, &running, &mut ratcn);
-        let emitted = click(&mut terminal, &mut running, &mut ratcn, 80, 5);
+        let emitted = click(&mut terminal, &mut running, &mut ratcn, 70, 5);
         assert!(
             emitted
                 .iter()
@@ -934,7 +989,7 @@ mod interaction_tests {
         let mut stopped = App::with_sandbox_statuses(&[("alpha", "stopped")]);
         let mut ratcn = new_runtime();
         draw(&mut terminal, &stopped, &mut ratcn);
-        let emitted = click(&mut terminal, &mut stopped, &mut ratcn, 80, 5);
+        let emitted = click(&mut terminal, &mut stopped, &mut ratcn, 70, 5);
         assert!(
             emitted
                 .iter()

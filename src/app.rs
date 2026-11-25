@@ -257,6 +257,9 @@ impl Form {
     pub fn set_agent_index(&mut self, index: usize) {
         self.agent_index = index.min(AGENTS.len().saturating_sub(1));
         self.agent_focus = self.agent_index;
+        // Committing a choice also dismisses the picker. Focus, selection and
+        // open state change in one message so the popup cannot linger.
+        self.agent_open = false;
     }
 
     pub fn set_agent_focus(&mut self, index: usize) {
@@ -1428,6 +1431,19 @@ mod tests {
             "DOCKER_SANDBOXES_ROOT_SIZE=40g DOCKER_SANDBOXES_DOCKER_SIZE=20g sbx create --name demo-tui opencode --cpus 2 --memory 4g"
         );
         assert!(form.first_error().is_none());
+    }
+
+    #[test]
+    fn selecting_an_agent_closes_the_picker() {
+        let mut app = App::with_sandboxes(&[]);
+        app.open_wizard();
+        app.set_agent_open(true);
+        assert!(app.form().agent_open());
+
+        app.set_agent_index(0);
+        assert_eq!(app.form().agent_index(), 0);
+        assert_eq!(app.form().agent_focus(), 0);
+        assert!(!app.form().agent_open());
     }
 
     #[test]
