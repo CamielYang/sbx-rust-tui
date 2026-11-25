@@ -47,7 +47,7 @@ again after a successful publish; a read failure is shown inside the dialog.
 
 | Button | Command | Behaviour |
 | --- | --- | --- |
-| Start / Stop | `sbx exec {name} -- true` / `sbx stop {name}` | Opens a confirmation dialog first. `sbx` has no standalone `start` verb, so a stopped sandbox is started with a no-op `exec`. |
+| Start / Stop | `sbx run -d --name {name}` / `sbx stop {name}` | Opens a confirmation dialog first. `sbx` has no standalone `start` verb, so a stopped sandbox is started by re-attaching with `run --name`; `-d` leaves it running detached. |
 | Exec shell | `sbx exec -it {name} bash` | Suspends the TUI, opens an external terminal, and restores the TUI when it closes. On Linux it tries common terminal emulators in order; on macOS it uses Terminal.app; on Windows a new `cmd` window. If no terminal opens, the command is shown in the footer. |
 | Publish ports | `sbx port ls {name} --format json`, then `sbx port publish {name} {host}:{sandbox}` | Opens the published-ports dialog for a running sandbox; **Add port** validates the two fields and publishes the mapping, then refreshes the table. |
 | Info | `sbx inspect {name} --format json` then `sbx exec {name} -- sh -c …` | Opens a themed dialog with status, CPU as `{cores} ({usage}%)`, and memory/root/Docker usage as `used / total`. Guest metrics are collected when Info opens and every ten seconds while it stays open; `sbx inspect` supplies fallback values. Missing values render as `—`; errors appear as a note. |

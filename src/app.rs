@@ -1778,10 +1778,14 @@ impl App {
 
     #[cfg_attr(test, allow(dead_code))]
     fn start_sandbox(&mut self, name: &str) {
-        // `sbx` has no standalone start verb; exec starts a stopped sandbox.
-        // A no-op command leaves it running after the command exits.
-        let command = PendingCommand::new("sbx", &["exec", name, "--", "true"]);
+        let command = Self::start_command(name);
         self.run_sbx(command, format!("Sandbox '{name}' started."));
+    }
+
+    /// `sbx` has no standalone start verb. `run --name` re-attaches to the
+    /// existing sandbox and starts it; `-d` leaves it running detached.
+    fn start_command(name: &str) -> PendingCommand {
+        PendingCommand::new("sbx", &["run", "-d", "--name", name])
     }
 
     #[cfg_attr(test, allow(dead_code))]
@@ -2208,8 +2212,8 @@ mod tests {
     #[test]
     fn sandbox_actions_build_expected_commands() {
         assert_eq!(
-            PendingCommand::new("sbx", &["exec", "demo", "--", "true"]).preview(),
-            "sbx exec demo -- true"
+            App::start_command("demo").preview(),
+            "sbx run -d --name demo"
         );
         assert_eq!(
             PendingCommand::new("sbx", &["stop", "demo"]).preview(),

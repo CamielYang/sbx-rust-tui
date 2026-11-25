@@ -106,9 +106,8 @@ fn run(terminal: &mut Tui, app: &mut App) -> Result<()> {
             let result = pending.run_in_external_terminal();
             *terminal = init_terminal()?;
             input_modes = Some(InputModes::new().mouse().paste().enable()?);
-            match result {
-                Ok(()) => app.notify_info("External terminal closed.", None),
-                Err(error) => app.notify_error("Could not open terminal", error),
+            if let Err(error) = result {
+                app.notify_error("Could not open terminal", error);
             }
         }
 

@@ -136,17 +136,20 @@ pub fn declare(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme) {
     });
 
     let vertical = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(0),
-        Constraint::Length(1),
+        Constraint::Length(1), // title
+        Constraint::Length(1), // spacing
+        Constraint::Length(1), // toolbar buttons
+        Constraint::Length(1), // spacing
+        Constraint::Min(0),    // sandboxes + actions
+        Constraint::Length(1), // spacing
+        Constraint::Length(1), // footer
     ])
     .split(area);
 
     paint_header(ctx, app, &theme, vertical[0]);
-    paint_toolbar(ctx, app, &theme, vertical[1]);
-    paint_body(ctx, app, &theme, vertical[2]);
-    paint_footer(ctx, app, &theme, vertical[3]);
+    paint_toolbar(ctx, app, &theme, vertical[2]);
+    paint_body(ctx, app, &theme, vertical[4]);
+    paint_footer(ctx, app, &theme, vertical[6]);
 
     // Modals are declared last so their layers cover the dashboard. Ids come
     // from App's ModalState, which Ratcn validates against this declaration.
@@ -166,22 +169,18 @@ pub fn declare(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme) {
 
 fn paint_header(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme, area: Rect) {
     let title = Span::styled(
-        "  DOCKER SANDBOXES  ",
+        "  DOCKER SANDBOXES RUST ",
         Style::default()
             .fg(theme.primary_foreground)
             .bg(theme.primary)
             .add_modifier(Modifier::BOLD),
-    );
-    let subtitle = Span::styled(
-        "  sbx dashboard",
-        Style::default().fg(theme.muted_foreground),
     );
     let count = Span::styled(
         format!("  {} sandbox(es)  ", app.sandboxes().len()),
         Style::default().fg(theme.muted_foreground),
     );
     ctx.paint_widget(
-        Paragraph::new(Line::from(vec![title, subtitle, count])),
+        Paragraph::new(Line::from(vec![title, count])),
         area,
     );
 }
@@ -1231,7 +1230,7 @@ mod interaction_tests {
         let moved = Event::Mouse(crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::Moved,
             column: 6,
-            row: 4,
+            row: 6,
             modifiers: KeyModifiers::NONE,
         });
         if let EventResult::Emit(message) = ratcn.handle_event(moved, &app) {
@@ -1239,7 +1238,7 @@ mod interaction_tests {
         }
         assert_eq!(app.selected_name().as_deref(), Some("alpha"));
 
-        click(&mut terminal, &mut app, &mut ratcn, 6, 4);
+        click(&mut terminal, &mut app, &mut ratcn, 6, 6);
         assert_eq!(app.selected_name().as_deref(), Some("beta"));
         assert!(app.focus_ref().contains_path(["sandbox-list"]));
 
@@ -1271,7 +1270,7 @@ mod interaction_tests {
         let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
         draw(&mut terminal, &app, &mut ratcn);
         // "Publish ports" sets the shared width: 13 label cells + 4 of padding.
-        for (row, fill) in [(5, STOP_ORANGE), (6, EXEC_GRAY), (7, PORTS_CYAN)] {
+        for (row, fill) in [(7, STOP_ORANGE), (8, EXEC_GRAY), (9, PORTS_CYAN)] {
             for x in 65..82 {
                 assert_eq!(cell_bg(&terminal, x, row), fill, "fill at ({x}, {row})");
             }
@@ -1291,13 +1290,13 @@ mod interaction_tests {
         draw(&mut terminal, &app, &mut ratcn);
 
         // A cell below the rows belongs to the list's backdrop, not a row.
-        let resting_box = cell_bg(&terminal, 30, 10);
-        let resting_row = cell_bg(&terminal, 6, 3);
+        let resting_box = cell_bg(&terminal, 30, 12);
+        let resting_row = cell_bg(&terminal, 6, 5);
 
         let moved = Event::Mouse(crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::Moved,
             column: 6,
-            row: 3,
+            row: 5,
             modifiers: KeyModifiers::NONE,
         });
         if let EventResult::Emit(message) = ratcn.handle_event(moved, &app) {
@@ -1306,12 +1305,12 @@ mod interaction_tests {
         draw(&mut terminal, &app, &mut ratcn);
 
         assert_eq!(
-            cell_bg(&terminal, 30, 10),
+            cell_bg(&terminal, 30, 12),
             resting_box,
             "hover must not recolor the whole sandbox box"
         );
         assert_ne!(
-            cell_bg(&terminal, 6, 3),
+            cell_bg(&terminal, 6, 5),
             resting_row,
             "hover must still highlight the sandbox row"
         );
@@ -1323,18 +1322,18 @@ mod interaction_tests {
         let mut ratcn = new_runtime();
         let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
         draw(&mut terminal, &app, &mut ratcn);
-        let resting = cell_bg(&terminal, 70, 5);
+        let resting = cell_bg(&terminal, 70, 7);
         assert_eq!(resting, STOP_ORANGE);
 
         let moved = Event::Mouse(crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::Moved,
             column: 70,
-            row: 5,
+            row: 7,
             modifiers: KeyModifiers::NONE,
         });
         ratcn.handle_event(moved, &app);
         draw(&mut terminal, &app, &mut ratcn);
-        assert_ne!(cell_bg(&terminal, 70, 5), resting);
+        assert_ne!(cell_bg(&terminal, 70, 7), resting);
     }
 
     #[test]
@@ -1343,7 +1342,7 @@ mod interaction_tests {
         let mut ratcn = new_runtime();
         let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
         draw(&mut terminal, &running, &mut ratcn);
-        let emitted = click(&mut terminal, &mut running, &mut ratcn, 70, 5);
+        let emitted = click(&mut terminal, &mut running, &mut ratcn, 70, 7);
         assert!(
             emitted
                 .iter()
@@ -1358,7 +1357,7 @@ mod interaction_tests {
         let mut stopped = App::with_sandbox_statuses(&[("alpha", "stopped")]);
         let mut ratcn = new_runtime();
         draw(&mut terminal, &stopped, &mut ratcn);
-        let emitted = click(&mut terminal, &mut stopped, &mut ratcn, 70, 5);
+        let emitted = click(&mut terminal, &mut stopped, &mut ratcn, 70, 7);
         assert!(
             emitted
                 .iter()
@@ -1387,7 +1386,7 @@ mod interaction_tests {
         let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
         draw(&mut terminal, &app, &mut ratcn);
 
-        let emitted = click(&mut terminal, &mut app, &mut ratcn, 70, 5);
+        let emitted = click(&mut terminal, &mut app, &mut ratcn, 70, 7);
         assert!(
             emitted
                 .iter()
@@ -1413,8 +1412,8 @@ mod interaction_tests {
         let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
         draw(&mut terminal, &app, &mut ratcn);
 
-        // Action rows: Stop (5), Exec shell (6), Publish ports (7).
-        let emitted = click(&mut terminal, &mut app, &mut ratcn, 70, 7);
+        // Action rows: Stop (7), Exec shell (8), Publish ports (9).
+        let emitted = click(&mut terminal, &mut app, &mut ratcn, 70, 9);
         assert!(
             emitted
                 .iter()
