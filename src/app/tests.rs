@@ -1,4 +1,6 @@
+use std::ffi::OsStr;
 use std::io;
+use std::path::PathBuf;
 
 use super::form::{
     parse_memory_mib, validate_cpus, validate_gb_size, validate_memory, validate_name,
@@ -102,6 +104,42 @@ fn selecting_an_agent_closes_the_picker() {
     assert_eq!(app.form().agent_index(), 0);
     assert_eq!(app.form().agent_focus(), 0);
     assert!(!app.form().agent_open());
+}
+
+#[test]
+fn windows_home_prefers_user_profile() {
+    let home = super::form::windows_home_from(
+        Some(OsStr::new(r"C:\Users\test")),
+        Some(OsStr::new("D:")),
+        Some(OsStr::new(r"\Users\other")),
+    );
+    assert_eq!(home, Some(PathBuf::from(r"C:\Users\test")));
+}
+
+#[test]
+fn windows_home_uses_home_drive_and_path_when_no_profile() {
+    let home = super::form::windows_home_from(
+        None,
+        Some(OsStr::new("C:")),
+        Some(OsStr::new(r"\Users\test")),
+    );
+    assert_eq!(home, Some(PathBuf::from("C:").join(r"\Users\test")));
+}
+
+#[test]
+fn windows_home_ignores_empty_variables() {
+    assert_eq!(
+        super::form::windows_home_from(Some(OsStr::new("")), None, None),
+        None
+    );
+    assert_eq!(
+        super::form::windows_home_from(
+            None,
+            Some(OsStr::new("")),
+            Some(OsStr::new(r"\Users\test"))
+        ),
+        None
+    );
 }
 
 #[test]
@@ -654,13 +692,17 @@ fn invalid_ports_are_not_published() {
 
 #[test]
 fn stderr_detail_prefers_error_line_and_try_hint() {
-    use std::os::unix::process::ExitStatusExt;
-    use std::process::{ExitStatus, Output};
+    use std::process::{Command, Output};
 
     use super::commands::stderr_detail;
 
+    let status = if cfg!(windows) {
+        Command::new("cmd").args(["/C", "exit 1"]).status().unwrap()
+    } else {
+        Command::new("false").status().unwrap()
+    };
     let output = Output {
-        status: ExitStatus::from_raw(256),
+        status,
         stdout: Vec::new(),
         stderr: b"    o opencode - now ships as a kit; resolving docker.io/sbx/opencode:latest\n\n  error: sandbox 'test' already exists; connect to the existing sandbox\n    try: sbx run --name test\n"
             .to_vec(),

@@ -1,3 +1,6 @@
+use std::ffi::OsStr;
+use std::path::PathBuf;
+
 use ratcn::InputState;
 
 use super::{AGENTS, PendingCommand};
@@ -352,8 +355,54 @@ fn host_memory_mib() -> Option<u64> {
 
 /// The workspace location offered before the user opens the folder picker.
 fn default_workspace_path() -> String {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "~".to_owned());
-    format!("{home}/workspace")
+    home_dir()
+        .or_else(|| std::env::current_dir().ok())
+        .map(|path| path.to_string_lossy().into_owned())
+        // Rare, but keep a placeholder if even the current directory is gone.
+        .unwrap_or_else(|| "~".to_owned())
+}
+
+/// Windows does not normally define `HOME`, so check its home variables first
+/// there. Elsewhere `HOME` wins; the Windows variables are still a useful
+/// fallback when running under an unusual environment.
+fn home_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME");
+    let user_profile = std::env::var_os("USERPROFILE");
+    let home_drive = std::env::var_os("HOMEDRIVE");
+    let home_path = std::env::var_os("HOMEPATH");
+
+    let unix_home = non_empty(home.as_deref()).map(PathBuf::from);
+    let windows_home = windows_home_from(
+        user_profile.as_deref(),
+        home_drive.as_deref(),
+        home_path.as_deref(),
+    );
+
+    #[cfg(windows)]
+    let result = windows_home.or(unix_home);
+    #[cfg(not(windows))]
+    let result = unix_home.or(windows_home);
+    result
+}
+
+fn non_empty(value: Option<&OsStr>) -> Option<&OsStr> {
+    value.filter(|value| !value.is_empty())
+}
+
+/// `USERPROFILE` is the modern Windows home; older setups only provide the
+/// `HOMEDRIVE` + `HOMEPATH` pair.
+pub(super) fn windows_home_from(
+    user_profile: Option<&OsStr>,
+    home_drive: Option<&OsStr>,
+    home_path: Option<&OsStr>,
+) -> Option<PathBuf> {
+    if let Some(profile) = non_empty(user_profile) {
+        return Some(PathBuf::from(profile));
+    }
+    match (non_empty(home_drive), non_empty(home_path)) {
+        (Some(drive), Some(path)) => Some(PathBuf::from(drive).join(path)),
+        _ => None,
+    }
 }
 
 fn default_memory() -> String {
