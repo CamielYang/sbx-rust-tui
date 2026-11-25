@@ -5,5 +5,6 @@ edition = "2024"
 
 [dependencies]
 crossterm = "0.29.0"
-ratatui = "0.30.2"
+ratatui = { version = "0.30.2", default-features = false, features = ["layout-cache", "std", "crossterm"] }
+ratcn = { version = "0.1.0", features = ["crossterm"] }
 serde_json = "1"

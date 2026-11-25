@@ -2,10 +2,11 @@ use std::io;
 use std::process::Command as ProcessCommand;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::layout::Rect;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratcn::runtime::{FocusState, ModalState};
+use ratcn::{InputState, Toast, ToasterState};
 use serde_json::Value;
 
 pub const AGENTS: &[&str] = &[
@@ -21,7 +22,11 @@ pub const AGENTS: &[&str] = &[
     "shell",
 ];
 
-pub const GRID_COLUMNS: usize = 3;
+/// Stable ids for the two ratcn modal layers.
+pub const CREATE_DIALOG: &str = "create-dialog";
+pub const INFO_DIALOG: &str = "info-dialog";
+
+const CREATE_TOAST: &str = "create-sandbox";
 
 /// Advanced once per event-loop frame while `sbx create` runs in the worker.
 pub const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -47,39 +52,6 @@ awk '
 ' /proc/meminfo
 df -k
 "#;
-
-/// An action bound to a rectangle on screen by the renderer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ClickAction {
-    Select(usize),
-    OpenWizard,
-    CloseWizard,
-    CreateSandbox,
-    Start(usize),
-    Stop(usize),
-    Exec(usize),
-    Remove(usize),
-    Info(usize),
-    CloseInfo,
-}
-
-/// A clickable rectangle. The renderer refreshes these on every frame so the
-/// coordinates always match what the user currently sees.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ClickTarget {
-    pub area: Rect,
-    pub action: ClickAction,
-}
-
-impl ClickTarget {
-    pub fn new(area: Rect, action: ClickAction) -> Self {
-        Self { area, action }
-    }
-
-    fn contains(&self, x: u16, y: u16) -> bool {
-        self.area.contains((x, y).into())
-    }
-}
 
 /// A ready-to-run command, including any environment overrides for the child.
 #[derive(Clone)]
@@ -195,121 +167,62 @@ fn quote_if_needed(part: &str) -> String {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// Which screen the app is logically on. Derived from the ratcn modal stack,
+/// kept as a convenience for status text and tests.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
     Normal,
     Wizard,
     Info,
 }
 
-// --- wizard -----------------------------------------------------------------
+// --- create form -------------------------------------------------------------
 
+/// The editable fields shown in the themed create dialog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WizardStep {
+pub enum FormField {
     Name,
-    Agent,
     RootSize,
     DockerSize,
     Cpus,
     Memory,
-    Confirm,
 }
 
-pub const WIZARD_STEPS: &[WizardStep] = &[
-    WizardStep::Name,
-    WizardStep::Agent,
-    WizardStep::RootSize,
-    WizardStep::DockerSize,
-    WizardStep::Cpus,
-    WizardStep::Memory,
-    WizardStep::Confirm,
-];
-
-impl WizardStep {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Name => "Name",
-            Self::Agent => "Agent",
-            Self::RootSize => "Root size",
-            Self::DockerSize => "Docker data size",
-            Self::Cpus => "CPUs",
-            Self::Memory => "Memory",
-            Self::Confirm => "Review",
-        }
-    }
-
-    pub fn prompt(self) -> &'static str {
-        match self {
-            Self::Name => "Sandbox name (required, 2-63 ASCII letters, numbers, '-' or '.')",
-            Self::Agent => "Pick an agent",
-            Self::RootSize => "Root filesystem size in GB (number only), e.g. 40 (empty skips)",
-            Self::DockerSize => "Docker data size in GB (number only), e.g. 20 (empty skips)",
-            Self::Cpus => "Number of CPUs (positive integer, 0 = auto)",
-            Self::Memory => "Memory limit in binary units, e.g. 512m or 8g",
-            Self::Confirm => "Review your settings, then create the sandbox",
-        }
-    }
-
-    pub fn is_text(self) -> bool {
-        !matches!(self, Self::Agent | Self::Confirm)
-    }
-
-    fn next(self) -> Option<Self> {
-        let index = WIZARD_STEPS.iter().position(|step| *step == self)?;
-        WIZARD_STEPS.get(index + 1).copied()
-    }
-
-    fn previous(self) -> Option<Self> {
-        let index = WIZARD_STEPS.iter().position(|step| *step == self)?;
-        index
-            .checked_sub(1)
-            .and_then(|i| WIZARD_STEPS.get(i))
-            .copied()
-    }
-}
-
-enum WizardOutcome {
-    Continue,
-    Cancelled,
-    Create(PendingCommand),
-}
-
-pub struct Wizard {
-    step: WizardStep,
-    name: String,
+/// Text and selection state for the create dialog. Ratcn's `Input` and
+/// `Select` components read and replace these values through messages.
+#[derive(Clone)]
+pub struct Form {
+    name: InputState,
     agent_index: usize,
-    root_size: String,
-    docker_size: String,
-    cpus: String,
-    memory: String,
+    agent_focus: usize,
+    agent_open: bool,
+    root_size: InputState,
+    docker_size: InputState,
+    cpus: InputState,
+    memory: InputState,
 }
 
-impl Wizard {
+impl Form {
     fn new() -> Self {
         Self {
-            step: WizardStep::Name,
-            name: String::new(),
+            name: InputState::new(""),
             agent_index: AGENTS
                 .iter()
                 .position(|agent| *agent == "opencode")
                 .unwrap_or(0),
-            root_size: String::new(),
-            docker_size: String::new(),
-            cpus: "2".to_owned(),
-            memory: default_memory(),
+            agent_focus: AGENTS
+                .iter()
+                .position(|agent| *agent == "opencode")
+                .unwrap_or(0),
+            agent_open: false,
+            root_size: InputState::new(""),
+            docker_size: InputState::new(""),
+            cpus: InputState::new("2"),
+            memory: InputState::new(default_memory()),
         }
     }
 
-    pub fn step(&self) -> WizardStep {
-        self.step
-    }
-
-    /// True once every field has been reviewed and the sandbox can be created.
-    pub fn is_ready(&self) -> bool {
-        self.step == WizardStep::Confirm
-    }
-
-    pub fn name(&self) -> &str {
+    pub fn name(&self) -> &InputState {
         &self.name
     }
 
@@ -317,58 +230,76 @@ impl Wizard {
         self.agent_index
     }
 
-    pub fn field_error(&self) -> Option<String> {
-        // Don't show an error on the untouched first field.
-        if self.step == WizardStep::Name && self.name.is_empty() {
-            return None;
+    pub fn agent_focus(&self) -> usize {
+        self.agent_focus
+    }
+
+    pub fn agent_open(&self) -> bool {
+        self.agent_open
+    }
+
+    pub fn root_size(&self) -> &InputState {
+        &self.root_size
+    }
+
+    pub fn docker_size(&self) -> &InputState {
+        &self.docker_size
+    }
+
+    pub fn cpus(&self) -> &InputState {
+        &self.cpus
+    }
+
+    pub fn memory(&self) -> &InputState {
+        &self.memory
+    }
+
+    pub fn set_agent_index(&mut self, index: usize) {
+        self.agent_index = index.min(AGENTS.len().saturating_sub(1));
+        self.agent_focus = self.agent_index;
+    }
+
+    pub fn set_agent_focus(&mut self, index: usize) {
+        self.agent_focus = index.min(AGENTS.len().saturating_sub(1));
+    }
+
+    pub fn set_agent_open(&mut self, open: bool) {
+        self.agent_open = open;
+    }
+
+    pub fn field_error(&self, field: FormField) -> Option<String> {
+        match field {
+            FormField::Name => validate_name(self.name.value()).err(),
+            FormField::RootSize => validate_gb_size(self.root_size.value()).err(),
+            FormField::DockerSize => validate_gb_size(self.docker_size.value()).err(),
+            FormField::Cpus => validate_cpus(self.cpus.value()).err(),
+            FormField::Memory => validate_memory(self.memory.value()).err(),
         }
-        self.error_for(self.step)
     }
 
-    fn error_for(&self, step: WizardStep) -> Option<String> {
-        match step {
-            WizardStep::Name => validate_name(&self.name).err(),
-            WizardStep::RootSize => validate_gb_size(&self.root_size).err(),
-            WizardStep::DockerSize => validate_gb_size(&self.docker_size).err(),
-            WizardStep::Cpus => validate_cpus(&self.cpus).err(),
-            WizardStep::Memory => validate_memory(&self.memory).err(),
-            _ => None,
+    /// True when an input should paint in the theme's invalid color. The empty
+    /// name is left neutral until the user has typed something.
+    pub fn invalid(&self, field: FormField) -> bool {
+        if field == FormField::Name && self.name.value().is_empty() {
+            return false;
         }
+        self.field_error(field).is_some()
     }
 
-    /// Validate every field, not just the current one. This powers the
-    /// clickable Create button, which can be used from any wizard step.
-    pub fn first_error(&self) -> Option<(WizardStep, String)> {
-        WIZARD_STEPS
-            .iter()
-            .find_map(|step| self.error_for(*step).map(|error| (*step, error)))
-    }
-
-    pub fn go_to_step(&mut self, step: WizardStep) {
-        self.step = step;
-    }
-
-    pub fn finish(&self) -> Result<PendingCommand, (WizardStep, String)> {
-        match self.first_error() {
-            Some(error) => Err(error),
-            None => Ok(self.pending_command()),
-        }
-    }
-
-    pub fn value_for(&self, step: WizardStep) -> String {
-        match step {
-            WizardStep::Name => self.name.clone(),
-            WizardStep::Agent => AGENTS[self.agent_index].to_owned(),
-            WizardStep::RootSize => self.root_size.clone(),
-            WizardStep::DockerSize => self.docker_size.clone(),
-            WizardStep::Cpus => self.cpus.clone(),
-            WizardStep::Memory => self.memory.clone(),
-            WizardStep::Confirm => "ready".to_owned(),
-        }
+    pub fn first_error(&self) -> Option<(FormField, String)> {
+        [
+            FormField::Name,
+            FormField::RootSize,
+            FormField::DockerSize,
+            FormField::Cpus,
+            FormField::Memory,
+        ]
+        .into_iter()
+        .find_map(|field| self.field_error(field).map(|error| (field, error)))
     }
 
     pub fn warning(&self) -> Option<String> {
-        let mib = parse_memory_mib(&self.memory)?;
+        let mib = parse_memory_mib(self.memory.value())?;
         let total = host_memory_mib()?;
         if mib > total * 3 / 4 {
             Some(format!(
@@ -384,33 +315,37 @@ impl Wizard {
         self.pending_command().preview()
     }
 
-    fn pending_command(&self) -> PendingCommand {
+    pub fn pending_command(&self) -> PendingCommand {
+        let name = self.name.value().trim();
+        let agent = AGENTS[self.agent_index];
         let mut args = vec![
             "create".to_owned(),
             "--name".to_owned(),
-            self.name.trim().to_owned(),
-            AGENTS[self.agent_index].to_owned(),
+            name.to_owned(),
+            agent.to_owned(),
         ];
-        if !self.cpus.trim().is_empty() {
+
+        let cpus = self.cpus.value().trim();
+        if !cpus.is_empty() {
             args.push("--cpus".to_owned());
-            args.push(self.cpus.trim().to_owned());
+            args.push(cpus.to_owned());
         }
-        if !self.memory.trim().is_empty() {
+        let memory = self.memory.value().trim();
+        if !memory.is_empty() {
             args.push("--memory".to_owned());
-            args.push(self.memory.trim().to_owned());
+            args.push(memory.to_owned());
         }
 
         let mut env = Vec::new();
-        if !self.root_size.trim().is_empty() {
-            env.push((
-                "DOCKER_SANDBOXES_ROOT_SIZE".to_owned(),
-                format!("{}g", self.root_size.trim()),
-            ));
+        let root = self.root_size.value().trim();
+        if !root.is_empty() {
+            env.push(("DOCKER_SANDBOXES_ROOT_SIZE".to_owned(), format!("{root}g")));
         }
-        if !self.docker_size.trim().is_empty() {
+        let docker = self.docker_size.value().trim();
+        if !docker.is_empty() {
             env.push((
                 "DOCKER_SANDBOXES_DOCKER_SIZE".to_owned(),
-                format!("{}g", self.docker_size.trim()),
+                format!("{docker}g"),
             ));
         }
 
@@ -420,98 +355,16 @@ impl Wizard {
             env,
         }
     }
+}
 
-    fn current_field_mut(&mut self) -> Option<&mut String> {
-        match self.step {
-            WizardStep::Name => Some(&mut self.name),
-            WizardStep::RootSize => Some(&mut self.root_size),
-            WizardStep::DockerSize => Some(&mut self.docker_size),
-            WizardStep::Cpus => Some(&mut self.cpus),
-            WizardStep::Memory => Some(&mut self.memory),
-            WizardStep::Agent | WizardStep::Confirm => None,
-        }
-    }
-
-    fn handle_key(&mut self, key: KeyEvent, message: &mut String) -> WizardOutcome {
-        match self.step {
-            WizardStep::Confirm => match key.code {
-                KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    WizardOutcome::Create(self.pending_command())
-                }
-                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
-                    self.step = WizardStep::Memory;
-                    WizardOutcome::Continue
-                }
-                _ => WizardOutcome::Continue,
-            },
-            WizardStep::Agent => match key.code {
-                KeyCode::Up | KeyCode::Char('k') => {
-                    if self.agent_index > 0 {
-                        self.agent_index -= 1;
-                    }
-                    WizardOutcome::Continue
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if self.agent_index + 1 < AGENTS.len() {
-                        self.agent_index += 1;
-                    }
-                    WizardOutcome::Continue
-                }
-                KeyCode::Enter => self.advance(message),
-                KeyCode::Esc => self.go_back(),
-                _ => WizardOutcome::Continue,
-            },
-            step if step.is_text() => {
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('u') {
-                    if let Some(field) = self.current_field_mut() {
-                        field.clear();
-                    }
-                    return WizardOutcome::Continue;
-                }
-                match key.code {
-                    KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if let Some(field) = self.current_field_mut() {
-                            field.push(character);
-                        }
-                        WizardOutcome::Continue
-                    }
-                    KeyCode::Backspace => {
-                        if let Some(field) = self.current_field_mut() {
-                            field.pop();
-                        }
-                        WizardOutcome::Continue
-                    }
-                    KeyCode::Enter => self.advance(message),
-                    KeyCode::Esc => self.go_back(),
-                    _ => WizardOutcome::Continue,
-                }
-            }
-            _ => WizardOutcome::Continue,
-        }
-    }
-
-    fn advance(&mut self, message: &mut String) -> WizardOutcome {
-        if let Some(error) = self.field_error() {
-            *message = error;
-            return WizardOutcome::Continue;
-        }
-        message.clear();
-        match self.step.next() {
-            Some(next) => {
-                self.step = next;
-                WizardOutcome::Continue
-            }
-            None => WizardOutcome::Create(self.pending_command()),
-        }
-    }
-
-    fn go_back(&mut self) -> WizardOutcome {
-        match self.step.previous() {
-            Some(previous) => {
-                self.step = previous;
-                WizardOutcome::Continue
-            }
-            None => WizardOutcome::Cancelled,
+impl FormField {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Name => "Name",
+            Self::RootSize => "Root size (GB)",
+            Self::DockerSize => "Docker data (GB)",
+            Self::Cpus => "CPUs",
+            Self::Memory => "Memory",
         }
     }
 }
@@ -979,17 +832,18 @@ struct Creation {
 pub struct App {
     sandboxes: Vec<Sandbox>,
     selected: usize,
-    grid_offset: usize,
-    visible_rows: usize,
-    mode: Mode,
-    wizard: Wizard,
+    list_offset: usize,
+    focus: FocusState,
+    modals: ModalState,
+    form: Form,
     info: Option<SandboxDetails>,
     pending_external: Option<PendingCommand>,
     creation: Option<Creation>,
     spinner_index: usize,
     message: String,
+    toasts: ToasterState<'static>,
+    started: Instant,
     should_quit: bool,
-    click_targets: Vec<ClickTarget>,
 }
 
 impl App {
@@ -997,17 +851,18 @@ impl App {
         let mut app = Self {
             sandboxes: Vec::new(),
             selected: 0,
-            grid_offset: 0,
-            visible_rows: 1,
-            mode: Mode::Normal,
-            wizard: Wizard::new(),
+            list_offset: 0,
+            focus: FocusState::default(),
+            modals: ModalState::default(),
+            form: Form::new(),
             info: None,
             pending_external: None,
             creation: None,
             spinner_index: 0,
             message: String::new(),
+            toasts: ToasterState::new(),
+            started: Instant::now(),
             should_quit: false,
-            click_targets: Vec::new(),
         };
         app.refresh_sandboxes();
         app
@@ -1017,12 +872,58 @@ impl App {
         self.should_quit
     }
 
-    pub fn mode(&self) -> Mode {
-        self.mode
+    pub fn quit(&mut self) {
+        self.should_quit = true;
     }
 
-    pub fn wizard(&self) -> &Wizard {
-        &self.wizard
+    /// Logical screen, derived from the modal stack so the two can never
+    /// disagree about which layer is active.
+    pub fn mode(&self) -> Mode {
+        if self.modals.is_open(CREATE_DIALOG) {
+            Mode::Wizard
+        } else if self.modals.is_open(INFO_DIALOG) {
+            Mode::Info
+        } else {
+            Mode::Normal
+        }
+    }
+
+    pub fn focus_ref(&self) -> &FocusState {
+        &self.focus
+    }
+
+    pub fn focus_mut(&mut self) -> &mut FocusState {
+        &mut self.focus
+    }
+
+    pub fn modals_ref(&self) -> &ModalState {
+        &self.modals
+    }
+
+    pub fn form(&self) -> &Form {
+        &self.form
+    }
+
+    pub fn set_form_state(&mut self, field: FormField, state: InputState) {
+        match field {
+            FormField::Name => self.form.name = state,
+            FormField::RootSize => self.form.root_size = state,
+            FormField::DockerSize => self.form.docker_size = state,
+            FormField::Cpus => self.form.cpus = state,
+            FormField::Memory => self.form.memory = state,
+        }
+    }
+
+    pub fn set_agent_index(&mut self, index: usize) {
+        self.form.set_agent_index(index);
+    }
+
+    pub fn set_agent_focus(&mut self, index: usize) {
+        self.form.set_agent_focus(index);
+    }
+
+    pub fn set_agent_open(&mut self, open: bool) {
+        self.form.set_agent_open(open);
     }
 
     pub fn info(&self) -> Option<&SandboxDetails> {
@@ -1033,8 +934,42 @@ impl App {
         &self.message
     }
 
-    pub fn set_message(&mut self, message: impl Into<String>) {
-        self.message = message.into();
+    pub fn now(&self) -> Duration {
+        self.started.elapsed()
+    }
+
+    pub fn toasts(&self) -> &ToasterState<'static> {
+        &self.toasts
+    }
+
+    pub fn prune_toasts(&mut self, now: Duration) -> bool {
+        self.toasts.prune_expired(now)
+    }
+
+    fn notify(&mut self, toast: Toast<'static>, detail: Option<String>) {
+        self.message = match detail {
+            Some(ref detail) if !detail.is_empty() => format!("{}: {detail}", toast.title()),
+            _ => toast.title().to_owned(),
+        };
+        let toast = match detail {
+            Some(detail) if !detail.is_empty() => toast.with_description(detail),
+            _ => toast,
+        };
+        let now = self.now();
+        self.toasts.push(toast, now);
+    }
+
+    pub fn notify_info(&mut self, title: impl Into<String>, detail: Option<String>) {
+        self.notify(Toast::info(title.into()), detail);
+    }
+
+    pub fn notify_success(&mut self, title: impl Into<String>, detail: Option<String>) {
+        self.notify(Toast::success(title.into()), detail);
+    }
+
+    pub fn notify_error(&mut self, title: impl Into<String>, detail: impl Into<String>) {
+        let detail = detail.into();
+        self.notify(Toast::error(title.into()), Some(detail));
     }
 
     /// Taken by the event loop when an Exec button was clicked. The terminal
@@ -1043,18 +978,25 @@ impl App {
         self.pending_external.take()
     }
 
-    /// True from the moment the create button/key is pressed until the worker
+    /// True from the moment the create button is pressed until the worker
     /// thread reports back. Input is ignored during this window.
     pub fn is_creating(&self) -> bool {
         self.creation.is_some()
     }
 
     pub fn creating_name(&self) -> Option<&str> {
-        self.creation.as_ref().map(|creation| creation.name.as_str())
+        self.creation
+            .as_ref()
+            .map(|creation| creation.name.as_str())
     }
 
     pub fn spinner(&self) -> &'static str {
         SPINNER_FRAMES[self.spinner_index % SPINNER_FRAMES.len()]
+    }
+
+    /// Fraction for the themed progress bar shown in the create dialog.
+    pub fn progress(&self) -> f64 {
+        (self.spinner_index % SPINNER_FRAMES.len()) as f64 / (SPINNER_FRAMES.len() - 1) as f64
     }
 
     /// Advance the spinner once per rendered frame, but only while a sandbox
@@ -1090,253 +1032,172 @@ impl App {
         &self.sandboxes
     }
 
-    /// Sandbox blocks plus the trailing "+ New Sandbox" button.
-    pub fn block_count(&self) -> usize {
-        self.sandboxes.len() + 1
+    pub fn selected_name(&self) -> Option<String> {
+        self.sandboxes.get(self.selected).map(|s| s.name.clone())
     }
 
-    pub fn selected_index(&self) -> usize {
-        self.selected
+    pub fn selected_sandbox(&self) -> Option<&Sandbox> {
+        self.sandboxes.get(self.selected)
     }
 
-    pub fn is_new_sandbox_selected(&self) -> bool {
-        self.selected == self.sandboxes.len()
+    pub fn list_offset(&self) -> usize {
+        self.list_offset
     }
 
-    pub fn grid_offset(&self) -> usize {
-        self.grid_offset
+    pub fn set_list_offset(&mut self, offset: usize) {
+        self.list_offset = offset.min(self.sandboxes.len().saturating_sub(1));
     }
 
-    /// Called by the renderer so keyboard scrolling matches what is on screen.
-    pub fn set_visible_rows(&mut self, rows: usize) {
-        self.visible_rows = rows.max(1);
-        self.clamp_navigation();
-    }
-
-    /// Called by the renderer on every frame with the areas that are clickable.
-    pub fn set_click_targets(&mut self, targets: Vec<ClickTarget>) {
-        self.click_targets = targets;
-    }
-
-    #[cfg(test)]
-    pub fn click_targets(&self) -> &[ClickTarget] {
-        &self.click_targets
-    }
-
-    /// Handle a mouse event against the most recently rendered hit regions.
-    pub fn handle_mouse(&mut self, mouse: MouseEvent) {
-        // Ignore clicks while creation is in flight; the modal's buttons are
-        // drawn disabled so there is no second way to start a create.
-        if self.is_creating() {
-            return;
-        }
-        match mouse.kind {
-            MouseEventKind::Down(MouseButton::Left) => {
-                // Reverse order: modal widgets are drawn last and must win
-                // when they overlap the grid underneath them.
-                if let Some(target) = self
-                    .click_targets
-                    .iter()
-                    .rev()
-                    .find(|target| target.contains(mouse.column, mouse.row))
-                {
-                    let action = target.action;
-                    self.handle_click(action);
-                }
-            }
-            MouseEventKind::ScrollUp if self.mode == Mode::Normal => self.move_vertical(-1),
-            MouseEventKind::ScrollDown if self.mode == Mode::Normal => self.move_vertical(1),
-            _ => {}
+    pub fn select_named(&mut self, name: &str) {
+        if let Some(index) = self.sandboxes.iter().position(|s| s.name == name) {
+            self.selected = index;
         }
     }
 
-    fn handle_click(&mut self, action: ClickAction) {
-        match action {
-            ClickAction::Select(index) if self.mode == Mode::Normal => self.select(index),
-            ClickAction::OpenWizard if self.mode == Mode::Normal => self.open_wizard(),
-            ClickAction::CloseWizard if self.mode == Mode::Wizard => self.close_wizard(),
-            ClickAction::CreateSandbox if self.mode == Mode::Wizard => self.create_from_button(),
-            ClickAction::Start(index) if self.mode == Mode::Normal => self.start_sandbox(index),
-            ClickAction::Stop(index) if self.mode == Mode::Normal => self.stop_sandbox(index),
-            ClickAction::Exec(index)
-                if self.mode == Mode::Normal && self.sandbox_is_running(index) =>
-            {
-                self.exec_sandbox(index)
-            }
-            ClickAction::Remove(index) if self.mode == Mode::Normal => self.remove_sandbox(index),
-            ClickAction::Info(index)
-                if self.mode == Mode::Normal && self.sandbox_is_running(index) =>
-            {
-                self.open_info(index)
-            }
-            ClickAction::CloseInfo if self.mode == Mode::Info => self.close_info(),
-            _ => {}
-        }
-    }
-
-    pub fn handle_key(&mut self, key: KeyEvent) {
+    /// Keys that are not claimed by a ratcn component still act as global
+    /// shortcuts. Creation is modal: only Ctrl+C gets through.
+    pub fn handle_global_key(&mut self, key: KeyEvent) {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
             return;
         }
-        // Ignore repeated Enter/y, navigation, and even Esc while `sbx create`
-        // runs. Ctrl+C above stays available as the escape hatch.
-        if self.is_creating() {
+        if self.is_creating() || self.mode() != Mode::Normal {
             return;
         }
 
-        match self.mode {
-            Mode::Normal => match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
-                KeyCode::Left | KeyCode::Char('h') => self.move_horizontal(-1),
-                KeyCode::Right | KeyCode::Char('l') => self.move_horizontal(1),
-                KeyCode::Up | KeyCode::Char('k') => self.move_vertical(-1),
-                KeyCode::Down | KeyCode::Char('j') => self.move_vertical(1),
-                KeyCode::PageUp => self.move_page(-1),
-                KeyCode::PageDown => self.move_page(1),
-                KeyCode::Home => self.select(0),
-                KeyCode::End => self.select(self.block_count() - 1),
-                KeyCode::Enter if self.is_new_sandbox_selected() => self.open_wizard(),
-                KeyCode::Char('r') | KeyCode::Char('R') => self.refresh_sandboxes(),
-                KeyCode::Char('s') | KeyCode::Char('S') if !self.is_new_sandbox_selected() => {
-                    self.toggle_sandbox(self.selected);
-                }
-                KeyCode::Char('x') | KeyCode::Char('X')
-                    if !self.is_new_sandbox_selected() && self.sandbox_is_running(self.selected) =>
-                {
-                    self.exec_sandbox(self.selected);
-                }
-                KeyCode::Char('d') | KeyCode::Char('D') if !self.is_new_sandbox_selected() => {
-                    self.remove_sandbox(self.selected);
-                }
-                KeyCode::Char('i') | KeyCode::Char('I')
-                    if !self.is_new_sandbox_selected() && self.sandbox_is_running(self.selected) =>
-                {
-                    self.open_info(self.selected);
-                }
-                _ => {}
-            },
-            Mode::Wizard => match self.wizard.handle_key(key, &mut self.message) {
-                WizardOutcome::Continue => {}
-                WizardOutcome::Cancelled => self.close_wizard(),
-                WizardOutcome::Create(pending) => {
-                    let name = self.wizard.name().to_owned();
-                    self.finish_wizard(pending, &name);
-                }
-            },
-            Mode::Info => match key.code {
-                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('i') => {
-                    self.close_info()
-                }
-                _ => {}
-            },
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => self.quit(),
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                self.refresh_sandboxes();
+                self.notify_success("Sandbox list refreshed", None);
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') => self.open_wizard(),
+            KeyCode::Char('s') | KeyCode::Char('S') => self.toggle_selected(),
+            KeyCode::Char('x') | KeyCode::Char('X') => self.exec_selected(),
+            KeyCode::Char('d') | KeyCode::Char('D') => self.remove_selected(),
+            KeyCode::Char('i') | KeyCode::Char('I') => self.open_selected_info(),
+            _ => {}
         }
     }
 
-    fn open_info(&mut self, index: usize) {
-        let Some(sandbox) = self.sandboxes.get(index).cloned() else {
-            return;
-        };
-        self.selected = index;
-        self.info = Some(inspect_sandbox(&sandbox));
-        self.mode = Mode::Info;
+    pub fn open_wizard(&mut self) {
+        self.form = Form::new();
+        let _ = self.modals.open(CREATE_DIALOG, &mut self.focus);
     }
 
-    fn close_info(&mut self) {
-        self.mode = Mode::Normal;
-        self.info = None;
-        self.message.clear();
-    }
-
-    fn sandbox_is_running(&self, index: usize) -> bool {
-        self.sandboxes
-            .get(index)
-            .is_some_and(|sandbox| sandbox.is_running())
-    }
-
-    /// `s` follows the state shown on the block: start a stopped sandbox,
-    /// stop a running one.
-    fn toggle_sandbox(&mut self, index: usize) {
-        if self.sandbox_is_running(index) {
-            self.stop_sandbox(index);
-        } else {
-            self.start_sandbox(index);
-        }
-    }
-
-    fn start_sandbox(&mut self, index: usize) {
-        let Some(name) = self.sandbox_name(index) else {
-            return;
-        };
-        // `sbx` has no standalone start verb; exec starts a stopped sandbox.
-        // A no-op command leaves it running after the command exits.
-        let command = PendingCommand::new("sbx", &["exec", &name, "--", "true"]);
-        self.run_sbx(command, format!("Sandbox '{name}' started."));
-    }
-
-    fn stop_sandbox(&mut self, index: usize) {
-        let Some(name) = self.sandbox_name(index) else {
-            return;
-        };
-        let command = PendingCommand::new("sbx", &["stop", &name]);
-        self.run_sbx(command, format!("Sandbox '{name}' stopped."));
-    }
-
-    fn exec_sandbox(&mut self, index: usize) {
-        let Some(name) = self.sandbox_name(index) else {
-            return;
-        };
-        self.pending_external = Some(PendingCommand::new(
-            "sbx",
-            &["exec", "-it", &name, "bash"],
-        ));
-        self.message = format!("Opening external terminal for '{name}'...");
-    }
-
-    fn remove_sandbox(&mut self, index: usize) {
-        let Some(name) = self.sandbox_name(index) else {
-            return;
-        };
-        // The TUI has no TTY to answer sbx's confirmation prompt, so removal
-        // is explicit and non-interactive here.
-        let command = PendingCommand::new("sbx", &["remove", &name, "--force"]);
-        self.run_sbx(command, format!("Sandbox '{name}' removed."));
-    }
-
-    fn sandbox_name(&self, index: usize) -> Option<String> {
-        self.sandboxes.get(index).map(|sandbox| sandbox.name.clone())
-    }
-
-    fn open_wizard(&mut self) {
-        self.wizard = Wizard::new();
-        self.message.clear();
-        self.mode = Mode::Wizard;
+    /// Cancel via the dialog's close button or Escape.
+    pub fn cancel_wizard(&mut self) {
+        self.close_wizard();
+        self.notify_info("Create sandbox cancelled.", None);
     }
 
     fn close_wizard(&mut self) {
-        self.mode = Mode::Normal;
-        self.wizard = Wizard::new();
-        self.message = "Create sandbox cancelled.".to_owned();
+        if self
+            .modals
+            .top()
+            .is_some_and(|id| id.as_str() == CREATE_DIALOG)
+        {
+            self.modals.close(&mut self.focus);
+        }
+        self.form = Form::new();
     }
 
-    fn create_from_button(&mut self) {
-        if !self.wizard.is_ready() {
-            self.message = "Finish the wizard steps before creating the sandbox.".to_owned();
+    pub fn create_from_form(&mut self) {
+        if let Some((field, error)) = self.form.first_error() {
+            self.notify_error(
+                "Invalid sandbox setting",
+                format!("{}: {error}", field.label()),
+            );
             return;
         }
-        match self.wizard.finish() {
-            Ok(pending) => {
-                let name = self.wizard.name().to_owned();
-                self.finish_wizard(pending, &name);
-            }
-            Err((step, error)) => {
-                self.wizard.go_to_step(step);
-                self.message = error;
-            }
+        let pending = self.form.pending_command();
+        let name = self.form.name.value().trim().to_owned();
+        self.start_creation(pending, &name);
+    }
+
+    pub fn open_info(&mut self, name: &str) {
+        let Some(sandbox) = self.sandboxes.iter().find(|s| s.name == name).cloned() else {
+            return;
+        };
+        self.select_named(name);
+        self.info = Some(inspect_sandbox(&sandbox));
+        let _ = self.modals.open(INFO_DIALOG, &mut self.focus);
+    }
+
+    pub fn close_info(&mut self) {
+        if self
+            .modals
+            .top()
+            .is_some_and(|id| id.as_str() == INFO_DIALOG)
+        {
+            self.modals.close(&mut self.focus);
+        }
+        self.info = None;
+    }
+
+    pub fn toggle_selected(&mut self) {
+        let Some(name) = self.selected_name() else {
+            return;
+        };
+        if self.is_running(&name) {
+            self.stop_sandbox(&name);
+        } else {
+            self.start_sandbox(&name);
         }
     }
 
-    fn finish_wizard(&mut self, pending: PendingCommand, name: &str) {
+    pub fn start_sandbox(&mut self, name: &str) {
+        // `sbx` has no standalone start verb; exec starts a stopped sandbox.
+        // A no-op command leaves it running after the command exits.
+        let command = PendingCommand::new("sbx", &["exec", name, "--", "true"]);
+        self.run_sbx(command, format!("Sandbox '{name}' started."));
+    }
+
+    pub fn stop_sandbox(&mut self, name: &str) {
+        let command = PendingCommand::new("sbx", &["stop", name]);
+        self.run_sbx(command, format!("Sandbox '{name}' stopped."));
+    }
+
+    pub fn exec_selected(&mut self) {
+        let Some(name) = self.selected_name() else {
+            return;
+        };
+        if !self.is_running(&name) {
+            return;
+        }
+        self.pending_external = Some(PendingCommand::new("sbx", &["exec", "-it", &name, "bash"]));
+        self.notify_info(format!("Opening external terminal for '{name}'..."), None);
+    }
+
+    pub fn remove_selected(&mut self) {
+        if let Some(name) = self.selected_name() {
+            self.remove_sandbox(&name);
+        }
+    }
+
+    pub fn remove_sandbox(&mut self, name: &str) {
+        // The TUI has no TTY to answer sbx's confirmation prompt, so removal
+        // is explicit and non-interactive here.
+        let command = PendingCommand::new("sbx", &["remove", name, "--force"]);
+        self.run_sbx(command, format!("Sandbox '{name}' removed."));
+    }
+
+    pub fn open_selected_info(&mut self) {
+        if let Some(name) = self.selected_name()
+            && self.is_running(&name)
+        {
+            self.open_info(&name);
+        }
+    }
+
+    fn is_running(&self, name: &str) -> bool {
+        self.sandboxes
+            .iter()
+            .find(|sandbox| sandbox.name == name)
+            .is_some_and(Sandbox::is_running)
+    }
+
+    fn start_creation(&mut self, pending: PendingCommand, name: &str) {
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
             let _ = sender.send(pending.run());
@@ -1346,75 +1207,25 @@ impl App {
             result: receiver,
         });
         self.spinner_index = 0;
+        let now = self.now();
+        self.toasts.push(
+            Toast::loading(format!("Creating sandbox '{name}'"))
+                .with_id(CREATE_TOAST)
+                .persistent(),
+            now,
+        );
         self.message = format!("Creating sandbox '{name}'...");
     }
 
-    fn select(&mut self, index: usize) {
-        self.selected = index.min(self.block_count() - 1);
-        self.keep_selection_visible();
-    }
-
-    fn move_horizontal(&mut self, delta: isize) {
-        let next = self.selected as isize + delta;
-        if next < 0 || next >= self.block_count() as isize {
-            return;
-        }
-        // Don't wrap from the end of a row into the start of the next one.
-        if delta < 0 && self.selected.is_multiple_of(GRID_COLUMNS) {
-            return;
-        }
-        if delta > 0 && (next as usize).is_multiple_of(GRID_COLUMNS) {
-            return;
-        }
-        self.select(next as usize);
-    }
-
-    fn move_vertical(&mut self, delta: isize) {
-        let next = self.selected as isize + delta * GRID_COLUMNS as isize;
-        if next >= 0 && next < self.block_count() as isize {
-            self.select(next as usize);
-        }
-    }
-
-    fn move_page(&mut self, direction: isize) {
-        let step = (self.visible_rows * GRID_COLUMNS) as isize;
-        let next = self.selected as isize + direction * step;
-        if next < 0 {
-            self.select(0);
-        } else if next >= self.block_count() as isize {
-            self.select(self.block_count() - 1);
-        } else {
-            self.select(next as usize);
-        }
-    }
-
-    fn clamp_navigation(&mut self) {
-        let rows = self.block_count().div_ceil(GRID_COLUMNS);
-        self.selected = self.selected.min(self.block_count() - 1);
-        self.grid_offset = self.grid_offset.min(rows.saturating_sub(self.visible_rows));
-        self.keep_selection_visible();
-    }
-
-    fn keep_selection_visible(&mut self) {
-        let row = self.selected / GRID_COLUMNS;
-        if row < self.grid_offset {
-            self.grid_offset = row;
-        } else if row >= self.grid_offset + self.visible_rows {
-            self.grid_offset = row + 1 - self.visible_rows;
-        }
-    }
-
-    fn refresh_sandboxes(&mut self) {
-        self.message.clear();
+    pub fn refresh_sandboxes(&mut self) {
         match fetch_sandboxes() {
             Ok(sandboxes) => self.apply_statuses(sandboxes),
-            Err(error) => self.message = format!("Could not list sandboxes: {error}"),
+            Err(error) => self.notify_error("Could not list sandboxes", error),
         }
     }
 
-    /// Periodic tick: keep the running-state dots (and an open Info modal's
-    /// status line) current without clearing the footer message or re-running
-    /// the more expensive in-guest metrics commands.
+    /// Periodic tick: keep running-state dots (and an open Info modal's status
+    /// line) current without re-running the in-guest metrics commands.
     pub fn refresh_statuses(&mut self) {
         if let Ok(sandboxes) = fetch_sandboxes() {
             self.apply_statuses(sandboxes);
@@ -1428,7 +1239,9 @@ impl App {
             info.status = fresh.status.clone();
         }
         self.sandboxes = sandboxes;
-        self.clamp_navigation();
+        let last = self.sandboxes.len().saturating_sub(1);
+        self.selected = self.selected.min(last);
+        self.list_offset = self.list_offset.min(last);
     }
 
     fn run_sbx(&mut self, pending: PendingCommand, success: String) {
@@ -1438,38 +1251,37 @@ impl App {
     fn handle_sbx_result(&mut self, result: io::Result<std::process::Output>, success: String) {
         match result {
             Ok(output) if output.status.success() => {
-                self.refresh_sandboxes();
-                if self.message.is_empty() {
-                    self.message = success;
-                }
+                self.refresh_statuses();
+                self.notify_success(success, None);
             }
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let detail = stderr
                     .lines()
                     .find(|line| !line.trim().is_empty())
-                    .unwrap_or("sbx command failed");
-                self.message = format!("Could not run sbx: {detail}");
+                    .unwrap_or("sbx command failed")
+                    .to_owned();
+                self.notify_error("Could not run sbx", detail);
             }
-            Err(error) => self.message = format!("Could not run sbx: {error}"),
+            Err(error) => self.notify_error("Could not run sbx", error.to_string()),
         }
     }
 
     fn finish_creation(&mut self, result: io::Result<std::process::Output>, name: &str) {
         let succeeded = matches!(&result, Ok(output) if output.status.success());
+        let _ = self.toasts.dismiss(CREATE_TOAST);
         self.handle_sbx_result(result, format!("Sandbox '{name}' created."));
         if succeeded {
-            self.mode = Mode::Normal;
-            self.wizard = Wizard::new();
+            self.close_wizard();
         }
-        // On failure the wizard stays open on Review so the user can retry or
-        // back out; the footer carries the error from handle_sbx_result.
+        // On failure the dialog stays open so the settings can be corrected or
+        // the create can be retried.
     }
 }
 
 #[cfg(test)]
 impl App {
-    /// Put the app into the same state `finish_wizard` does, without spawning
+    /// Put the app into the same state `start_creation` does, without spawning
     /// a real `sbx` process. The sender is dropped, so `poll_creation` observes
     /// a disconnected worker.
     pub fn begin_creation_for_test(&mut self, name: &str) {
@@ -1481,7 +1293,13 @@ impl App {
         });
         self.spinner_index = 0;
         self.message = format!("Creating sandbox '{name}'...");
-        self.mode = Mode::Wizard;
+        self.toasts.push(
+            Toast::loading(format!("Creating sandbox '{name}'"))
+                .with_id(CREATE_TOAST)
+                .persistent(),
+            self.now(),
+        );
+        let _ = self.modals.open(CREATE_DIALOG, &mut self.focus);
     }
 
     pub fn complete_creation_for_test(
@@ -1508,8 +1326,12 @@ impl App {
             .iter()
             .map(|(name, status)| Sandbox::new((*name).to_owned(), (*status).to_owned()))
             .collect();
-        app.clamp_navigation();
         app
+    }
+
+    pub fn show_info_for_test(&mut self, details: SandboxDetails) {
+        self.info = Some(details);
+        let _ = self.modals.open(INFO_DIALOG, &mut self.focus);
     }
 }
 
@@ -1547,18 +1369,37 @@ mod tests {
     }
 
     #[test]
-    fn wizard_builds_expected_command() {
-        let mut wizard = Wizard::new();
-        wizard.name = "demo-tui".to_owned();
-        wizard.root_size = "40".to_owned();
-        wizard.docker_size = "20".to_owned();
-        wizard.cpus = "2".to_owned();
-        wizard.memory = "4g".to_owned();
+    fn form_builds_expected_command() {
+        let mut form = Form::new();
+        form.name = InputState::new("demo-tui");
+        form.root_size = InputState::new("40");
+        form.docker_size = InputState::new("20");
+        form.cpus = InputState::new("2");
+        form.memory = InputState::new("4g");
 
         assert_eq!(
-            wizard.preview(),
+            form.preview(),
             "DOCKER_SANDBOXES_ROOT_SIZE=40g DOCKER_SANDBOXES_DOCKER_SIZE=20g sbx create --name demo-tui opencode --cpus 2 --memory 4g"
         );
+        assert!(form.first_error().is_none());
+    }
+
+    #[test]
+    fn form_reports_first_invalid_field() {
+        let mut form = Form::new();
+        assert_eq!(
+            form.first_error().map(|(field, _)| field),
+            Some(FormField::Name)
+        );
+
+        form.name = InputState::new("demo");
+        form.cpus = InputState::new("many");
+        assert_eq!(
+            form.first_error().map(|(field, _)| field),
+            Some(FormField::Cpus)
+        );
+        assert!(form.invalid(FormField::Cpus));
+        assert!(!form.invalid(FormField::Name));
     }
 
     #[cfg(unix)]
@@ -1593,20 +1434,15 @@ mod tests {
             KeyCode::Esc,
             KeyCode::Enter,
             KeyCode::Char('y'),
+            KeyCode::Char('r'),
         ] {
-            app.handle_key(KeyEvent::new(key, KeyModifiers::NONE));
+            app.handle_global_key(KeyEvent::new(key, KeyModifiers::NONE));
         }
-        app.handle_mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: 0,
-            row: 0,
-            modifiers: KeyModifiers::NONE,
-        });
         assert!(app.is_creating());
         assert!(matches!(app.mode(), Mode::Wizard));
 
-        // Ctrl+C remains available as an escape hatch.
-        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        // Ctrl+C remains available as the escape hatch.
+        app.handle_global_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(app.should_quit());
 
         // The test worker's channel is disconnected: poll reports the failure
@@ -1618,13 +1454,13 @@ mod tests {
     }
 
     #[test]
-    fn finish_wizard_starts_creation_without_blocking() {
+    fn start_creation_does_not_block() {
         let mut app = App::with_sandboxes(&[]);
         #[cfg(unix)]
         let pending = PendingCommand::new("true", &[]);
         #[cfg(windows)]
         let pending = PendingCommand::new("cmd", &["/C", "exit", "0"]);
-        app.finish_wizard(pending, "demo");
+        app.start_creation(pending, "demo");
         assert!(app.is_creating());
         assert_eq!(app.creating_name(), Some("demo"));
     }
@@ -1645,7 +1481,7 @@ mod tests {
         app.complete_creation_for_test("demo", Err(io::Error::other("boom")));
         assert!(!app.is_creating());
         assert!(matches!(app.mode(), Mode::Wizard));
-        assert!(app.message().contains("Could not run sbx: boom"));
+        assert!(app.message().contains("boom"));
     }
 
     #[test]
@@ -1671,11 +1507,10 @@ mod tests {
     }
 
     #[test]
-    fn stopped_sandbox_ignores_running_only_keys() {
+    fn stopped_sandbox_ignores_running_only_actions() {
         let mut app = App::with_sandbox_statuses(&[("alpha", "stopped")]);
-        for key in ['x', 'i'] {
-            app.handle_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE));
-        }
+        app.exec_selected();
+        app.open_selected_info();
         assert!(matches!(app.mode(), Mode::Normal));
         assert!(app.take_external_command().is_none());
     }
@@ -1794,7 +1629,7 @@ mod tests {
     #[test]
     fn status_tick_updates_modal_without_clearing_message() {
         let mut app = App::with_sandbox_statuses(&[("alpha", "stopped")]);
-        app.set_message("keep me");
+        app.notify_info("keep me", None);
         app.info = Some(SandboxDetails {
             name: "alpha".to_owned(),
             status: "stopped".to_owned(),

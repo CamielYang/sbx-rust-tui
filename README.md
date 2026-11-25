@@ -1,7 +1,9 @@
 # sbx-rust-tui
 
-A ratatui dashboard for Docker Sandboxes (`sbx`): browse active sandboxes and
-create new ones without leaving the terminal.
+A themed terminal dashboard for Docker Sandboxes (`sbx`), built with
+[ratcn](https://github.com/kristoferlund/ratcn) on top of Ratatui. Browse and
+manage sandboxes, create new ones, and inspect live resource usage without
+leaving the terminal.
 
 ## Run
 
@@ -9,36 +11,100 @@ create new ones without leaving the terminal.
 cargo run
 ```
 
-## Home screen
+## Dashboard
 
-The home screen has a centered **Docker Sandbox Builder** title, a grid of blocks
-(three columns per row) for the active sandboxes, and a trailing
-**+ New Sandbox** button. Each sandbox block shows a left-aligned name with a
-green dot when the sandbox is running, or a red dot when it is stopped/unknown.
-Below the name, a running sandbox offers **Stop**, **Exec**, **Remove**, and
-**Info**; a stopped sandbox offers only **Start** and **Remove**. Clicking the
-rest of a block selects it; clicking **+ New Sandbox** opens the create wizard
-as a modal over the dashboard.
+The screen uses ratcn components and its Tokyo Night theme:
+
+- a header with the sandbox count,
+- a toolbar with **+ New sandbox**, **Refresh**, and **Quit** buttons,
+- a scrollable sandbox list with running/stopped indicators,
+- an **Actions** pane with **Start**/**Stop**, **Exec shell**, **Info**, and
+  **Remove** buttons for the selected sandbox,
+- a footer with the latest message and keyboard shortcuts,
+- transient toast notifications in the top-right corner.
+
+Focus, hover, hit-testing, and modal layering are handled by ratcn's runtime;
+`App` owns all state and applies the messages components emit.
 
 Sandbox names and statuses come from `sbx ls --format json` at startup and are
-refreshed after a sandbox is created, stopped, or removed (or when `r` is
-pressed). The running-state dots are also re-read every five seconds, so a
-sandbox that starts or stops outside the TUI is reflected without any input.
-Older `sbx` versions without structured output fall back to `sbx ls -q` and
-show status `unknown`. If `sbx` is missing or fails, the grid keeps the last
-known statuses and the error is shown in the footer for an explicit refresh.
+refreshed after create/start/stop/remove, when `R` is pressed, and every five
+seconds. Older `sbx` versions without structured output fall back to `sbx ls -q`
+and show status `unknown`. If `sbx` is missing or fails, the last known list is
+kept and the error appears in the footer and as a toast.
 
-### Sandbox buttons
+### Actions
 
 | Button | Command | Behaviour |
 | --- | --- | --- |
-| Start (stopped only) | `sbx exec {name} -- true` | Starts the sandbox with a no-op command, then refreshes the grid. `sbx` has no standalone `start` verb; `exec` starts a stopped sandbox. |
-| Stop (running only) | `sbx stop {name}` | Stops the sandbox, then refreshes the grid. |
-| Exec (running only) | `sbx exec -it {name} bash` | Leaves the TUI, opens an external terminal, runs the shell there, and restores the TUI when that terminal closes. On Linux it tries common terminal emulators in order (`x-terminal-emulator`, `gnome-terminal`, `konsole`, `xfce4-terminal`, `mate-terminal`, `kitty`, `alacritty`, `xterm`); on macOS it uses Terminal.app; on Windows a new `cmd` window. If no terminal can be opened, the footer shows the command to run manually. |
-| Remove | `sbx remove {name} --force` | Removes the sandbox, then refreshes the grid. `--force` is added because the TUI has no TTY for `sbx`'s confirmation prompt; removal is immediate and cannot be undone. |
-| Info (running only) | `sbx inspect {name} --format json` then `sbx exec {name} -- sh -c …` | Opens a modal with name, status, CPU count, and one row each for memory, root filesystem, and Docker filesystem, shown as `used / total`. The in-guest commands run only when Info is opened, so the numbers are fresh; `sbx inspect` supplies fallback totals when the guest cannot report them. Missing values appear as `n/a`, and command errors appear as a note in the modal. |
+| Start / Stop | `sbx exec {name} -- true` / `sbx stop {name}` | `sbx` has no standalone `start` verb, so a stopped sandbox is started with a no-op `exec`. |
+| Exec shell | `sbx exec -it {name} bash` | Suspends the TUI, opens an external terminal, and restores the TUI when it closes. On Linux it tries common terminal emulators in order; on macOS it uses Terminal.app; on Windows a new `cmd` window. If no terminal opens, the command is shown in the footer. |
+| Info | `sbx inspect {name} --format json` then `sbx exec {name} -- sh -c …` | Opens a themed dialog with status, CPU count, and memory/root/Docker usage as `used / total`. Guest metrics are collected only when Info opens; `sbx inspect` supplies fallback values. Missing values render as `—`; errors appear as a note. |
+| Remove | `sbx remove {name} --force` | Removes immediately; `--force` avoids `sbx`'s confirmation prompt, which the TUI cannot answer. |
 
-The Info modal closes with `Esc`, `q`, `i`, `Enter`, or its **[X]** button.
+Info is only available for running sandboxes. It closes with `Esc` or the
+**Close** button.
+
+## Keys
+
+| Key | Action |
+| --- | --- |
+| `Tab` / `Shift+Tab` | Move focus through toolbar buttons, the sandbox list, and action buttons |
+| `↑` / `↓` / `j` / `k` | Move the sandbox list cursor |
+| `PgUp` / `PgDn` / wheel | Scroll the sandbox list |
+| `Enter` / `Space` | Activate the focused button or row |
+| `N` | Open the create dialog |
+| `R` | Refresh the sandbox list |
+| `S` | Start a stopped sandbox, or stop a running one |
+| `X` / `D` / `I` | Exec / Remove / Inspect the selected sandbox (`X` and `I` need a running sandbox) |
+| `q` / `Esc` / `Ctrl+C` | Quit (terminal is always restored) |
+
+Global shortcuts apply only on the dashboard; while a dialog is open, keys are
+handled by its controls. `Ctrl+C` remains available everywhere, including while
+a sandbox is being created.
+
+## Create dialog
+
+Open it with **+ New sandbox** or `N`. All settings are visible and editable at
+once using ratcn inputs and an agent select:
+
+1. **Name** — required, 2–63 ASCII letters, numbers, `-` or `.`; each
+   dot-separated part must start and end with an alphanumeric character;
+   `default` is reserved.
+2. **Agent** — `claude`, `codex`, `copilot`, `cursor`, `devin`, `docker-agent`,
+   `droid`, `kiro`, `opencode` (default), `shell`. Click the field or press
+   `Enter` to open the option popup.
+3. **Root size (GB)** — optional number, e.g. `40` →
+   `DOCKER_SANDBOXES_ROOT_SIZE=40g`.
+4. **Docker data (GB)** — optional number, e.g. `20` →
+   `DOCKER_SANDBOXES_DOCKER_SIZE=20g`.
+5. **CPUs** — positive integer; `0` means auto (default: `2`).
+6. **Memory** — binary units such as `512m` or `8g`; minimum 512 MiB, maximum
+   host memory. Defaults to half of host memory (clamped to 512 MiB–32 GiB)
+   and warns above 75% of host memory.
+
+**Create sandbox** validates every field. The generated command is:
+
+```sh
+DOCKER_SANDBOXES_ROOT_SIZE=40g DOCKER_SANDBOXES_DOCKER_SIZE=20g \
+  sbx create --name demo-tui opencode --cpus 2 --memory 3584m
+```
+
+Size variables are passed only to the child process via `Command::env`, so the
+TUI's own environment is unchanged.
+
+Creation runs on a worker thread. While it is in flight, a persistent loading
+toast and themed progress bar animate, all inputs and buttons are disabled, and
+repeated keys cannot start a second sandbox. `Ctrl+C` still quits. On success
+the dialog closes, the list refreshes, and a success toast appears; on failure
+the dialog stays open with the invalid field marked and the error in the footer.
+
+## Mouse
+
+Mouse input is enabled on startup and disabled on exit (including on panic).
+Click toolbar or action buttons, click a sandbox row to select it, use the wheel
+to scroll, and click dialog fields/buttons. The agent select opens a popup that
+ratcn keeps anchored to its field. Exec temporarily suspends the TUI so the
+external terminal behaves normally.
 
 ## Windows build (cross-compile from Linux)
 
@@ -50,118 +116,22 @@ cargo build --release --target x86_64-pc-windows-gnu
 ```
 
 The executable is written to
-`target/x86_64-pc-windows-gnu/release/sbx-rust-tui.exe`. It is a 64-bit Windows
-console program; copy it to a Windows machine and run it from a terminal.
-
-Two platform notes:
-
-- Creating a sandbox calls `sbx`, so `sbx` must be available on the Windows
-  machine in `PATH`.
-- The wizard reads `/proc/meminfo` for its default memory limit and warnings.
-  That file does not exist on Windows, so it falls back to `4g` and skips the
-  host-memory checks there.
-
-## Keys
-
-| Key | Action |
-| --- | --- |
-| `←` / `→` / `↑` / `↓` or `h` / `l` / `k` / `j` | Move between blocks |
-| `Home` / `End` | First / last block |
-| `PgUp` / `PgDn` | Scroll the grid |
-| `Enter` (on **+ New Sandbox**) | Open the create wizard modal |
-| `s` | Start a stopped sandbox, or stop a running one |
-| `x` / `d` / `i` | Exec / Remove / Inspect the selected sandbox (`x` and `i` are ignored when it is stopped) |
-| `r` | Refresh the sandbox list |
-| `q` / `Esc` / `Ctrl+C` | Quit (terminal is always restored) |
-
-Inside the sandbox info modal:
-
-| Key | Action |
-| --- | --- |
-| `Esc` / `q` / `i` / `Enter` | Close the modal (or click **[X]**) |
-
-Inside the wizard modal:
-
-| Key | Action |
-| --- | --- |
-| Type characters | Edit the current field |
-| `↑` / `↓` or `k` / `j` | Choose an agent |
-| `Ctrl+U` | Clear the current field |
-| `Enter` | Next step |
-| `Esc` | Previous step (or cancel on the first) |
-| `y` / `Enter` | Create the sandbox on the review step |
-| `n` / `Esc` | Return to the memory step from review |
-
-While `sbx create` runs, the modal shows a spinner and "Creating sandbox …";
-keys, clicks, and the wizard's close button are ignored so repeated presses
-cannot start a second sandbox. `Ctrl+C` still quits. On success the wizard
-closes and the grid refreshes; on failure it stays on **Review** with the error
-in the footer so the settings can be corrected or the wizard cancelled.
-
-## Mouse
-
-Mouse capture is enabled on startup and disabled when the app exits (including on
-panic). Click a sandbox block to select it, click one of its **Start**/**Stop**,
-**Exec**, **Remove**, or **Info** buttons to act on it (only **Start** and
-**Remove** are shown for a stopped sandbox), click **+ New Sandbox** to open
-the wizard, and use the scroll wheel to move between grid rows. Exec temporarily
-disables mouse capture so the external terminal behaves normally.
-
-The wizard modal has an **[X]** close button in its top-right corner and a
-**[ Create Sandbox ]** button at the bottom. The Create button is disabled
-(dimmed, not clickable) until the final **Review** step, so all fields have been
-reviewed before a sandbox can be created.
-
-## New sandbox wizard modal
-
-Open the modal by selecting **+ New Sandbox** and pressing `Enter`. It walks
-through these settings one at a time:
-
-1. **Name** — required, 2–63 ASCII letters, numbers, `-` or `.`; each
-   dot-separated part must start and end with an alphanumeric character;
-   `default` is reserved.
-2. **Agent** — all options are shown in a two-column list with the current one
-   marked: `claude`, `codex`, `copilot`, `cursor`, `devin`, `docker-agent`,
-   `droid`, `kiro`, `opencode` (default), `shell`. Move with `↑`/`↓` or `j`/`k`.
-3. **Root size** — optional, in GB: type just a number, e.g. `40` →
-   `DOCKER_SANDBOXES_ROOT_SIZE=40g`.
-4. **Docker data size** — optional, in GB: type just a number, e.g. `20` →
-   `DOCKER_SANDBOXES_DOCKER_SIZE=20g`.
-5. **CPUs** — positive integer; `0` means auto (default: `2`).
-6. **Memory** — binary units such as `512m` or `8g`; minimum 512 MiB, maximum
-   host memory. Defaults to half of host memory (clamped to 512 MiB–32 GiB)
-   and warns above 75% of host memory.
-7. **Review** — enable the **Create Sandbox** button; `y`/`Enter` or a click
-   creates the sandbox. No command is printed on this step.
-
-Example generated command:
-
-```sh
-DOCKER_SANDBOXES_ROOT_SIZE=40g DOCKER_SANDBOXES_DOCKER_SIZE=20g \
-  sbx create --name demo-tui opencode --cpus 2 --memory 3584m
-```
-
-The two size variables are passed only to the child process via
-`Command::env`, so the TUI's own environment is unchanged.
+`target/x86_64-pc-windows-gnu/release/sbx-rust-tui.exe`. `sbx` must be on
+`PATH`. Host memory detection reads `/proc/meminfo`, so on Windows the memory
+default is `4g` and host-memory warnings are skipped.
 
 ## Code layout
 
-- [`src/main.rs`](src/main.rs) — terminal setup/restore, panic hook, event loop
-- [`src/app.rs`](src/app.rs) — sandbox list, state, wizard, validation and execution
-- [`src/ui.rs`](src/ui.rs) — dashboard grid and modal rendering
+- [`src/main.rs`](src/main.rs) — terminal lifecycle, ratcn runtime, event loop
+- [`src/app.rs`](src/app.rs) — sandbox data, form/validation, `sbx` commands, state
+- [`src/ui.rs`](src/ui.rs) — ratcn declarations, message mapping, and rendering
 
-## Notes / possible next steps
+## Notes
 
-- Sandbox creation runs on a worker thread so the modal can animate a spinner
-  and ignore input until `sbx create` finishes. Starting, stopping, removal,
-  and inspection still run synchronously; the UI is blocked while those `sbx`
-  commands run. Moving them to worker threads would fix that too.
-- Live resource values in the info modal come from `nproc`, `/proc/meminfo`, and
-  `df -k` inside the microVM via `sbx exec {name} -- sh -c …`. Used space is
-  `total - available` (memory uses `MemAvailable` when present). These commands
-  need a running sandbox — the same `exec` behaviour powers the **Start**
-  button — so Info is not offered on stopped blocks. Values the guest does not
-  report fall back to
-  `sbx inspect --format json`, and anything still missing is shown as `n/a`.
-- The five-second ticker only re-reads `sbx ls`; it never re-runs the in-guest
-  metrics commands, so leaving Info open does not add background load.
+- Starting, stopping, removal, and inspection still run synchronously, so the
+  UI is briefly blocked while those `sbx` commands run.
+- Live resource values come from `nproc`, `/proc/meminfo`, and `df -k` inside
+  the microVM via `sbx exec {name} -- sh -c …`. Used space is
+  `total - available` (`MemAvailable` when present).
+- The five-second ticker only re-reads `sbx ls`, so leaving Info open does not
+  add background load.

@@ -1,940 +1,714 @@
-use ratatui::{
-    Frame,
-    layout::{Alignment, Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+//! Ratcn-based dashboard for `sbx` sandboxes.
+//!
+//! Every control is either a ratcn component or themed paint queued through
+//! ratcn's declaration context. The runtime owns focus, hover, hit testing, and
+//! modal layering; [`App`](crate::app::App) owns the state and [`apply`] is the
+//! single place where component messages become state changes.
+
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Paragraph};
+use ratcn::runtime::{Component, DeclareCtx, FocusState};
+use ratcn::{
+    Button, Dialog, Input, InputState, List, ListItem, ListItemState, ProgressWidget, Select, Theme,
 };
 
-use crate::app::{
-    AGENTS, App, ClickAction, ClickTarget, GRID_COLUMNS, Mode, SandboxDetails, WIZARD_STEPS,
-    Wizard, WizardStep,
-};
+use crate::app::{AGENTS, App, CREATE_DIALOG, FormField, INFO_DIALOG, Sandbox, SandboxDetails};
 
-const BLOCK_HEIGHT: u16 = 4;
-const SLOT_HEIGHT: u16 = BLOCK_HEIGHT + 1;
-
-pub fn render(frame: &mut Frame, app: &mut App) {
-    let [body, footer_area] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
-
-    let [title_area, grid_area] =
-        Layout::vertical([Constraint::Length(3), Constraint::Min(BLOCK_HEIGHT)]).areas(body);
-
-    // Keep the app's scroll offset in sync with the space actually available.
-    app.set_visible_rows((grid_area.height / SLOT_HEIGHT) as usize);
-
-    let interactive = app.mode() == Mode::Normal;
-    let mode = app.mode();
-    let mut click_targets = Vec::new();
-    render_title(frame, title_area);
-    render_grid(frame, grid_area, app, interactive, &mut click_targets);
-    render_footer(frame, footer_area, app);
-
-    match mode {
-        Mode::Wizard => render_modal(frame, body, app, &mut click_targets),
-        Mode::Info => {
-            if let Some(details) = app.info() {
-                render_info_modal(frame, body, details, &mut click_targets);
-            }
-        }
-        Mode::Normal => {}
-    }
-
-    app.set_click_targets(click_targets);
+/// Every interaction ratcn can emit.
+#[derive(Clone, Debug)]
+pub enum Msg {
+    FocusChanged(FocusState),
+    SandboxFocused(String, usize),
+    SandboxSelected(String),
+    SandboxScrolled(usize),
+    OpenWizard,
+    Refresh,
+    Quit,
+    CancelWizard,
+    CreateSandbox,
+    FormChanged(FormField, InputState),
+    AgentOpenChanged(bool),
+    AgentFocused(usize),
+    AgentSelected(usize),
+    ToggleSelected,
+    ExecSelected,
+    InfoSelected,
+    RemoveSelected,
+    CloseInfo,
 }
 
-fn render_title(frame: &mut Frame, area: Rect) {
-    let title = Paragraph::new(vec![
-        Line::from(Span::styled(
-            "Docker Sandbox Builder",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            "Active sandboxes",
-            Style::default().fg(Color::DarkGray),
-        )),
+/// Apply one runtime message. Creation locks the controls: late focus messages
+/// are kept so the runtime stays in sync, but everything else is discarded
+/// until the worker reports back.
+pub fn apply(app: &mut App, msg: Msg) {
+    if app.is_creating() && !matches!(msg, Msg::FocusChanged(_)) {
+        return;
+    }
+    match msg {
+        Msg::FocusChanged(focus) => *app.focus_mut() = focus,
+        Msg::SandboxFocused(name, offset) => {
+            app.select_named(&name);
+            app.set_list_offset(offset);
+        }
+        Msg::SandboxSelected(name) => app.select_named(&name),
+        Msg::SandboxScrolled(offset) => app.set_list_offset(offset),
+        Msg::OpenWizard => app.open_wizard(),
+        Msg::Refresh => {
+            app.refresh_sandboxes();
+            app.notify_success("Sandbox list refreshed", None);
+        }
+        Msg::Quit => app.quit(),
+        Msg::CancelWizard => app.cancel_wizard(),
+        Msg::CreateSandbox => app.create_from_form(),
+        Msg::FormChanged(field, state) => app.set_form_state(field, state),
+        Msg::AgentOpenChanged(open) => app.set_agent_open(open),
+        Msg::AgentFocused(index) => app.set_agent_focus(index),
+        Msg::AgentSelected(index) => app.set_agent_index(index),
+        Msg::ToggleSelected => app.toggle_selected(),
+        Msg::ExecSelected => app.exec_selected(),
+        Msg::InfoSelected => app.open_selected_info(),
+        Msg::RemoveSelected => app.remove_selected(),
+        Msg::CloseInfo => app.close_info(),
+    }
+}
+
+/// Declare one complete frame. Called from `Ratcn::render`.
+pub fn declare(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme) {
+    let theme = *theme;
+    let area = ctx.area();
+    ctx.paint(move |paint| {
+        paint.widget(
+            Block::default().style(Style::default().bg(theme.background)),
+            area,
+        )
+    });
+
+    let vertical = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
     ])
-    .alignment(Alignment::Center);
-    frame.render_widget(title, area);
-}
+    .split(area);
 
-fn render_grid(
-    frame: &mut Frame,
-    area: Rect,
-    app: &App,
-    interactive: bool,
-    click_targets: &mut Vec<ClickTarget>,
-) {
-    let column_width = area.width / GRID_COLUMNS as u16;
-    if column_width == 0 {
-        return;
+    paint_header(ctx, app, &theme, vertical[0]);
+    paint_toolbar(ctx, app, &theme, vertical[1]);
+    paint_body(ctx, app, &theme, vertical[2]);
+    paint_footer(ctx, app, &theme, vertical[3]);
+
+    // Modals are declared last so their layers cover the dashboard. Ids come
+    // from App's ModalState, which Ratcn validates against this declaration.
+    if app.modals_ref().is_open(CREATE_DIALOG) {
+        ctx.modal(CREATE_DIALOG, create_dialog(app, &theme), area);
     }
-
-    let dim = if interactive {
-        Modifier::empty()
-    } else {
-        Modifier::DIM
-    };
-    let visible_rows = (area.height / SLOT_HEIGHT) as usize;
-
-    for row in 0..visible_rows {
-        let row_index = app.grid_offset() + row;
-        let y = area.y + row as u16 * SLOT_HEIGHT;
-
-        for column in 0..GRID_COLUMNS {
-            let index = row_index * GRID_COLUMNS + column;
-            if index >= app.block_count() {
-                break;
-            }
-
-            let x = area.x + column as u16 * column_width;
-            let width = if column + 1 == GRID_COLUMNS {
-                area.width - column_width * (GRID_COLUMNS as u16 - 1)
-            } else {
-                column_width
-            };
-            let rect = Rect {
-                x,
-                y,
-                width,
-                height: BLOCK_HEIGHT,
-            };
-            // Whole-block target first: button targets are added by
-            // render_block afterwards so they win on overlapping clicks.
-            if interactive {
-                let action = if index == app.sandboxes().len() {
-                    ClickAction::OpenWizard
-                } else {
-                    ClickAction::Select(index)
-                };
-                click_targets.push(ClickTarget::new(rect, action));
-            }
-            render_block(frame, rect, app, index, dim, interactive, click_targets);
-        }
+    if app.modals_ref().is_open(INFO_DIALOG) {
+        ctx.modal(INFO_DIALOG, info_dialog(app, &theme), area);
     }
 }
 
-fn render_block(
-    frame: &mut Frame,
-    area: Rect,
-    app: &App,
-    index: usize,
-    dim: Modifier,
-    interactive: bool,
-    click_targets: &mut Vec<ClickTarget>,
-) {
-    let selected = index == app.selected_index();
-    let is_button = index == app.sandboxes().len();
-
-    let border_style = if selected {
+fn paint_header(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme, area: Rect) {
+    let title = Span::styled(
+        "  DOCKER SANDBOXES  ",
         Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD | dim)
-    } else if is_button {
-        Style::default().fg(Color::Yellow).add_modifier(dim)
-    } else {
-        Style::default().fg(Color::DarkGray).add_modifier(dim)
-    };
-
-    let text_style = if selected {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD | dim)
-    } else if is_button {
-        Style::default().fg(Color::Yellow).add_modifier(dim)
-    } else {
-        Style::default().add_modifier(dim)
-    };
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if is_button {
-        let paragraph =
-            Paragraph::new(Line::from(Span::styled("+ New Sandbox", text_style)))
-                .alignment(Alignment::Center);
-        frame.render_widget(paragraph, inner);
-        return;
-    }
-
-    let sandbox = &app.sandboxes()[index];
-    let [title_area, buttons_area] =
-        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(inner);
-
-    let dot_color = if sandbox.is_running() {
-        Color::Green
-    } else {
-        Color::Red
-    };
-    let title_line = Line::from(vec![
-        Span::styled(
-            "● ",
-            Style::default().fg(dot_color).add_modifier(dim),
-        ),
-        Span::styled(sandbox.name.clone(), text_style),
-    ])
-    .alignment(Alignment::Left);
-    frame.render_widget(Paragraph::new(title_line), title_area);
-
-    // A running sandbox can be stopped, used and inspected. A stopped one
-    // only offers the actions that make sense before it is started again.
-    let buttons: Vec<(&str, Color, ClickAction)> = if sandbox.is_running() {
-        vec![
-            ("Stop", Color::LightRed, ClickAction::Stop(index)),
-            ("Exec", Color::LightGreen, ClickAction::Exec(index)),
-            ("Remove", Color::Red, ClickAction::Remove(index)),
-            ("Info", Color::LightBlue, ClickAction::Info(index)),
-        ]
-    } else {
-        vec![
-            ("Start", Color::LightGreen, ClickAction::Start(index)),
-            ("Remove", Color::Red, ClickAction::Remove(index)),
-        ]
-    };
-
-    let columns = Layout::horizontal(
-        (0..buttons.len()).map(|_| Constraint::Ratio(1, buttons.len() as u32)),
-    )
-    .split(buttons_area);
-
-    for (cell, (label, color, action)) in columns.iter().zip(buttons) {
-        let text = button_label(label, cell.width);
-        let style = Style::default().fg(color).add_modifier(dim);
-        frame.render_widget(
-            Paragraph::new(text).alignment(Alignment::Center).style(style),
-            *cell,
-        );
-        if interactive {
-            click_targets.push(ClickTarget::new(*cell, action));
-        }
-    }
-}
-
-/// Trim a button label to the width of its column.
-fn button_label(label: &str, width: u16) -> String {
-    label.chars().take(width as usize).collect()
-}
-
-fn modal_rect(area: Rect) -> Option<Rect> {
-    let width = area.width.saturating_sub(6).min(78);
-    let height = area.height.saturating_sub(2).min(24);
-    if width == 0 || height == 0 {
-        return None;
-    }
-    Some(Rect {
-        x: area.x + (area.width - width) / 2,
-        y: area.y + (area.height - height) / 2,
-        width,
-        height,
-    })
-}
-
-/// Draw the shared modal frame and its [X] close button.
-fn render_modal_chrome(
-    frame: &mut Frame,
-    rect: Rect,
-    title: &str,
-    close_action: Option<ClickAction>,
-    click_targets: &mut Vec<ClickTarget>,
-) -> Option<Rect> {
-    frame.render_widget(Clear, rect);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .border_style(Style::default().fg(Color::Cyan))
-        .style(Style::default().bg(Color::Black));
-    let inner = block.inner(rect);
-    frame.render_widget(block, rect);
-
-    // Close button sits on the top-right edge of the modal border.
-    let close_width = 4.min(rect.width.saturating_sub(2));
-    if close_width > 0 {
-        let close_rect = Rect {
-            x: rect.right().saturating_sub(close_width + 1),
-            y: rect.y,
-            width: close_width,
-            height: 1,
-        };
-        let close_style = match close_action {
-            Some(_) => Style::default()
-                .fg(Color::Red)
-                .bg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-            None => Style::default()
-                .fg(Color::DarkGray)
-                .bg(Color::Black)
-                .add_modifier(Modifier::DIM),
-        };
-        frame.render_widget(Paragraph::new("[X]").style(close_style), close_rect);
-        // Include the adjacent border corner in the hit area: users tend to
-        // click the very top-right cell of the modal. While creating, the
-        // button stays visible but is dimmed and has no hit region.
-        if let Some(action) = close_action {
-            let close_hit_area = Rect {
-                width: (close_width + 1).min(rect.width),
-                ..close_rect
-            };
-            click_targets.push(ClickTarget::new(close_hit_area, action));
-        }
-    }
-
-    Some(inner)
-}
-
-fn render_modal(
-    frame: &mut Frame,
-    area: Rect,
-    app: &App,
-    click_targets: &mut Vec<ClickTarget>,
-) {
-    let Some(rect) = modal_rect(area) else {
-        return;
-    };
-    let creating = app.is_creating();
-    let close_action = if creating {
-        None
-    } else {
-        Some(ClickAction::CloseWizard)
-    };
-    let Some(inner) = render_modal_chrome(frame, rect, " New Sandbox ", close_action, click_targets)
-    else {
-        return;
-    };
-
-    // Reserve the last inner row for the Create button.
-    let [content_area, button_area] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
-    let lines = if creating {
-        creation_lines(app)
-    } else {
-        wizard_lines(app.wizard())
-    };
-    frame.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }),
-        content_area,
+            .fg(theme.primary_foreground)
+            .bg(theme.primary)
+            .add_modifier(Modifier::BOLD),
     );
-
-    let label = "[ Create Sandbox ]";
-    let button_width = (label.len() as u16).min(button_area.width);
-    if button_width > 0 {
-        let button_rect = Rect {
-            x: button_area.x + (button_area.width - button_width) / 2,
-            y: button_area.y,
-            width: button_width,
-            height: 1,
-        };
-        let create_enabled = app.wizard().is_ready() && !creating;
-        let button_style = if create_enabled {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM)
-        };
-        frame.render_widget(
-            Paragraph::new(label)
-                .alignment(Alignment::Center)
-                .style(button_style),
-            button_rect,
-        );
-        if create_enabled {
-            click_targets.push(ClickTarget::new(button_rect, ClickAction::CreateSandbox));
-        }
-    }
+    let subtitle = Span::styled(
+        "  sbx dashboard",
+        Style::default().fg(theme.muted_foreground),
+    );
+    let count = Span::styled(
+        format!("  {} sandbox(es)  ", app.sandboxes().len()),
+        Style::default().fg(theme.muted_foreground),
+    );
+    ctx.paint_widget(
+        Paragraph::new(Line::from(vec![title, subtitle, count])),
+        area,
+    );
 }
 
-/// Modal body shown while `sbx create` runs on the worker thread. The glyph is
-/// swapped by `App::tick` on each event-loop iteration.
-fn creation_lines(app: &App) -> Vec<Line<'static>> {
-    let name = app.creating_name().unwrap_or("sandbox");
-    vec![
-        Line::from(Span::styled(
-            format!("Creating sandbox '{name}'..."),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::raw(""),
-        Line::from(vec![
-            Span::styled(app.spinner(), Style::default().fg(Color::Yellow)),
-            Span::raw("  Please wait, this may take a moment."),
-        ]),
-        Line::raw(""),
-        Line::from(Span::styled(
-            "Input is paused until creation finishes.",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ]
-}
+fn paint_toolbar(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme, area: Rect) {
+    let locked = app.is_creating();
+    let new_button = Button::new("+ New sandbox")
+        .on_press(|| Msg::OpenWizard)
+        .disabled(locked);
+    let refresh_button = Button::new("Refresh")
+        .secondary()
+        .on_press(|| Msg::Refresh)
+        .disabled(locked);
+    let quit_button = Button::new("Quit")
+        .ghost()
+        .on_press(|| Msg::Quit)
+        .disabled(locked);
 
-fn render_info_modal(
-    frame: &mut Frame,
-    area: Rect,
-    details: &SandboxDetails,
-    click_targets: &mut Vec<ClickTarget>,
-) {
-    let Some(rect) = modal_rect(area) else {
-        return;
-    };
-    let Some(inner) = render_modal_chrome(
-        frame,
-        rect,
-        " Sandbox Info ",
-        Some(ClickAction::CloseInfo),
-        click_targets,
-    ) else {
-        return;
-    };
-
-    let paragraph = Paragraph::new(info_lines(details))
-        .wrap(Wrap { trim: false })
-        .style(Style::default().bg(Color::Black));
-    frame.render_widget(paragraph, inner);
-}
-
-fn info_lines(details: &SandboxDetails) -> Vec<Line<'static>> {
-    let dim = Style::default().fg(Color::DarkGray);
-    let running = details.status.trim().to_ascii_lowercase().contains("running");
-    let status_color = if running { Color::Green } else { Color::Red };
-    let status_style = Style::default().fg(status_color).add_modifier(Modifier::BOLD);
-
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled("Name:   ", dim),
-            Span::styled(details.name.clone(), Style::default().fg(Color::Cyan)),
-        ]),
-        Line::from(vec![
-            Span::styled("Status: ", dim),
-            Span::styled("● ", status_style),
-            Span::styled(details.status.clone(), status_style),
-        ]),
-        Line::raw(""),
-        Line::from(Span::styled(
-            "Resources",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )),
-        resource_line("CPU", details.cpus.as_deref()),
-        usage_line(
-            "Memory",
-            details.mem_used.as_deref(),
-            details.mem_total.as_deref(),
-        ),
-        usage_line(
-            "Root size",
-            details.root_used.as_deref(),
-            details.root_total.as_deref(),
-        ),
-        usage_line(
-            "Docker size",
-            details.docker_used.as_deref(),
-            details.docker_total.as_deref(),
-        ),
+    let widths = [
+        new_button.width(),
+        refresh_button.width(),
+        quit_button.width(),
     ];
-
-    if let Some(error) = &details.error {
-        lines.push(Line::raw(""));
-        lines.push(Line::from(Span::styled(
-            format!("Note: {error}"),
-            Style::default().fg(Color::Yellow),
-        )));
-    }
-
-    lines
-}
-
-fn resource_line(label: &str, value: Option<&str>) -> Line<'static> {
-    labeled_line(label, value.unwrap_or("n/a").to_owned())
-}
-
-fn usage_line(label: &str, used: Option<&str>, total: Option<&str>) -> Line<'static> {
-    let value = match (used, total) {
-        (Some(used), Some(total)) => format!("{used} used / {total} total"),
-        (Some(used), None) => format!("{used} used / n/a total"),
-        (None, Some(total)) => format!("n/a used / {total} total"),
-        (None, None) => "n/a".to_owned(),
-    };
-    labeled_line(label, value)
-}
-
-fn labeled_line(label: &str, value: String) -> Line<'static> {
-    let name = format!("  {label}:");
-    let padding = " ".repeat(15usize.saturating_sub(name.len()));
-    Line::from(vec![
-        Span::styled(
-            format!("{name}{padding}"),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::styled(value, Style::default().fg(Color::White)),
+    let columns = Layout::horizontal([
+        Constraint::Length(widths[0] + 2),
+        Constraint::Length(widths[1] + 2),
+        Constraint::Length(widths[2] + 2),
+        Constraint::Min(0),
     ])
+    .split(area);
+
+    ctx.component("toolbar-new", new_button, columns[0]);
+    ctx.component("toolbar-refresh", refresh_button, columns[1]);
+    ctx.component("toolbar-quit", quit_button, columns[2]);
+
+    let hint = Span::styled(
+        "  Tab moves focus · Enter activates",
+        Style::default().fg(theme.muted_foreground),
+    );
+    ctx.paint_widget(Paragraph::new(Line::from(hint)), columns[3]);
 }
 
-fn wizard_lines(wizard: &Wizard) -> Vec<Line<'static>> {
-    let current_index = WIZARD_STEPS
-        .iter()
-        .position(|step| *step == wizard.step())
-        .unwrap_or(0);
-
-    let mut lines = vec![
-        Line::from(Span::styled(
-            wizard.step().prompt(),
-            Style::default().fg(Color::DarkGray),
-        )),
-        Line::raw(""),
-    ];
-
-    for (index, step) in WIZARD_STEPS.iter().enumerate() {
-        let marker = if index < current_index {
-            "[✓]"
-        } else if index == current_index {
-            "[>]"
-        } else {
-            "[ ]"
-        };
-        let style = if index == current_index {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
-
-        let mut value = wizard.value_for(*step);
-        if value.is_empty() {
-            value = if *step == WizardStep::Name {
-                "<required>".to_owned()
-            } else {
-                "<empty>".to_owned()
-            };
-        }
-        if index == current_index && step.is_text() {
-            value.push('▌');
-        }
-
-        let mut spans = vec![
-            Span::styled(format!("{marker} "), style),
-            Span::styled(step.label(), style),
-        ];
-        if *step == WizardStep::Name {
-            spans.push(Span::styled(
-                "*",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ));
-        }
-        spans.push(Span::styled(": ", style));
-        spans.push(Span::styled(value, style));
-        lines.push(Line::from(spans));
-    }
-
-    lines.push(Line::raw(""));
-    if let Some(error) = wizard.field_error() {
-        lines.push(Line::from(Span::styled(
-            format!("Error: {error}"),
-            Style::default().fg(Color::Red),
-        )));
-    }
-    if let Some(warning) = wizard.warning() {
-        lines.push(Line::from(Span::styled(
-            warning,
-            Style::default().fg(Color::Yellow),
-        )));
-    }
-
-    if wizard.step() == WizardStep::Agent {
-        lines.extend(agent_options(wizard.agent_index()));
-    }
-
-    if wizard.step() == WizardStep::Confirm {
-        lines.push(Line::raw(""));
-        lines.push(Line::from(Span::styled(
-            "Press y/Enter or click Create Sandbox.",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )));
-    }
-
-    lines
+fn paint_body(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme, area: Rect) {
+    let columns = Layout::horizontal([Constraint::Min(24), Constraint::Length(36)]).split(area);
+    paint_sandbox_list(ctx, app, theme, columns[0]);
+    paint_actions(ctx, app, theme, columns[1]);
 }
 
-/// Two-column list of selectable agents, with the current one marked.
-fn agent_options(selected: usize) -> Vec<Line<'static>> {
-    let column_width = AGENTS.iter().map(|agent| agent.len()).max().unwrap_or(0) + 4;
+fn paint_sandbox_list(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme, area: Rect) {
+    let theme = *theme;
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Sandboxes ")
+        .border_style(Style::default().fg(theme.border))
+        .style(Style::default().bg(theme.field));
+    let inner = block.inner(area);
 
-    let mut lines = vec![Line::from(Span::styled(
-        "Agents (↑/↓ or j/k to change):",
-        Style::default().fg(Color::DarkGray),
-    ))];
-
-    for row in 0..AGENTS.len().div_ceil(2) {
-        let mut spans = Vec::new();
-        for column in 0..2 {
-            let index = row * 2 + column;
-            let Some(agent) = AGENTS.get(index) else {
-                continue;
-            };
-            if column == 1 {
-                let first_width = 2 + AGENTS[index - 1].len();
-                spans.push(Span::raw(" ".repeat(column_width - first_width)));
-            }
-            let marker = if index == selected { ">" } else { " " };
-            let style = if index == selected {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-            spans.push(Span::styled(format!("{marker} {agent}"), style));
-        }
-        lines.push(Line::from(spans));
-    }
-
-    lines
-}
-
-fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
-    let hints = if app.is_creating() {
-        " creating sandbox   please wait - input is paused (Ctrl+C to quit) "
+    let items: Vec<ListItem<String>> = if app.sandboxes().is_empty() {
+        vec![
+            ListItem::new(
+                String::new(),
+                "No sandboxes yet — press N or choose New sandbox.",
+            )
+            .disabled(true),
+        ]
     } else {
-        match app.mode() {
-            Mode::Normal => {
-                " click: Stop/Start, Exec, Remove, Info   s toggles stop/start   x/d/i keys   wheel scroll   ←/→/↑/↓ move   r refresh   q quit "
-            }
-            Mode::Wizard => match app.wizard().step() {
-                WizardStep::Agent => " ↑/↓ choose agent   ↵ next   Esc back / click [X] close ",
-                WizardStep::Confirm => " ↵/y create   n/Esc back   click Create Sandbox ",
-                _ => " type value   Ctrl+U clear   ↵ next   Esc back / click [X] close ",
-            },
-            Mode::Info => " Esc/q/i/↵ or click [X] close ",
-        }
+        app.sandboxes()
+            .iter()
+            .map(|sandbox| ListItem::new(sandbox.name.clone(), sandbox.name.clone()))
+            .collect()
     };
 
-    let line = Line::from(vec![
-        Span::styled(hints, Style::default().fg(Color::Black).bg(Color::White)),
-        Span::raw(" "),
-        Span::styled(app.message(), Style::default().fg(Color::LightBlue)),
-    ]);
+    let list = List::new(items)
+        .item_focus(|state: &App| state.selected_name(), Msg::SandboxFocused)
+        .selection(|state: &App| state.selected_name(), Msg::SandboxSelected)
+        .scroll(|state: &App| state.list_offset(), Msg::SandboxScrolled)
+        .focus_symbol("▸ ")
+        .paint_item(move |state: &App, row: ListItemState<'_, String>| {
+            let sandbox = state
+                .sandboxes()
+                .iter()
+                .find(|candidate| candidate.name == *row.value);
+            let running = sandbox.is_some_and(Sandbox::is_running);
+            let name_style = if row.selected {
+                Style::default()
+                    .fg(theme.primary)
+                    .add_modifier(Modifier::BOLD)
+            } else if row.focused {
+                Style::default().fg(theme.foreground)
+            } else {
+                Style::default().fg(theme.muted_foreground)
+            };
+            let status_style = if running {
+                Style::default().fg(theme.accent)
+            } else {
+                Style::default().fg(theme.warning)
+            };
+            let status = sandbox
+                .map(|sandbox| sandbox.status.as_str())
+                .unwrap_or("empty");
+            Line::from(vec![
+                Span::styled(if running { "● " } else { "○ " }, status_style),
+                Span::styled(row.label.to_owned(), name_style),
+                Span::styled("  ", Style::default()),
+                Span::styled(status.to_owned(), status_style),
+            ])
+        });
 
-    frame.render_widget(Paragraph::new(line), area);
+    ctx.paint_widget(block, area);
+    ctx.component("sandbox-list", list, inner);
+}
+
+fn paint_actions(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Actions ")
+        .border_style(Style::default().fg(theme.border))
+        .style(Style::default().bg(theme.surface));
+    let inner = block.inner(area);
+
+    let rows = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .split(inner);
+
+    let selected = app.selected_sandbox();
+    let running = selected.is_some_and(Sandbox::is_running);
+    let has_selection = selected.is_some();
+    let locked = app.is_creating();
+
+    let summary = match selected {
+        Some(sandbox) => vec![
+            Line::from(Span::styled(
+                sandbox.name.clone(),
+                Style::default()
+                    .fg(theme.foreground)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                sandbox.status.clone(),
+                Style::default().fg(if running { theme.accent } else { theme.warning }),
+            )),
+        ],
+        None => vec![Line::from(Span::styled(
+            "Select a sandbox",
+            Style::default().fg(theme.muted_foreground),
+        ))],
+    };
+    ctx.paint_widget(Paragraph::new(summary), rows[0]);
+
+    let toggle = Button::new(if running { "Stop" } else { "Start" })
+        .on_press(|| Msg::ToggleSelected)
+        .disabled(!has_selection || locked);
+    let exec = Button::new("Exec shell")
+        .secondary()
+        .on_press(|| Msg::ExecSelected)
+        .disabled(!running || locked);
+    let info = Button::new("Info")
+        .secondary()
+        .on_press(|| Msg::InfoSelected)
+        .disabled(!running || locked);
+    let remove = Button::new("Remove")
+        .destructive()
+        .on_press(|| Msg::RemoveSelected)
+        .disabled(!has_selection || locked);
+
+    place_button(ctx, "action-toggle", toggle, rows[1]);
+    place_button(ctx, "action-exec", exec, rows[2]);
+    place_button(ctx, "action-info", info, rows[3]);
+    place_button(ctx, "action-remove", remove, rows[4]);
+
+    ctx.paint_widget(block, area);
+}
+
+fn place_button(
+    ctx: &mut DeclareCtx<'_, App, Msg>,
+    id: &'static str,
+    button: Button<Msg>,
+    row: Rect,
+) {
+    let width = button.width();
+    // All action buttons use ratcn's default Small size: a single row.
+    let area = row.centered(Constraint::Length(width), Constraint::Length(1));
+    ctx.component(id, button, area);
+}
+
+fn paint_footer(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme, area: Rect) {
+    let message = app.message();
+    let color = if message.contains("Could not") || message.contains("Invalid") {
+        theme.destructive
+    } else if message.contains("Warning") {
+        theme.warning
+    } else {
+        theme.muted_foreground
+    };
+    let message = if message.is_empty() {
+        "N new · R refresh · S start/stop · X exec · I info · D remove · Ctrl+C quit"
+    } else {
+        message
+    };
+    ctx.paint_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!(" {message}"),
+            Style::default().fg(color),
+        ))),
+        area,
+    );
+}
+
+// --- create dialog ----------------------------------------------------------
+
+fn create_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
+    let theme = *theme;
+    let form = app.form();
+    let creating = app.is_creating();
+    let name = text_input(
+        FormField::Name,
+        |state: &App| state.form().name(),
+        "demo-tui",
+        creating,
+        form.invalid(FormField::Name),
+    );
+    let root = text_input(
+        FormField::RootSize,
+        |state: &App| state.form().root_size(),
+        "40 (optional)",
+        creating,
+        form.invalid(FormField::RootSize),
+    );
+    let docker = text_input(
+        FormField::DockerSize,
+        |state: &App| state.form().docker_size(),
+        "20 (optional)",
+        creating,
+        form.invalid(FormField::DockerSize),
+    );
+    let cpus = text_input(
+        FormField::Cpus,
+        |state: &App| state.form().cpus(),
+        "2",
+        creating,
+        form.invalid(FormField::Cpus),
+    );
+    let memory = text_input(
+        FormField::Memory,
+        |state: &App| state.form().memory(),
+        "4g",
+        creating,
+        form.invalid(FormField::Memory),
+    );
+    let agent = Select::new(
+        AGENTS
+            .iter()
+            .enumerate()
+            .map(|(index, agent)| ListItem::new(index, (*agent).to_owned())),
+    )
+    .placeholder("Choose an agent")
+    .open(
+        |state: &App| state.form().agent_open(),
+        Msg::AgentOpenChanged,
+    )
+    .item_focus(
+        |state: &App| Some(state.form().agent_focus()),
+        Msg::AgentFocused,
+    )
+    .selection(
+        |state: &App| Some(state.form().agent_index()),
+        Msg::AgentSelected,
+    )
+    .max_visible_items(6)
+    .disabled(creating);
+
+    // The untouched empty name is not an error yet; the Create button still
+    // validates it when pressed.
+    let has_name = !form.name().value().is_empty();
+    let error = if has_name { form.first_error() } else { None };
+    let status = match error.as_ref() {
+        Some((field, message)) => format!("{}: {message}", field.label()),
+        None => form
+            .warning()
+            .unwrap_or_else(|| "Tab or click between fields · Esc cancels".to_owned()),
+    };
+    let status_color = if !has_name {
+        if form.warning().is_some() {
+            theme.warning
+        } else {
+            theme.muted_foreground
+        }
+    } else if error.is_some() {
+        theme.destructive
+    } else if form.warning().is_some() {
+        theme.warning
+    } else {
+        theme.muted_foreground
+    };
+    let progress = app.progress();
+    let spinner = if creating {
+        format!(
+            "{}  Creating sandbox '{}'…",
+            app.spinner(),
+            app.creating_name().unwrap_or("")
+        )
+    } else {
+        "Ready to create".to_owned()
+    };
+
+    Dialog::new()
+        .title("New sandbox")
+        .description("Create a Docker Sandbox with sbx")
+        .outer_width(70)
+        .on_dismiss(|| Msg::CancelWizard)
+        .content(9, move |ctx| {
+            let rows = Layout::vertical(vec![Constraint::Length(1); 9]).split(ctx.area());
+            field_row(ctx, rows[0], "Name", name, theme);
+            field_row(ctx, rows[1], "Agent", agent, theme);
+            field_row(ctx, rows[2], "Root size (GB)", root, theme);
+            field_row(ctx, rows[3], "Docker data (GB)", docker, theme);
+            field_row(ctx, rows[4], "CPUs", cpus, theme);
+            field_row(ctx, rows[5], "Memory", memory, theme);
+
+            ctx.paint_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!(" {status}"),
+                    Style::default().fg(status_color),
+                ))),
+                rows[6],
+            );
+            ctx.paint_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!(" {spinner}"),
+                    Style::default().fg(theme.primary),
+                ))),
+                rows[7],
+            );
+            // One bare bar: the row above carries the spinner text.
+            ctx.paint_widget(ProgressWidget::new(progress).themed(&theme), rows[8]);
+        })
+        .action(
+            "cancel",
+            Button::new("Cancel")
+                .ghost()
+                .on_press(|| Msg::CancelWizard)
+                .disabled(creating),
+        )
+        .action(
+            "create",
+            Button::new("Create sandbox")
+                .on_press(|| Msg::CreateSandbox)
+                .disabled(creating),
+        )
+}
+
+fn text_input(
+    field: FormField,
+    read: impl Fn(&App) -> &InputState + 'static,
+    placeholder: &'static str,
+    disabled: bool,
+    invalid: bool,
+) -> Input<App, Msg> {
+    Input::new()
+        .value(
+            move |state| read(state),
+            move |state| Msg::FormChanged(field, state),
+        )
+        .placeholder(placeholder)
+        .disabled(disabled)
+        .invalid(invalid)
+}
+
+fn field_row<C>(
+    ctx: &mut DeclareCtx<'_, App, Msg>,
+    row: Rect,
+    label: &'static str,
+    component: C,
+    theme: Theme,
+) where
+    C: Component<App, Msg> + 'static,
+{
+    let columns = Layout::horizontal([Constraint::Length(20), Constraint::Min(10)]).split(row);
+    ctx.paint_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!(" {label}"),
+            Style::default().fg(theme.muted_foreground),
+        ))),
+        columns[0],
+    );
+    ctx.component(format!("field-{label}"), component, columns[1]);
+}
+
+// --- info dialog ------------------------------------------------------------
+
+fn info_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
+    let Some(details) = app.info() else {
+        return Dialog::new()
+            .title("Sandbox details")
+            .description("Details are no longer available.")
+            .on_dismiss(|| Msg::CloseInfo)
+            .action("close", Button::new("Close").on_press(|| Msg::CloseInfo));
+    };
+    let text = details_text(details);
+    let title = format!("Sandbox · {}", details.name);
+    let _ = theme;
+
+    Dialog::new()
+        .title(title)
+        .description(text)
+        .outer_width(66)
+        .on_dismiss(|| Msg::CloseInfo)
+        .action("close", Button::new("Close").on_press(|| Msg::CloseInfo))
+}
+
+fn details_text(details: &SandboxDetails) -> String {
+    let mut lines = vec![
+        detail_line("Status", Some(details.status.as_str())),
+        detail_line("CPUs", details.cpus.as_deref()),
+        detail_line(
+            "Memory",
+            join_usage(details.mem_used.as_deref(), details.mem_total.as_deref()).as_deref(),
+        ),
+        detail_line(
+            "Root fs",
+            join_usage(details.root_used.as_deref(), details.root_total.as_deref()).as_deref(),
+        ),
+        detail_line(
+            "Docker data",
+            join_usage(
+                details.docker_used.as_deref(),
+                details.docker_total.as_deref(),
+            )
+            .as_deref(),
+        ),
+    ];
+    if let Some(error) = &details.error {
+        lines.push(String::new());
+        lines.push(format!("Note: {error}"));
+    }
+    lines.join("\n")
+}
+
+fn detail_line(label: &str, value: Option<&str>) -> String {
+    let value = value.unwrap_or("—");
+    format!("{label:<12} {value}")
+}
+
+fn join_usage(used: Option<&str>, total: Option<&str>) -> Option<String> {
+    match (used, total) {
+        (Some(used), Some(total)) => Some(format!("{used} / {total}")),
+        (Some(used), None) => Some(used.to_owned()),
+        (None, Some(total)) => Some(total.to_owned()),
+        (None, None) => None,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{
-        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-    };
+    use crate::app::{INFO_DIALOG, SandboxDetails};
     use ratatui::{Terminal, backend::TestBackend};
+    use ratcn::runtime::Ratcn;
 
-    fn click(app: &mut App, action: ClickAction) {
-        let target = app
-            .click_targets()
-            .iter()
-            .find(|target| target.action == action)
-            .copied()
-            .unwrap_or_else(|| panic!("no click target for {action:?}"));
-        // Select/OpenWizard cover the whole block; click the title row so a
-        // button in the lower row doesn't take the event.
-        let row = if matches!(action, ClickAction::Select(_) | ClickAction::OpenWizard) {
-            target.area.y + 1
-        } else {
-            target.area.y + target.area.height / 2
-        };
-        app.handle_mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: target.area.x + target.area.width / 2,
-            row,
-            modifiers: KeyModifiers::NONE,
-        });
-    }
-
-    fn snapshot(width: u16, height: u16, app: &mut App) -> Vec<String> {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|frame| render(frame, app)).unwrap();
-        let buffer = terminal.backend().buffer();
-        (0..height)
-            .map(|y| {
-                (0..width)
-                    .map(|x| buffer[(x, y)].symbol().to_owned())
-                    .collect::<String>()
+    fn render(app: &App) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        let theme = Theme::tokyo_night();
+        let mut ratcn = Ratcn::new()
+            .focus(|state: &App| state.focus_ref(), Msg::FocusChanged)
+            .modals(|state: &App| state.modals_ref());
+        terminal
+            .draw(|frame| {
+                ratcn.render(frame, frame.area(), app, &theme, |ctx| {
+                    declare(ctx, app, &theme)
+                });
             })
-            .collect()
-    }
-
-    #[test]
-    fn dashboard_shows_title_grid_and_button() {
-        let mut app = App::with_sandbox_statuses(&[
-            ("alpha", "running"),
-            ("beta", "stopped"),
-            ("gamma", "running"),
-            ("delta", "stopped"),
-        ]);
-        let screen = snapshot(90, 24, &mut app).join("\n");
-
-        assert!(screen.contains("Docker Sandbox Builder"));
-        assert!(screen.contains("alpha"));
-        assert!(screen.contains("gamma"));
-        assert!(screen.contains("+ New Sandbox"));
-    }
-
-    #[test]
-    fn running_blocks_have_four_button_targets() {
-        let mut app = App::with_sandboxes(&["alpha", "beta"]);
-        let rows = snapshot(90, 24, &mut app);
-        // The first grid row starts at y = 3; its button row is y = 5.
-        let buttons = rows[5].as_str();
-
-        for action in [
-            ClickAction::Stop(0),
-            ClickAction::Exec(0),
-            ClickAction::Remove(0),
-            ClickAction::Info(0),
-        ] {
-            assert!(
-                app.click_targets().iter().any(|target| target.action == action),
-                "missing click target for {action:?}"
-            );
-        }
-        assert!(buttons.contains("Stop"));
-        assert!(buttons.contains("Exec"));
-        assert!(buttons.contains("Info"));
-        assert!(!buttons.contains("Start"));
-    }
-
-    #[test]
-    fn stopped_blocks_only_show_start_and_remove() {
-        let mut app = App::with_sandbox_statuses(&[("alpha", "stopped")]);
-        let rows = snapshot(90, 24, &mut app);
-        let buttons = rows[5].as_str();
-
-        for action in [ClickAction::Start(0), ClickAction::Remove(0)] {
-            assert!(
-                app.click_targets().iter().any(|target| target.action == action),
-                "missing click target for {action:?}"
-            );
-        }
-        for action in [
-            ClickAction::Stop(0),
-            ClickAction::Exec(0),
-            ClickAction::Info(0),
-        ] {
-            assert!(
-                !app.click_targets().iter().any(|target| target.action == action),
-                "unexpected click target for {action:?}"
-            );
-        }
-        assert!(buttons.contains("Start"));
-        assert!(buttons.contains("Remove"));
-        assert!(!buttons.contains("Exec"));
-        assert!(!buttons.contains("Info"));
-        assert!(!buttons.contains("Stop"));
-    }
-
-    #[test]
-    fn status_dot_is_green_only_for_running_sandboxes() {
-        let mut app = App::with_sandbox_statuses(&[("alpha", "running"), ("beta", "stopped")]);
-        let mut terminal = Terminal::new(TestBackend::new(90, 24)).unwrap();
-        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+            .unwrap();
         let buffer = terminal.backend().buffer();
-
-        // Blocks are 30 columns wide; the dot is the first inner cell of the
-        // title row (y = 3 title rows + 1 border).
-        assert_eq!(buffer[(1, 4)].fg, Color::Green);
-        assert_eq!(buffer[(31, 4)].fg, Color::Red);
+        let width = buffer.area.width as usize;
+        buffer
+            .content()
+            .chunks(width)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]
-    fn exec_button_prepares_external_terminal_command() {
-        let mut app = App::with_sandboxes(&["alpha"]);
-        snapshot(90, 24, &mut app);
-
-        click(&mut app, ClickAction::Exec(0));
-        let pending = app.take_external_command().expect("exec should be pending");
-        assert_eq!(pending.preview(), "sbx exec -it alpha bash");
-    }
-
-    #[test]
-    fn info_button_opens_modal_with_resources() {
-        let mut app = App::with_sandboxes(&["alpha"]);
-        snapshot(90, 24, &mut app);
-
-        click(&mut app, ClickAction::Info(0));
-        assert!(matches!(app.mode(), Mode::Info));
-
-        let screen = snapshot(90, 24, &mut app).join("\n");
-        assert!(screen.contains("Sandbox Info"));
-        assert!(screen.contains("Name:"));
+    fn renders_dashboard_with_themated_controls() {
+        let app = App::with_sandbox_statuses(&[("alpha", "running"), ("beta", "stopped")]);
+        let screen = render(&app);
+        assert!(screen.contains("DOCKER SANDBOXES"));
         assert!(screen.contains("alpha"));
-        assert!(screen.contains("Status:"));
-        assert!(screen.contains("Resources"));
-        assert!(screen.contains("CPU:"));
-        assert!(screen.contains("Memory:"));
-        assert!(screen.contains("Root size:"));
-        assert!(screen.contains("Docker size:"));
-
-        click(&mut app, ClickAction::CloseInfo);
-        assert!(matches!(app.mode(), Mode::Normal));
+        assert!(screen.contains("beta"));
+        assert!(screen.contains("Exec shell"));
+        assert!(screen.contains("Remove"));
     }
 
     #[test]
-    fn usage_line_formats_used_and_total() {
-        let line = usage_line("Memory", Some("1.0 GiB"), Some("2.0 GiB"));
-        let text: String = line
-            .spans
-            .iter()
-            .map(|span| span.content.to_string())
-            .collect();
-        assert!(text.contains("Memory:"));
-        assert!(text.contains("1.0 GiB used / 2.0 GiB total"));
-
-        let partial = usage_line("Root size", None, Some("40g"));
-        let text: String = partial
-            .spans
-            .iter()
-            .map(|span| span.content.to_string())
-            .collect();
-        assert!(text.contains("n/a used / 40g total"));
-    }
-
-    #[test]
-    fn wizard_renders_as_modal() {
-        let mut app = App::with_sandboxes(&["alpha"]);
-        app.handle_key(crossterm::event::KeyEvent::new(
-            KeyCode::End,
-            KeyModifiers::NONE,
-        ));
-        app.handle_key(crossterm::event::KeyEvent::new(
-            KeyCode::Enter,
-            KeyModifiers::NONE,
-        ));
-        assert!(matches!(app.mode(), Mode::Wizard));
-
-        let screen = snapshot(90, 24, &mut app).join("\n");
-        assert!(screen.contains("New Sandbox"));
-        assert!(screen.contains("Name*"));
-        assert!(screen.contains("<required>"));
-    }
-
-    #[test]
-    fn mouse_clicks_select_blocks_and_open_wizard() {
-        let mut app = App::with_sandboxes(&["alpha", "beta"]);
-        snapshot(90, 24, &mut app);
-
-        click(&mut app, ClickAction::Select(1));
-        assert_eq!(app.selected_index(), 1);
-
-        snapshot(90, 24, &mut app);
-        click(&mut app, ClickAction::OpenWizard);
-        assert!(matches!(app.mode(), Mode::Wizard));
-    }
-
-    #[test]
-    fn modal_has_close_and_create_buttons() {
-        let mut app = App::with_sandboxes(&["alpha"]);
-        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-
-        let screen = snapshot(90, 24, &mut app).join("\n");
-        assert!(screen.contains("[X]"));
-        assert!(screen.contains("[ Create Sandbox ]"));
-
-        click(&mut app, ClickAction::CloseWizard);
-        assert!(matches!(app.mode(), Mode::Normal));
-    }
-
-    #[test]
-    fn create_button_is_disabled_until_review() {
-        let mut app = App::with_sandboxes(&["alpha"]);
-        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        snapshot(90, 24, &mut app);
-
-        assert!(
-            app.click_targets()
-                .iter()
-                .all(|target| target.action != ClickAction::CreateSandbox)
-        );
-
-        for character in "demo-tui".chars() {
-            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
-        }
-        for _ in 0..6 {
-            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        }
-        assert!(app.wizard().is_ready());
-
-        let screen = snapshot(90, 24, &mut app).join("\n");
-        assert!(
-            app.click_targets()
-                .iter()
-                .any(|target| target.action == ClickAction::CreateSandbox)
-        );
-        assert!(!screen.contains("sbx create"));
-    }
-
-    #[test]
-    fn creation_shows_spinner_and_disables_modal_actions() {
+    fn renders_create_dialog() {
         let mut app = App::with_sandboxes(&[]);
-        app.begin_creation_for_test("demo");
+        app.open_wizard();
+        assert!(app.modals_ref().is_open(CREATE_DIALOG));
+        let screen = render(&app);
+        assert!(screen.contains("New sandbox"));
+        assert!(screen.contains("Create sandbox"));
+        assert!(screen.contains("demo-tui"));
+        assert!(screen.contains("opencode"));
 
-        let first = snapshot(90, 24, &mut app).join("\n");
-        assert!(first.contains("Creating sandbox 'demo'"));
-        assert!(first.contains(app.spinner()));
-        assert!(first.contains("Input is paused"));
-        assert!(first.contains("please wait"));
-        assert!(
-            app.click_targets().iter().all(|target| !matches!(
-                target.action,
-                ClickAction::CloseWizard | ClickAction::CreateSandbox
-            ))
-        );
-
-        app.tick();
-        let second = snapshot(90, 24, &mut app).join("\n");
-        assert_ne!(first, second, "spinner frame should change on tick");
+        // The agent dropdown is a popup layer inside the modal; it must be
+        // declarable without colliding with the dialog's own ids.
+        app.set_agent_open(true);
+        let screen = render(&app);
+        // The panel keeps the current agent in view, so the first visible row
+        // is near the default selection rather than the top of the list.
+        assert!(screen.contains("cursor"));
+        assert!(screen.contains("opencode"));
     }
 
     #[test]
-    fn agent_step_lists_all_agents() {
-        let mut app = App::with_sandboxes(&["alpha"]);
-        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        for character in "demo-tui".chars() {
-            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
-        }
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.wizard().step(), WizardStep::Agent);
-
-        let screen = snapshot(90, 24, &mut app).join("\n");
-        assert!(screen.contains("Agents (↑/↓ or j/k to change):"));
-        for agent in AGENTS {
-            assert!(screen.contains(agent), "missing agent {agent}");
-        }
-        assert!(screen.contains("> opencode"));
-    }
-
-    #[test]
-    fn mouse_wheel_moves_selection() {
-        let mut app = App::with_sandboxes(&["alpha", "beta", "gamma", "delta"]);
-        snapshot(90, 24, &mut app);
-
-        app.handle_mouse(MouseEvent {
-            kind: MouseEventKind::ScrollDown,
-            column: 5,
-            row: 5,
-            modifiers: KeyModifiers::NONE,
+    fn renders_info_dialog() {
+        let mut app = App::with_sandbox_statuses(&[("alpha", "running")]);
+        app.show_info_for_test(SandboxDetails {
+            name: "alpha".to_owned(),
+            status: "running".to_owned(),
+            cpus: Some("4".to_owned()),
+            mem_used: Some("1.0 GiB".to_owned()),
+            mem_total: Some("2.0 GiB".to_owned()),
+            ..SandboxDetails::default()
         });
-        assert_eq!(app.selected_index(), 3);
+        assert!(app.modals_ref().is_open(INFO_DIALOG));
+        let screen = render(&app);
+        assert!(screen.contains("Sandbox"));
+        assert!(screen.contains("1.0 GiB / 2.0 GiB"));
+    }
+}
+
+#[cfg(test)]
+mod interaction_tests {
+    use super::*;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::{Terminal, backend::TestBackend};
+    use ratcn::runtime::{EventResult, Ratcn};
+
+    fn new_runtime() -> Ratcn<App, Msg> {
+        Ratcn::new()
+            .focus(|state: &App| state.focus_ref(), Msg::FocusChanged)
+            .modals(|state: &App| state.modals_ref())
+    }
+
+    fn draw(terminal: &mut Terminal<TestBackend>, app: &App, ratcn: &mut Ratcn<App, Msg>) {
+        let theme = Theme::tokyo_night();
+        terminal
+            .draw(|frame| {
+                ratcn.render(frame, frame.area(), app, &theme, |ctx| {
+                    declare(ctx, app, &theme)
+                });
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn enter_opens_dialog_and_escape_dismisses_it() {
+        let mut app = App::with_sandboxes(&[]);
+        let mut ratcn = new_runtime();
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        draw(&mut terminal, &app, &mut ratcn);
+
+        let enter = Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        match ratcn.handle_event(enter, &app) {
+            EventResult::Emit(message) => apply(&mut app, message),
+            other => panic!("Enter should activate the focused button, got {other:?}"),
+        }
+        assert!(app.modals_ref().is_open(CREATE_DIALOG));
+
+        // The modal binding swallows events until the layer is redrawn.
+        draw(&mut terminal, &app, &mut ratcn);
+        let escape = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        match ratcn.handle_event(escape, &app) {
+            EventResult::Emit(message) => apply(&mut app, message),
+            other => panic!("Esc should dismiss the dialog, got {other:?}"),
+        }
+        assert!(!app.modals_ref().is_open(CREATE_DIALOG));
     }
 }

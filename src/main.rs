@@ -7,11 +7,18 @@ use std::time::{Duration, Instant};
 use app::{App, STATUS_REFRESH_INTERVAL};
 use crossterm::{
     cursor,
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
+use ratcn::crossterm::InputModes;
+use ratcn::runtime::{EventResult, Ratcn, TabWrap};
+use ratcn::{Theme, ToasterWidget};
+
+use ui::Msg;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -67,32 +74,45 @@ fn install_panic_hook() {
 }
 
 fn run(terminal: &mut Tui, app: &mut App) -> Result<()> {
+    let theme = Theme::tokyo_night();
+    let mut ratcn = Ratcn::new()
+        .focus(|state: &App| state.focus_ref(), Msg::FocusChanged)
+        .modals(|state: &App| state.modals_ref())
+        .tab_wrap(TabWrap::Wrap)
+        .hover_focus();
+    // Keep the guard alive for the event loop: ratcn needs mouse input for its
+    // components, and Input for pasted values. It is dropped around Exec so the
+    // external terminal gets a clean input mode, then re-enabled on resume.
+    let mut input_modes = Some(InputModes::new().mouse().paste().enable()?);
+
     let mut next_status_check = Instant::now() + STATUS_REFRESH_INTERVAL;
 
     while !app.should_quit() {
         // Collect a finished create (if any) before drawing, then advance the
-        // spinner so the modal shows a new frame each iteration.
+        // spinner so the themed progress bar shows a new frame each iteration.
         app.poll_creation();
         app.tick();
-        terminal.draw(|frame| ui::render(frame, app))?;
+        draw(terminal, app, &mut ratcn, &theme)?;
 
         // Exec opens a real terminal, so leave the alternate screen and raw
         // mode first, then rebuild the TUI once the child is done.
         if let Some(pending) = app.take_external_command() {
+            // Dropping the guard turns bracketed paste and mouse capture back
+            // off; the external shell may change terminal modes itself.
+            input_modes.take();
             restore_terminal(terminal)?;
             let result = pending.run_in_external_terminal();
             *terminal = init_terminal()?;
+            input_modes = Some(InputModes::new().mouse().paste().enable()?);
             match result {
-                Ok(()) => app.set_message("External terminal closed."),
-                Err(error) => app.set_message(format!("Could not open terminal: {error}")),
+                Ok(()) => app.notify_info("External terminal closed.", None),
+                Err(error) => app.notify_error("Could not open terminal", error),
             }
         }
 
-        // Refresh the running-state dots periodically. Input polling is only
-        // 100 ms, so this fires close to the five-second mark.
         let now = Instant::now();
         if now >= next_status_check {
-            // Skip the synchronous `sbx ls` while creating so the spinner
+            // Skip the synchronous `sbx ls` while creating so the progress bar
             // keeps animating; the next tick after completion refreshes.
             if !app.is_creating() {
                 app.refresh_statuses();
@@ -101,13 +121,44 @@ fn run(terminal: &mut Tui, app: &mut App) -> Result<()> {
         }
 
         if event::poll(Duration::from_millis(100))? {
-            match event::read()? {
-                // Ignore key-release and repeat events; handle each press once.
-                Event::Key(key) if key.kind == KeyEventKind::Press => app.handle_key(key),
-                Event::Mouse(mouse) => app.handle_mouse(mouse),
-                _ => {}
+            let event = event::read()?;
+            if let Event::Key(key) = event {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+                // Global escape hatch, available even while creation locks the UI.
+                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    app.quit();
+                    continue;
+                }
+                match ratcn.handle_event(event, app) {
+                    EventResult::Emit(message) => ui::apply(app, message),
+                    EventResult::Consumed => {}
+                    // Unclaimed keys become app shortcuts (N, R, S, X, I, D, q).
+                    EventResult::Ignored => app.handle_global_key(key),
+                }
+            } else if let EventResult::Emit(message) = ratcn.handle_event(event, app) {
+                ui::apply(app, message);
             }
         }
     }
+    Ok(())
+}
+
+fn draw(
+    terminal: &mut Tui,
+    app: &mut App,
+    ratcn: &mut Ratcn<App, Msg>,
+    theme: &Theme,
+) -> Result<()> {
+    terminal.draw(|frame| {
+        let now = app.now();
+        app.prune_toasts(now);
+        let area = frame.area();
+        ratcn.render(frame, area, app, theme, |ctx| ui::declare(ctx, app, theme));
+        // Toasts are themed ratcn widgets but take no input, so they are drawn
+        // as the final layer by the host, as in ratcn's own examples.
+        frame.render_widget(ToasterWidget::new(app.toasts(), now).themed(theme), area);
+    })?;
     Ok(())
 }
