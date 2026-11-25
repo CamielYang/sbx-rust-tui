@@ -1,0 +1,187 @@
+use super::*;
+use crate::app::{INFO_DIALOG, PORTS_DIALOG, PortMapping, SandboxDetails};
+use ratatui::{Terminal, backend::TestBackend};
+use ratcn::runtime::Ratcn;
+
+fn render(app: &App) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    let theme = Theme::tokyo_night();
+    let mut ratcn = Ratcn::new()
+        .focus(|state: &App| state.focus_ref(), Msg::FocusChanged)
+        .modals(|state: &App| state.modals_ref());
+    terminal
+        .draw(|frame| {
+            ratcn.render(frame, frame.area(), app, &theme, |ctx| {
+                declare(ctx, app, &theme)
+            });
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let width = buffer.area.width as usize;
+    buffer
+        .content()
+        .chunks(width)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn renders_dashboard_with_themated_controls() {
+    let app = App::with_sandbox_statuses(&[("alpha", "running"), ("beta", "stopped")]);
+    let screen = render(&app);
+    assert!(screen.contains("DOCKER SANDBOXES"));
+    assert!(screen.contains("alpha"));
+    assert!(screen.contains("beta"));
+    assert!(screen.contains("Exec shell"));
+    assert!(screen.contains("Remove"));
+}
+
+fn column_of(rows: &str, needle: &str) -> Option<usize> {
+    rows.lines()
+        .find_map(|line| line.find(needle).map(|byte| line[..byte].chars().count()))
+}
+
+#[test]
+fn sandbox_rows_do_not_shift_when_focus_moves() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    *app.focus_mut() = FocusState::intent(["sandbox-list"]);
+    let focused = render(&app);
+    *app.focus_mut() = FocusState::intent([ACTION_STOP]);
+    let unfocused = render(&app);
+
+    assert_eq!(column_of(&focused, "alpha"), column_of(&unfocused, "alpha"));
+    assert!(focused.contains("▸"), "the cursor glyph should still show");
+    assert!(!unfocused.contains("▸"));
+}
+
+#[test]
+fn running_actions_show_only_running_commands() {
+    let app = App::with_sandboxes(&["alpha"]);
+    let screen = render(&app);
+    for label in ["Stop", "Exec shell", "Remove", "Info"] {
+        assert!(screen.contains(label), "missing running action: {label}");
+    }
+    assert!(
+        !screen.contains("Start"),
+        "Start must be hidden while running"
+    );
+}
+
+#[test]
+fn stopped_actions_show_only_stopped_commands() {
+    let app = App::with_sandbox_statuses(&[("alpha", "stopped")]);
+    let screen = render(&app);
+    assert!(screen.contains("Start"));
+    assert!(screen.contains("Remove"));
+    for label in ["Stop", "Exec shell", "Info"] {
+        assert!(
+            !screen.contains(label),
+            "unexpected running action: {label}"
+        );
+    }
+}
+
+#[test]
+fn action_styles_keep_their_hue_and_change_on_focus_and_hover() {
+    let theme = Theme::tokyo_night();
+    for fill in [START_GREEN, STOP_ORANGE, EXEC_GRAY, REMOVE_RED, INFO_BLUE] {
+        let style = action_style(fill)(&theme);
+        assert_eq!(style.background, fill);
+        assert_eq!(style.focused_foreground, theme.background);
+        assert_ne!(style.focused_background, fill, "focus must change the fill");
+        assert_ne!(style.hovered_background, fill, "hover must change the fill");
+    }
+}
+
+#[test]
+fn renders_create_dialog() {
+    let mut app = App::with_sandboxes(&[]);
+    app.open_wizard();
+    assert!(app.modals_ref().is_open(CREATE_DIALOG));
+    let screen = render(&app);
+    assert!(screen.contains("New sandbox"));
+    assert!(screen.contains("Create sandbox"));
+    assert!(screen.contains("demo-tui"));
+    assert!(screen.contains("opencode"));
+    assert!(!screen.contains("Ready to create"));
+
+    // The agent dropdown is a popup layer inside the modal; it must be
+    // declarable without colliding with the dialog's own ids.
+    app.set_agent_open(true);
+    let screen = render(&app);
+    // The panel keeps the current agent in view, so the first visible row
+    // is near the default selection rather than the top of the list.
+    assert!(screen.contains("cursor"));
+    assert!(screen.contains("opencode"));
+}
+
+#[test]
+fn renders_info_dialog() {
+    let mut app = App::with_sandbox_statuses(&[("alpha", "running")]);
+    app.show_info_for_test(SandboxDetails {
+        name: "alpha".to_owned(),
+        status: "running".to_owned(),
+        cpus: Some("4".to_owned()),
+        cpu_usage: Some(37),
+        mem_used: Some("1.0 GiB".to_owned()),
+        mem_total: Some("2.0 GiB".to_owned()),
+        ..SandboxDetails::default()
+    });
+    assert!(app.modals_ref().is_open(INFO_DIALOG));
+    let screen = render(&app);
+    assert!(screen.contains("Sandbox"));
+    assert!(screen.contains("4 (37%)"));
+    assert!(screen.contains("1.0 GiB / 2.0 GiB"));
+}
+
+#[test]
+fn renders_ports_dialog_with_table_and_add_button() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.show_ports_for_test(
+        "alpha",
+        vec![
+            PortMapping {
+                host_port: 60002,
+                sandbox_port: 3000,
+                protocol: "tcp4".to_owned(),
+                host_ip: Some("127.0.0.1".to_owned()),
+            },
+            PortMapping {
+                host_port: 60003,
+                sandbox_port: 3001,
+                protocol: "tcp4".to_owned(),
+                host_ip: None,
+            },
+        ],
+    );
+    assert!(app.modals_ref().is_open(PORTS_DIALOG));
+    let screen = render(&app);
+    assert!(screen.contains("Published ports"));
+    assert!(screen.contains("+ Add port"));
+    assert!(screen.contains(" host "));
+    assert!(screen.contains(" sandbox "));
+    assert!(screen.contains("HOST PORT"));
+    assert!(screen.contains("SANDBOX PORT"));
+    assert!(!screen.contains("PROTOCOL"));
+    assert!(screen.contains("60002"));
+    assert!(screen.contains("60003"));
+    assert!(screen.contains("Unpublish"));
+    assert!(!screen.contains("sbx port publish"));
+}
+
+#[test]
+fn cpu_text_adds_usage_only_when_sampled() {
+    let details = SandboxDetails {
+        cpus: Some("8".to_owned()),
+        cpu_usage: Some(12),
+        ..SandboxDetails::default()
+    };
+    assert_eq!(cpu_text(&details).as_deref(), Some("8 (12%)"));
+
+    let details = SandboxDetails {
+        cpu_usage: None,
+        ..details
+    };
+    assert_eq!(cpu_text(&details).as_deref(), Some("8"));
+}
