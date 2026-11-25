@@ -29,7 +29,7 @@ use self::dashboard::{
     action_style,
 };
 #[cfg(test)]
-use self::dialogs::cpu_text;
+use self::dialogs::{cancel_style, cpu_text};
 #[cfg(test)]
 use crate::app::{PendingAction, PortMapping};
 #[cfg(test)]

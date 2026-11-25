@@ -85,6 +85,70 @@ fn running_status_is_green_in_list_and_actions() {
     );
 }
 
+/// Style of the first cell of a rendered button label.
+fn label_style(buffer: &Buffer, label: &str) -> ratatui::style::Style {
+    let width = buffer.area.width as usize;
+    let (row, column) = buffer
+        .content()
+        .chunks(width)
+        .enumerate()
+        .find_map(|(row, cells)| {
+            let text: String = cells.iter().map(|cell| cell.symbol()).collect();
+            text.find(label).map(|column| (row, column))
+        })
+        .unwrap_or_else(|| panic!("rendered button {label:?} was not found"));
+    buffer.content()[row * width + column].style()
+}
+
+#[test]
+fn dialog_cancel_buttons_share_one_visible_fill() {
+    let theme = Theme::tokyo_night();
+    let style = cancel_style(&theme);
+    let fills = [
+        style.background,
+        style.focused_background,
+        style.hovered_background,
+    ];
+    let assert_cancel_style = |buffer: &Buffer, label: &str| {
+        let cell = label_style(buffer, label);
+        assert!(
+            fills.iter().any(|fill| cell.bg == Some(*fill)),
+            "{label} should use the shared cancel fill, got {:?}",
+            cell.bg
+        );
+        assert_eq!(cell.fg, Some(style.foreground), "{label} foreground");
+    };
+
+    // The confirmation Cancel and info Close start focused; the wizard Cancel
+    // and ports Close start unfocused because their dialogs have content above
+    // the action row. All four still carry the same visible fill.
+    let mut app = App::with_sandbox_statuses(&[("alpha", "stopped")]);
+    app.start_selected();
+    assert_eq!(
+        label_style(&draw(&app), "Cancel").bg,
+        Some(style.focused_background)
+    );
+    assert_cancel_style(&draw(&app), "Cancel");
+
+    let mut app = App::with_sandboxes(&[]);
+    app.open_wizard();
+    assert_eq!(
+        label_style(&draw(&app), "Cancel").bg,
+        Some(style.background)
+    );
+
+    let mut app = App::with_sandbox_statuses(&[("alpha", "running")]);
+    app.show_info_for_test(SandboxDetails {
+        name: "alpha".to_owned(),
+        ..SandboxDetails::default()
+    });
+    assert_cancel_style(&draw(&app), "Close");
+
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.show_ports_for_test("alpha", vec![]);
+    assert_eq!(label_style(&draw(&app), "Close").bg, Some(style.background));
+}
+
 fn column_of(rows: &str, needle: &str) -> Option<usize> {
     rows.lines()
         .find_map(|line| line.find(needle).map(|byte| line[..byte].chars().count()))

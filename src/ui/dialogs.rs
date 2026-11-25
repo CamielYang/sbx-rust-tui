@@ -4,12 +4,33 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
-use ratcn::{Button, Dialog, InputState, ListItem, Select, Theme};
+use ratcn::color::{away_from, dim};
+use ratcn::{Button, ButtonStyle, ButtonVariant, Dialog, InputState, ListItem, Select, Theme};
 
 use super::dashboard::{REMOVE_RED, START_GREEN, STOP_ORANGE, action_style};
 use super::widgets::{detail_line, field_row, input, join_usage};
 use super::*;
 use crate::app::{AGENTS, FormField, PendingAction, PortField, PortMapping, SandboxDetails};
+
+/// The confirmation dialog's focused Cancel sets the look for every dismiss
+/// action: a quiet raised fill that stays visible even while another control
+/// holds focus. Focus and hover lift that fill one step further, so all Cancel
+/// and Close buttons read the same in every dialog.
+pub(super) fn cancel_style(theme: &Theme) -> ButtonStyle {
+    let ghost = ButtonStyle::from_theme(theme, ButtonVariant::Ghost);
+    ButtonStyle {
+        background: ghost.focused_background,
+        focused_background: dim(theme.secondary, away_from(theme.background), 9),
+        hovered_background: ghost.hovered_background,
+        ..ghost
+    }
+}
+
+/// Build every Cancel/Close button from the same style so their appearance
+/// cannot drift between dialogs.
+fn cancel_button<M>(label: impl Into<String>, on_press: impl Fn() -> M + 'static) -> Button<M> {
+    Button::new(label).style(cancel_style).on_press(on_press)
+}
 
 // --- create dialog ----------------------------------------------------------
 
@@ -144,10 +165,7 @@ pub(super) fn create_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
         })
         .action(
             "cancel",
-            Button::new("Cancel")
-                .ghost()
-                .on_press(|| Msg::CancelWizard)
-                .disabled(creating),
+            cancel_button("Cancel", || Msg::CancelWizard).disabled(creating),
         )
         .action(
             "create",
@@ -183,7 +201,7 @@ pub(super) fn confirm_dialog(app: &App) -> Dialog<App, Msg> {
             .title("Confirm action")
             .description("No action is pending.")
             .on_dismiss(|| Msg::CancelAction)
-            .action("close", Button::new("Close").on_press(|| Msg::CancelAction));
+            .action("close", cancel_button("Close", || Msg::CancelAction));
     };
 
     let (title, description, label, fill) = match action {
@@ -212,10 +230,7 @@ pub(super) fn confirm_dialog(app: &App) -> Dialog<App, Msg> {
         .description(description)
         .outer_width(62)
         .on_dismiss(|| Msg::CancelAction)
-        .action(
-            "cancel",
-            Button::new("Cancel").ghost().on_press(|| Msg::CancelAction),
-        )
+        .action("cancel", cancel_button("Cancel", || Msg::CancelAction))
         .action(
             "confirm",
             Button::new(label)
@@ -232,7 +247,7 @@ pub(super) fn info_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
             .title("Sandbox details")
             .description("Details are no longer available.")
             .on_dismiss(|| Msg::CloseInfo)
-            .action("close", Button::new("Close").on_press(|| Msg::CloseInfo));
+            .action("close", cancel_button("Close", || Msg::CloseInfo));
     };
     let text = details_text(details);
     let title = format!("Sandbox · {}", details.name);
@@ -243,7 +258,7 @@ pub(super) fn info_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
         .description(text)
         .outer_width(66)
         .on_dismiss(|| Msg::CloseInfo)
-        .action("close", Button::new("Close").on_press(|| Msg::CloseInfo))
+        .action("close", cancel_button("Close", || Msg::CloseInfo))
 }
 
 fn details_text(details: &SandboxDetails) -> String {
@@ -295,7 +310,7 @@ pub(super) fn ports_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
             .title("Published ports")
             .description("Ports are no longer available.")
             .on_dismiss(|| Msg::ClosePorts)
-            .action("close", Button::new("Close").on_press(|| Msg::ClosePorts));
+            .action("close", cancel_button("Close", || Msg::ClosePorts));
     };
 
     let theme = *theme;
@@ -420,10 +435,7 @@ pub(super) fn ports_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
                 ctx.paint_widget(Paragraph::new(Line::from(status)), rows[3]);
             }
         })
-        .action(
-            "close",
-            Button::new("Close").ghost().on_press(|| Msg::ClosePorts),
-        )
+        .action("close", cancel_button("Close", || Msg::ClosePorts))
 }
 
 fn port_header_line(theme: &Theme) -> Line<'static> {
