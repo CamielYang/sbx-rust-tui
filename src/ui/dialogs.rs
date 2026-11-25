@@ -6,13 +6,16 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratcn::color::{away_from, dim};
 use ratcn::{
-    Button, ButtonStyle, ButtonVariant, Checkbox, Dialog, InputState, ListItem, Select, Theme,
+    Button, ButtonStyle, ButtonVariant, Checkbox, Dialog, InputState, List, ListItem, Select, Theme,
 };
 
 use super::dashboard::{REMOVE_RED, START_GREEN, STOP_ORANGE, action_style};
 use super::widgets::{detail_line, field_row, input, join_usage};
 use super::*;
-use crate::app::{AGENTS, FormField, PendingAction, PortField, PortMapping, SandboxDetails};
+use crate::app::{
+    AGENTS, FormField, PendingAction, PortField, PortMapping, SandboxDetails, WORKSPACE_PARENT,
+    WorkspacePicker,
+};
 
 /// The confirmation dialog's focused Cancel sets the look for every dismiss
 /// action: a quiet raised fill that stays visible even while another control
@@ -506,4 +509,101 @@ fn port_row_line(mapping: &PortMapping, theme: &Theme) -> Line<'static> {
             Style::default().fg(theme.foreground),
         ),
     ])
+}
+
+// --- workspace picker dialog ------------------------------------------------
+
+/// A folder browser stacked above the create dialog. Rows are folders to enter,
+/// with `..` first for going back; **Create here** commits the folder currently
+/// being browsed instead of the row under the cursor.
+pub(super) fn workspace_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
+    let theme = *theme;
+    let Some(picker) = app.workspace_picker() else {
+        return Dialog::new()
+            .title("Select workspace")
+            .description("The folder browser is no longer available.")
+            .on_dismiss(|| Msg::CancelWorkspace)
+            .action("close", cancel_button("Close", || Msg::CancelWorkspace));
+    };
+
+    let folder = picker.dir().to_string_lossy().into_owned();
+    let error = picker.error().map(str::to_owned);
+    let entries: Vec<ListItem<String>> = picker
+        .entries()
+        .iter()
+        .map(|name| ListItem::new(name.clone(), name.clone()))
+        .collect();
+    let folder_count = entries.len().saturating_sub(usize::from(
+        entries
+            .first()
+            .is_some_and(|item| item.value().as_str() == WORKSPACE_PARENT),
+    ));
+    // Browsing a row moves the cursor and enters a folder on commit. Nothing is
+    // "selected" in this list, so the rows stay free of radio markers.
+    let folders = List::new(entries)
+        .item_focus(
+            |state: &App| {
+                state
+                    .workspace_picker()
+                    .and_then(|picker| picker.focused())
+                    .map(str::to_owned)
+            },
+            Msg::WorkspaceEntryFocused,
+        )
+        .selection(|_: &App| None::<String>, Msg::WorkspaceEntrySelected)
+        .scroll(
+            |state: &App| state.workspace_picker().map_or(0, WorkspacePicker::scroll),
+            Msg::WorkspaceScrolled,
+        )
+        .focus_symbol("> ");
+
+    Dialog::new()
+        .title("Select workspace")
+        .description("Choose where the sandbox workspace should live")
+        .outer_width(66)
+        .on_dismiss(|| Msg::CancelWorkspace)
+        .content(12, move |ctx| {
+            let rows = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(0),
+                Constraint::Length(1),
+            ])
+            .split(ctx.area());
+            ctx.paint_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(" Folder  ", Style::default().fg(theme.muted_foreground)),
+                    Span::styled(folder, Style::default().fg(theme.foreground)),
+                ])),
+                rows[0],
+            );
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.border))
+                .style(Style::default().bg(theme.surface));
+            let inner = block.inner(rows[2]);
+            ctx.paint_widget(block, rows[2]);
+            if inner.height > 0 && inner.width > 0 {
+                ctx.component("workspace-folders", folders, inner);
+            }
+
+            let status = match error {
+                Some(error) => {
+                    Span::styled(format!(" {error}"), Style::default().fg(theme.destructive))
+                }
+                None => Span::styled(
+                    format!(
+                        " {folder_count} folders · Enter opens · Create here selects this folder"
+                    ),
+                    Style::default().fg(theme.muted_foreground),
+                ),
+            };
+            ctx.paint_widget(Paragraph::new(Line::from(status)), rows[3]);
+        })
+        .action("cancel", cancel_button("Cancel", || Msg::CancelWorkspace))
+        .action(
+            "create-here",
+            Button::new("Create here").on_press(|| Msg::CreateWorkspaceHere),
+        )
 }

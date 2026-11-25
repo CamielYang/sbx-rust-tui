@@ -16,14 +16,16 @@ mod ports;
 mod ports_flow;
 mod sandbox;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 mod workers;
+mod workspace;
 
 pub use self::actions::PendingAction;
 pub use self::commands::PendingCommand;
 pub use self::form::{Form, FormField};
 pub use self::ports::{PortField, PortForm, PortMapping, PortsView};
 pub use self::sandbox::{Sandbox, SandboxDetails, fetch_sandboxes, inspect_sandbox};
+pub use self::workspace::{WORKSPACE_PARENT, WorkspacePicker};
 
 pub const AGENTS: &[&str] = &[
     "claude",
@@ -43,6 +45,7 @@ pub const CREATE_DIALOG: &str = "create-dialog";
 pub const INFO_DIALOG: &str = "info-dialog";
 pub const CONFIRM_DIALOG: &str = "confirm-dialog";
 pub const PORTS_DIALOG: &str = "ports-dialog";
+pub const WORKSPACE_DIALOG: &str = "workspace-dialog";
 
 /// How often the dashboard re-reads `sbx ls` to keep running-state dots fresh.
 pub const STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
@@ -59,6 +62,8 @@ pub enum Mode {
     Info,
     Confirm,
     Ports,
+    /// The folder picker sits above the create wizard.
+    Workspace,
 }
 
 pub struct App {
@@ -75,6 +80,7 @@ pub struct App {
     info_refresh: Option<workers::InfoRefresh>,
     ports: Option<PortsView>,
     port_form: PortForm,
+    workspace_picker: Option<WorkspacePicker>,
     pending_action: Option<PendingAction>,
     pending_external: Option<PendingCommand>,
     creation: Option<workers::Creation>,
@@ -107,6 +113,7 @@ impl App {
             info_refresh: None,
             ports: None,
             port_form: PortForm::new(),
+            workspace_picker: None,
             pending_action: None,
             pending_external: None,
             creation: None,
@@ -136,7 +143,9 @@ impl App {
     /// Logical screen, derived from the modal stack so the two can never
     /// disagree about which layer is active.
     pub fn mode(&self) -> Mode {
-        if self.modals.is_open(CREATE_DIALOG) {
+        if self.modals.is_open(WORKSPACE_DIALOG) {
+            Mode::Workspace
+        } else if self.modals.is_open(CREATE_DIALOG) {
             Mode::Wizard
         } else if self.modals.is_open(INFO_DIALOG) {
             Mode::Info
@@ -206,6 +215,10 @@ impl App {
 
     pub fn port_form(&self) -> &PortForm {
         &self.port_form
+    }
+
+    pub fn workspace_picker(&self) -> Option<&WorkspacePicker> {
+        self.workspace_picker.as_ref()
     }
 
     pub fn port_invalid(&self, field: PortField) -> bool {

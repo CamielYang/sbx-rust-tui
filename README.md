@@ -13,6 +13,7 @@ A simple terminal UI (TUI) for easily managing Docker Sandboxes and publishing p
 
 - Browse sandboxes and see their current status
 - Create sandboxes with your choice of agent, CPUs, memory, and disk size
+- Pick a workspace folder with a built-in folder browser (including a `..` row to go back)
 - Start, stop, and remove sandboxes with confirmation prompts
 - Open a shell inside a running sandbox
 - Publish and inspect ports with a simple dialog

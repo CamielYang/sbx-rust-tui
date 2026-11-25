@@ -5,6 +5,7 @@ use super::form::{
 };
 use super::ports::parse_ports;
 use super::sandbox::{VmMetrics, format_size, json_text, parse_vm_metrics};
+use super::test_support::TempWorkspaceDir;
 use super::*;
 use serde_json::Value;
 
@@ -640,4 +641,78 @@ fn stderr_detail_prefers_error_line_and_try_hint() {
         stderr_detail(&output, "sbx command failed"),
         "error: sandbox 'test' already exists; connect to the existing sandbox\ntry: sbx run --name test"
     );
+}
+
+#[test]
+fn workspace_picker_browses_folders_and_commits_the_current_one() {
+    let temp = TempWorkspaceDir::new();
+    let inner = temp.make_dir("inner");
+    temp.make_dir("alpha");
+    std::fs::write(temp.path().join("notes.txt"), "not a folder").unwrap();
+
+    let mut app = App::with_sandboxes(&[]);
+    app.open_wizard();
+    app.set_workspace_path_for_test(temp.path());
+    app.open_workspace_picker();
+
+    assert!(matches!(app.mode(), Mode::Workspace));
+    let picker = app.workspace_picker().unwrap();
+    assert_eq!(picker.dir(), temp.path());
+    assert_eq!(picker.entries(), [WORKSPACE_PARENT, "alpha", "inner"]);
+
+    app.select_workspace_entry("inner".to_owned());
+    let picker = app.workspace_picker().unwrap();
+    assert_eq!(picker.dir(), inner.as_path());
+    assert_eq!(picker.entries(), [WORKSPACE_PARENT]);
+
+    app.select_workspace_entry(WORKSPACE_PARENT.to_owned());
+    assert_eq!(app.workspace_picker().unwrap().dir(), temp.path());
+
+    app.choose_workspace_dir();
+    assert_eq!(
+        app.form().workspace_path(),
+        temp.path().to_string_lossy().as_ref()
+    );
+    assert!(app.workspace_picker().is_none());
+    assert!(app.modals_ref().is_open(CREATE_DIALOG));
+    assert!(matches!(app.mode(), Mode::Wizard));
+}
+
+#[test]
+fn workspace_picker_only_opens_from_the_wizard() {
+    let mut app = App::with_sandboxes(&[]);
+    app.open_workspace_picker();
+    assert!(app.workspace_picker().is_none());
+    assert!(matches!(app.mode(), Mode::Normal));
+}
+
+#[test]
+fn cancelling_the_picker_keeps_the_original_workspace_path() {
+    let temp = TempWorkspaceDir::new();
+    temp.make_dir("child");
+    let mut app = App::with_sandboxes(&[]);
+    app.open_wizard();
+    app.set_workspace_path_for_test(temp.path());
+    let original = app.form().workspace_path().to_owned();
+
+    app.open_workspace_picker();
+    app.select_workspace_entry("child".to_owned());
+    app.cancel_workspace_picker();
+
+    assert_eq!(app.form().workspace_path(), original);
+    assert!(app.workspace_picker().is_none());
+    assert!(app.modals_ref().is_open(CREATE_DIALOG));
+}
+
+#[test]
+fn workspace_picker_starts_at_the_nearest_existing_directory() {
+    let temp = TempWorkspaceDir::new();
+    let missing = temp.path().join("does-not-exist").join("workspace");
+
+    let mut app = App::with_sandboxes(&[]);
+    app.open_wizard();
+    app.set_workspace_path_for_test(&missing);
+    app.open_workspace_picker();
+
+    assert_eq!(app.workspace_picker().unwrap().dir(), temp.path());
 }

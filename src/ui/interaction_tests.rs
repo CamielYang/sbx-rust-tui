@@ -1,4 +1,6 @@
 use super::*;
+use crate::app::Mode;
+use crate::app::test_support::TempWorkspaceDir;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{Terminal, backend::TestBackend};
 use ratcn::runtime::{EventResult, Ratcn};
@@ -295,7 +297,6 @@ fn workspace_checkbox_reveals_the_path_and_change_button() {
     let path = app.form().workspace_path().to_owned();
     assert!(screen(&terminal).contains(&path));
 
-    // The button is live but intentionally inert until the path picker exists.
     let (x, y) = position_from_bottom(&screen(&terminal), "Change").expect("change button");
     let emitted = click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
     assert!(
@@ -303,7 +304,91 @@ fn workspace_checkbox_reveals_the_path_and_change_button() {
             .iter()
             .any(|message| matches!(message, Msg::ChangeWorkspace))
     );
+    assert!(app.modals_ref().is_open(WORKSPACE_DIALOG));
+    assert!(matches!(app.mode(), Mode::Workspace));
     assert_eq!(app.form().workspace_path(), path);
+}
+
+#[test]
+fn change_opens_the_picker_and_create_here_commits_the_browsed_folder() {
+    let temp = TempWorkspaceDir::new();
+    let child = temp.make_dir("child");
+    let mut app = App::with_sandboxes(&[]);
+    app.open_wizard();
+    app.set_add_workspace(true);
+    app.set_workspace_path_for_test(temp.path());
+    let mut ratcn = new_runtime();
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    draw(&mut terminal, &app, &mut ratcn);
+
+    let (x, y) = position_from_bottom(&screen(&terminal), "Change").expect("change button");
+    click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+    assert!(app.modals_ref().is_open(WORKSPACE_DIALOG));
+    let screen_text = screen(&terminal);
+    assert!(screen_text.contains("Select workspace"));
+    assert!(screen_text.contains("Create here"));
+
+    // Entering a row browses into it without changing the form yet.
+    let (x, y) = position_from_bottom(&screen_text, "child").expect("child folder row");
+    let emitted = click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+    assert!(
+        emitted
+            .iter()
+            .any(|message| matches!(message, Msg::WorkspaceEntrySelected(_)))
+    );
+    assert_eq!(app.workspace_picker().unwrap().dir(), child.as_path());
+    assert_eq!(
+        app.form().workspace_path(),
+        temp.path().to_string_lossy().as_ref()
+    );
+
+    // Create here commits the folder being shown, not the row under the cursor.
+    let (x, y) = position_from_bottom(&screen(&terminal), "Create here").expect("create button");
+    let emitted = click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+    assert!(
+        emitted
+            .iter()
+            .any(|message| matches!(message, Msg::CreateWorkspaceHere))
+    );
+    assert!(!app.modals_ref().is_open(WORKSPACE_DIALOG));
+    assert!(app.modals_ref().is_open(CREATE_DIALOG));
+    assert_eq!(
+        app.form().workspace_path(),
+        child.to_string_lossy().as_ref()
+    );
+    assert!(screen(&terminal).contains(child.to_string_lossy().as_ref()));
+}
+
+#[test]
+fn picker_navigates_with_keys_and_escape_returns_to_the_wizard() {
+    let temp = TempWorkspaceDir::new();
+    let child = temp.make_dir("child");
+    let mut app = App::with_sandboxes(&[]);
+    app.open_wizard();
+    app.set_add_workspace(true);
+    app.set_workspace_path_for_test(temp.path());
+    app.open_workspace_picker();
+    let mut ratcn = new_runtime();
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    draw(&mut terminal, &app, &mut ratcn);
+
+    let press = |key: KeyCode, app: &mut App, ratcn: &mut Ratcn<App, Msg>| match ratcn
+        .handle_event(Event::Key(KeyEvent::new(key, KeyModifiers::NONE)), app)
+    {
+        EventResult::Emit(message) => apply(app, message),
+        other => panic!("key {key:?} was not handled: {other:?}"),
+    };
+
+    // The cursor starts on `..`; Down moves it to the only child folder.
+    press(KeyCode::Down, &mut app, &mut ratcn);
+    assert_eq!(app.workspace_picker().unwrap().focused(), Some("child"));
+    press(KeyCode::Enter, &mut app, &mut ratcn);
+    assert_eq!(app.workspace_picker().unwrap().dir(), child.as_path());
+
+    press(KeyCode::Esc, &mut app, &mut ratcn);
+    assert!(!app.modals_ref().is_open(WORKSPACE_DIALOG));
+    assert!(app.modals_ref().is_open(CREATE_DIALOG));
+    assert!(app.workspace_picker().is_none());
 }
 
 #[test]

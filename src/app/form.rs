@@ -306,8 +306,7 @@ fn host_memory_mib() -> Option<u64> {
     Some(kib / 1024)
 }
 
-/// The standard workspace location offered by the create dialog. A path picker
-/// will replace this later; until then the user's home directory is the default.
+/// The workspace location offered before the user opens the folder picker.
 fn default_workspace_path() -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| "~".to_owned());
     format!("{home}/workspace")
