@@ -25,7 +25,8 @@ use self::dialogs::{confirm_dialog, create_dialog, info_dialog, ports_dialog};
 // The UI tests reach these helpers through `use super::*`.
 #[cfg(test)]
 use self::dashboard::{
-    EXEC_GRAY, INFO_BLUE, PORTS_CYAN, REMOVE_RED, START_GREEN, STOP_ORANGE, action_style,
+    EXEC_GRAY, INFO_BLUE, PORTS_CYAN, REMOVE_RED, RUNNING_GREEN, START_GREEN, STOP_ORANGE,
+    action_style,
 };
 #[cfg(test)]
 use self::dialogs::cpu_text;

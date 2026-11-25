@@ -1,9 +1,9 @@
 use super::*;
 use crate::app::{INFO_DIALOG, PORTS_DIALOG, PortMapping, SandboxDetails};
-use ratatui::{Terminal, backend::TestBackend};
+use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 use ratcn::runtime::Ratcn;
 
-fn render(app: &App) -> String {
+fn draw(app: &App) -> Buffer {
     let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
     let theme = Theme::tokyo_night();
     let mut ratcn = Ratcn::new()
@@ -16,7 +16,11 @@ fn render(app: &App) -> String {
             });
         })
         .unwrap();
-    let buffer = terminal.backend().buffer();
+    terminal.backend().buffer().clone()
+}
+
+fn render(app: &App) -> String {
+    let buffer = draw(app);
     let width = buffer.area.width as usize;
     buffer
         .content()
@@ -35,6 +39,50 @@ fn renders_dashboard_with_themated_controls() {
     assert!(screen.contains("beta"));
     assert!(screen.contains("Exec shell"));
     assert!(screen.contains("Remove"));
+}
+
+#[test]
+fn actions_pane_labels_status_and_spaces_it_from_buttons() {
+    let app = App::with_sandbox_statuses(&[("alpha", "running")]);
+    let screen = render(&app);
+    let rows: Vec<&str> = screen.lines().collect();
+    let status_row = rows
+        .iter()
+        .position(|row| row.contains("status: running"))
+        .unwrap();
+    let first_button_row = rows.iter().position(|row| row.contains("Stop")).unwrap();
+    assert_eq!(first_button_row, status_row + 2);
+    assert!(
+        rows[status_row + 1]
+            .trim_matches(|c: char| c == '│' || c.is_whitespace())
+            .is_empty()
+    );
+}
+
+#[test]
+fn running_status_is_green_in_list_and_actions() {
+    let app = App::with_sandbox_statuses(&[("alpha", "running")]);
+    let buffer = draw(&app);
+    assert!(
+        buffer
+            .content()
+            .iter()
+            .any(|cell| cell.symbol() == "●" && cell.fg == RUNNING_GREEN),
+        "the running dot in the sandbox list should be green"
+    );
+
+    let width = buffer.area.width as usize;
+    let screen = render(&app);
+    let row = screen
+        .lines()
+        .position(|line| line.contains("status: running"))
+        .unwrap();
+    let column = screen.lines().nth(row).unwrap().find("running").unwrap();
+    assert_eq!(
+        buffer.content()[row * width + column].fg,
+        RUNNING_GREEN,
+        "the Actions pane status should be green"
+    );
 }
 
 fn column_of(rows: &str, needle: &str) -> Option<usize> {

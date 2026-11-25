@@ -136,11 +136,7 @@ fn paint_sandbox_list(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &The
             } else {
                 Style::default().fg(theme.muted_foreground)
             };
-            let status_style = if running {
-                Style::default().fg(theme.accent)
-            } else {
-                Style::default().fg(theme.warning)
-            };
+            let status_style = Style::default().fg(status_color(running, &theme));
             let status = sandbox
                 .map(|sandbox| sandbox.status.as_str())
                 .unwrap_or("empty");
@@ -162,13 +158,24 @@ fn paint_sandbox_list(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &The
     ctx.component("sandbox-list", list, inner);
 }
 
-// Action hues, in the same saturated register as the Tokyo Night palette.
-pub(super) const START_GREEN: Color = Color::Rgb(158, 206, 106);
+// Status and action hues, in the same saturated register as the Tokyo Night palette.
+pub(super) const RUNNING_GREEN: Color = Color::Rgb(158, 206, 106);
+pub(super) const START_GREEN: Color = RUNNING_GREEN;
 pub(super) const STOP_ORANGE: Color = Color::Rgb(255, 158, 100);
 pub(super) const EXEC_GRAY: Color = Color::Rgb(122, 132, 166);
 pub(super) const REMOVE_RED: Color = Color::Rgb(247, 118, 142);
 pub(super) const INFO_BLUE: Color = Color::Rgb(122, 162, 247);
 pub(super) const PORTS_CYAN: Color = Color::Rgb(115, 200, 211);
+
+/// A running sandbox is green in both the list and the Actions summary;
+/// stopped sandboxes keep the theme's warning hue.
+fn status_color(running: bool, theme: &Theme) -> Color {
+    if running {
+        RUNNING_GREEN
+    } else {
+        theme.warning
+    }
+}
 
 /// A filled button keeps its action hue in every state. Focus deepens the fill,
 /// hover lifts it, and both change visibly even when the button is focused —
@@ -220,8 +227,10 @@ fn paint_actions(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme, a
     // The pane's surface goes down first; buttons paint their fills on top.
     ctx.paint_widget(block, area);
 
+    // Row 1 is the blank gap between the summary and the first button.
     let rows = Layout::vertical([
         Constraint::Length(2),
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -243,10 +252,13 @@ fn paint_actions(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme, a
                     .fg(theme.foreground)
                     .add_modifier(Modifier::BOLD),
             )),
-            Line::from(Span::styled(
-                sandbox.status.clone(),
-                Style::default().fg(if running { theme.accent } else { theme.warning }),
-            )),
+            Line::from(vec![
+                Span::styled("status: ", Style::default().fg(theme.muted_foreground)),
+                Span::styled(
+                    sandbox.status.clone(),
+                    Style::default().fg(status_color(running, theme)),
+                ),
+            ]),
         ],
         None => vec![Line::from(Span::styled(
             "Select a sandbox",
@@ -277,7 +289,7 @@ fn paint_actions(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme, a
             .style(action_style(*fill))
             .on_press(*message)
             .disabled(locked);
-        place_button(ctx, id, button, rows[row + 1], button_width);
+        place_button(ctx, id, button, rows[row + 2], button_width);
     }
 }
 

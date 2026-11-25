@@ -120,7 +120,7 @@ fn action_buttons_share_one_left_aligned_column() {
     let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
     draw(&mut terminal, &app, &mut ratcn);
     // "Publish ports" sets the shared width: 13 label cells + 4 of padding.
-    for (row, fill) in [(7, STOP_ORANGE), (8, EXEC_GRAY), (9, PORTS_CYAN)] {
+    for (row, fill) in [(8, STOP_ORANGE), (9, EXEC_GRAY), (10, PORTS_CYAN)] {
         for x in 65..82 {
             assert_eq!(cell_bg(&terminal, x, row), fill, "fill at ({x}, {row})");
         }
@@ -172,18 +172,18 @@ fn action_buttons_change_color_on_hover() {
     let mut ratcn = new_runtime();
     let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
     draw(&mut terminal, &app, &mut ratcn);
-    let resting = cell_bg(&terminal, 70, 7);
+    let resting = cell_bg(&terminal, 70, 8);
     assert_eq!(resting, STOP_ORANGE);
 
     let moved = Event::Mouse(crossterm::event::MouseEvent {
         kind: crossterm::event::MouseEventKind::Moved,
         column: 70,
-        row: 7,
+        row: 8,
         modifiers: KeyModifiers::NONE,
     });
     ratcn.handle_event(moved, &app);
     draw(&mut terminal, &app, &mut ratcn);
-    assert_ne!(cell_bg(&terminal, 70, 7), resting);
+    assert_ne!(cell_bg(&terminal, 70, 8), resting);
 }
 
 #[test]
@@ -192,7 +192,7 @@ fn action_buttons_emit_only_their_own_command() {
     let mut ratcn = new_runtime();
     let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
     draw(&mut terminal, &running, &mut ratcn);
-    let emitted = click(&mut terminal, &mut running, &mut ratcn, 70, 7);
+    let emitted = click(&mut terminal, &mut running, &mut ratcn, 70, 8);
     assert!(
         emitted
             .iter()
@@ -207,7 +207,7 @@ fn action_buttons_emit_only_their_own_command() {
     let mut stopped = App::with_sandbox_statuses(&[("alpha", "stopped")]);
     let mut ratcn = new_runtime();
     draw(&mut terminal, &stopped, &mut ratcn);
-    let emitted = click(&mut terminal, &mut stopped, &mut ratcn, 70, 7);
+    let emitted = click(&mut terminal, &mut stopped, &mut ratcn, 70, 8);
     assert!(
         emitted
             .iter()
@@ -236,7 +236,7 @@ fn clicking_an_action_opens_its_confirmation_dialog() {
     let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
     draw(&mut terminal, &app, &mut ratcn);
 
-    let emitted = click(&mut terminal, &mut app, &mut ratcn, 70, 7);
+    let emitted = click(&mut terminal, &mut app, &mut ratcn, 70, 8);
     assert!(
         emitted
             .iter()
@@ -262,8 +262,8 @@ fn clicking_publish_ports_opens_the_ports_dialog() {
     let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
     draw(&mut terminal, &app, &mut ratcn);
 
-    // Action rows: Stop (7), Exec shell (8), Publish ports (9).
-    let emitted = click(&mut terminal, &mut app, &mut ratcn, 70, 9);
+    // Action rows: Stop (8), Exec shell (9), Publish ports (10).
+    let emitted = click(&mut terminal, &mut app, &mut ratcn, 70, 10);
     assert!(
         emitted
             .iter()
