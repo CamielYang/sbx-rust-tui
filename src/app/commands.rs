@@ -107,10 +107,29 @@ impl PendingCommand {
     }
 }
 
-/// First non-empty stderr line of a failed command, with a caller-supplied
-/// fallback when the child wrote nothing readable.
+/// The most useful error line from a failed command. Prefer an `error:` line
+/// (and a following `try:` hint) over unrelated progress output; fall back to
+/// the first non-empty stderr line when no explicit error line is present.
 pub(super) fn stderr_detail(output: &std::process::Output, fallback: &str) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines: Vec<&str> = stderr.lines().collect();
+    if let Some(index) = lines.iter().position(|line| {
+        line.trim_start()
+            .to_ascii_lowercase()
+            .starts_with("error:")
+    }) {
+        let mut detail = lines[index].trim().to_owned();
+        if let Some(try_line) = lines[index + 1..]
+            .iter()
+            .map(|line| line.trim())
+            .find(|line| !line.is_empty())
+            .filter(|line| line.to_ascii_lowercase().starts_with("try:"))
+        {
+            detail.push('\n');
+            detail.push_str(try_line);
+        }
+        return detail;
+    }
     stderr
         .lines()
         .find(|line| !line.trim().is_empty())

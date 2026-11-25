@@ -607,3 +607,23 @@ fn invalid_ports_are_not_published() {
             .is_some_and(|error| error.contains("Host port"))
     );
 }
+
+#[test]
+fn stderr_detail_prefers_error_line_and_try_hint() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::{ExitStatus, Output};
+
+    use super::commands::stderr_detail;
+
+    let output = Output {
+        status: ExitStatus::from_raw(256),
+        stdout: Vec::new(),
+        stderr: b"    o opencode - now ships as a kit; resolving docker.io/sbx/opencode:latest\n\n  error: sandbox 'test' already exists; connect to the existing sandbox\n    try: sbx run --name test\n"
+            .to_vec(),
+    };
+
+    assert_eq!(
+        stderr_detail(&output, "sbx command failed"),
+        "error: sandbox 'test' already exists; connect to the existing sandbox\ntry: sbx run --name test"
+    );
+}
