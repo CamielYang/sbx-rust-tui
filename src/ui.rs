@@ -16,7 +16,10 @@ use ratcn::{
     Select, Theme,
 };
 
-use crate::app::{AGENTS, App, CREATE_DIALOG, FormField, INFO_DIALOG, Sandbox, SandboxDetails};
+use crate::app::{
+    AGENTS, App, CONFIRM_DIALOG, CREATE_DIALOG, FormField, INFO_DIALOG, PendingAction, Sandbox,
+    SandboxDetails,
+};
 
 /// Every interaction ratcn can emit.
 #[derive(Clone, Debug)]
@@ -39,6 +42,8 @@ pub enum Msg {
     ExecSelected,
     InfoSelected,
     RemoveSelected,
+    ConfirmAction,
+    CancelAction,
     CloseInfo,
 }
 
@@ -79,6 +84,8 @@ pub fn apply(app: &mut App, msg: Msg) {
         Msg::ExecSelected => app.exec_selected(),
         Msg::InfoSelected => app.open_selected_info(),
         Msg::RemoveSelected => app.remove_selected(),
+        Msg::ConfirmAction => app.confirm_action(),
+        Msg::CancelAction => app.cancel_action(),
         Msg::CloseInfo => app.close_info(),
     }
 }
@@ -137,6 +144,9 @@ pub fn declare(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme) {
     }
     if app.modals_ref().is_open(INFO_DIALOG) {
         ctx.modal(INFO_DIALOG, info_dialog(app, &theme), area);
+    }
+    if app.modals_ref().is_open(CONFIRM_DIALOG) {
+        ctx.modal(CONFIRM_DIALOG, confirm_dialog(app), area);
     }
 }
 
@@ -610,6 +620,57 @@ fn field_row<C>(
     ctx.component(format!("field-{label}"), component, columns[1]);
 }
 
+// --- confirmation dialog ----------------------------------------------------
+
+/// The last gate before Start/Stop/Remove reaches `sbx`. The action's hue is
+/// kept on the confirm button so the dialog reads like the action it replaces.
+fn confirm_dialog(app: &App) -> Dialog<App, Msg> {
+    let Some(action) = app.pending_action() else {
+        return Dialog::new()
+            .title("Confirm action")
+            .description("No action is pending.")
+            .on_dismiss(|| Msg::CancelAction)
+            .action("close", Button::new("Close").on_press(|| Msg::CancelAction));
+    };
+
+    let (title, description, label, fill) = match action {
+        PendingAction::Start(name) => (
+            "Confirm start",
+            format!("Start sandbox '{name}'?"),
+            "Start sandbox",
+            START_GREEN,
+        ),
+        PendingAction::Stop(name) => (
+            "Confirm stop",
+            format!("Stop sandbox '{name}'?"),
+            "Stop sandbox",
+            STOP_ORANGE,
+        ),
+        PendingAction::Remove(name) => (
+            "Confirm remove",
+            format!("Permanently remove sandbox '{name}' and its data?"),
+            "Remove sandbox",
+            REMOVE_RED,
+        ),
+    };
+
+    Dialog::new()
+        .title(title)
+        .description(description)
+        .outer_width(62)
+        .on_dismiss(|| Msg::CancelAction)
+        .action(
+            "cancel",
+            Button::new("Cancel").ghost().on_press(|| Msg::CancelAction),
+        )
+        .action(
+            "confirm",
+            Button::new(label)
+                .style(action_style(fill))
+                .on_press(|| Msg::ConfirmAction),
+        )
+}
+
 // --- info dialog ------------------------------------------------------------
 
 fn info_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
@@ -635,7 +696,7 @@ fn info_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
 fn details_text(details: &SandboxDetails) -> String {
     let mut lines = vec![
         detail_line("Status", Some(details.status.as_str())),
-        detail_line("CPUs", details.cpus.as_deref()),
+        detail_line("CPUs", cpu_text(details).as_deref()),
         detail_line(
             "Memory",
             join_usage(details.mem_used.as_deref(), details.mem_total.as_deref()).as_deref(),
@@ -658,6 +719,16 @@ fn details_text(details: &SandboxDetails) -> String {
         lines.push(format!("Note: {error}"));
     }
     lines.join("\n")
+}
+
+/// Show core count alone until the guest reports a usage sample, then add the
+/// percentage in the requested `{cores} ({percentage usage})` form.
+fn cpu_text(details: &SandboxDetails) -> Option<String> {
+    let cores = details.cpus.as_deref()?;
+    Some(match details.cpu_usage {
+        Some(usage) => format!("{cores} ({usage}%)"),
+        None => cores.to_owned(),
+    })
 }
 
 fn detail_line(label: &str, value: Option<&str>) -> String {
@@ -801,6 +872,7 @@ mod tests {
             name: "alpha".to_owned(),
             status: "running".to_owned(),
             cpus: Some("4".to_owned()),
+            cpu_usage: Some(37),
             mem_used: Some("1.0 GiB".to_owned()),
             mem_total: Some("2.0 GiB".to_owned()),
             ..SandboxDetails::default()
@@ -808,7 +880,24 @@ mod tests {
         assert!(app.modals_ref().is_open(INFO_DIALOG));
         let screen = render(&app);
         assert!(screen.contains("Sandbox"));
+        assert!(screen.contains("4 (37%)"));
         assert!(screen.contains("1.0 GiB / 2.0 GiB"));
+    }
+
+    #[test]
+    fn cpu_text_adds_usage_only_when_sampled() {
+        let details = SandboxDetails {
+            cpus: Some("8".to_owned()),
+            cpu_usage: Some(12),
+            ..SandboxDetails::default()
+        };
+        assert_eq!(cpu_text(&details).as_deref(), Some("8 (12%)"));
+
+        let details = SandboxDetails {
+            cpu_usage: None,
+            ..details
+        };
+        assert_eq!(cpu_text(&details).as_deref(), Some("8"));
     }
 }
 
@@ -999,6 +1088,87 @@ mod interaction_tests {
             !emitted
                 .iter()
                 .any(|message| matches!(message, Msg::StopSelected))
+        );
+    }
+
+    fn position_from_bottom(screen: &str, needle: &str) -> Option<(u16, u16)> {
+        let lines: Vec<_> = screen.lines().collect();
+        lines
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(y, line)| line.rfind(needle).map(|x| (x as u16, y as u16)))
+    }
+
+    #[test]
+    fn clicking_an_action_opens_its_confirmation_dialog() {
+        let mut app = App::with_sandboxes(&["alpha"]);
+        let mut ratcn = new_runtime();
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        draw(&mut terminal, &app, &mut ratcn);
+
+        let emitted = click(&mut terminal, &mut app, &mut ratcn, 70, 5);
+        assert!(
+            emitted
+                .iter()
+                .any(|message| matches!(message, Msg::StopSelected))
+        );
+        assert!(app.modals_ref().is_open(CONFIRM_DIALOG));
+        assert_eq!(
+            app.pending_action(),
+            Some(&PendingAction::Stop("alpha".to_owned()))
+        );
+        assert!(app.take_confirmed_for_test().is_none());
+
+        let screen = screen(&terminal);
+        assert!(screen.contains("Confirm stop"));
+        assert!(screen.contains("Stop sandbox 'alpha'?"));
+        assert!(screen.contains("Cancel"));
+    }
+
+    #[test]
+    fn escape_dismisses_confirmation_without_running_the_action() {
+        let mut app = App::with_sandbox_statuses(&[("alpha", "stopped")]);
+        let mut ratcn = new_runtime();
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        draw(&mut terminal, &app, &mut ratcn);
+
+        app.start_selected();
+        draw(&mut terminal, &app, &mut ratcn);
+        assert!(app.modals_ref().is_open(CONFIRM_DIALOG));
+
+        let escape = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        match ratcn.handle_event(escape, &app) {
+            EventResult::Emit(message) => apply(&mut app, message),
+            other => panic!("Esc should dismiss the confirmation, got {other:?}"),
+        }
+        assert!(!app.modals_ref().is_open(CONFIRM_DIALOG));
+        assert!(app.pending_action().is_none());
+        assert!(app.take_confirmed_for_test().is_none());
+        assert_eq!(app.message(), "Start cancelled.");
+    }
+
+    #[test]
+    fn confirming_an_action_hands_it_to_the_app() {
+        let mut app = App::with_sandboxes(&["alpha"]);
+        let mut ratcn = new_runtime();
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        draw(&mut terminal, &app, &mut ratcn);
+
+        app.stop_selected();
+        draw(&mut terminal, &app, &mut ratcn);
+        let (x, y) = position_from_bottom(&screen(&terminal), "Stop sandbox")
+            .expect("confirm button is on screen");
+        let emitted = click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+        assert!(
+            emitted
+                .iter()
+                .any(|message| matches!(message, Msg::ConfirmAction))
+        );
+        assert!(!app.modals_ref().is_open(CONFIRM_DIALOG));
+        assert_eq!(
+            app.take_confirmed_for_test(),
+            Some(PendingAction::Stop("alpha".to_owned()))
         );
     }
 

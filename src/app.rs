@@ -22,9 +22,10 @@ pub const AGENTS: &[&str] = &[
     "shell",
 ];
 
-/// Stable ids for the two ratcn modal layers.
+/// Stable ids for the three ratcn modal layers.
 pub const CREATE_DIALOG: &str = "create-dialog";
 pub const INFO_DIALOG: &str = "info-dialog";
+pub const CONFIRM_DIALOG: &str = "confirm-dialog";
 
 const CREATE_TOAST: &str = "create-sandbox";
 
@@ -32,15 +33,49 @@ const CREATE_TOAST: &str = "create-sandbox";
 pub const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// How often the dashboard re-reads `sbx ls` to keep running-state dots fresh.
-/// VM metrics are deliberately not part of this tick; they are only collected
-/// when the user opens the Info modal.
 pub const STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
+/// How often an open Info dialog re-collects live guest metrics.
+pub const INFO_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+
 /// Collected with `sbx exec <name> -- sh -c <script>`. Plain text keeps the
-/// command portable across the minimal shells used inside the microVM.
+/// command portable across the minimal shells used inside the microVM. CPU
+/// usage needs two `/proc/stat` samples, so the guest sleeps for one second
+/// between them and reports a percentage of all cores.
 const VM_METRICS_SCRIPT: &str = r#"
 printf 'cpu=%s\n' "$(nproc 2>/dev/null || printf 0)"
 awk '
+  function sample(   line, fields, count, i, total, idle) {
+    while ((getline line < "/proc/stat") > 0) {
+      if (line ~ /^cpu[ \t]/) {
+        count = split(line, fields, " ")
+        total = 0
+        for (i = 2; i <= count; i++) total += fields[i] + 0
+        idle = fields[5] + 0 + fields[6] + 0
+        close("/proc/stat")
+        return total " " idle
+      }
+    }
+    close("/proc/stat")
+    return ""
+  }
+  BEGIN {
+    before = sample()
+    system("sleep 1")
+    after = sample()
+    if (before != "" && after != "") {
+      split(before, first, " ")
+      split(after, second, " ")
+      total = second[1] - first[1]
+      idle = second[2] - first[2]
+      if (total > 0) {
+        usage = 100 * (total - idle) / total
+        if (usage < 0) usage = 0
+        if (usage > 100) usage = 100
+        printf "cpu_usage=%d\n", int(usage + 0.5)
+      }
+    }
+  }
   /^MemTotal:/     { total = $2 }
   /^MemFree:/      { free = $2 }
   /^MemAvailable:/ { avail = $2 }
@@ -174,6 +209,7 @@ pub enum Mode {
     Normal,
     Wizard,
     Info,
+    Confirm,
 }
 
 // --- create form -------------------------------------------------------------
@@ -493,6 +529,8 @@ pub struct SandboxDetails {
     pub name: String,
     pub status: String,
     pub cpus: Option<String>,
+    /// Percentage of all guest cores currently busy, sampled over one second.
+    pub cpu_usage: Option<u8>,
     pub mem_used: Option<String>,
     pub mem_total: Option<String>,
     pub root_used: Option<String>,
@@ -507,6 +545,7 @@ pub struct SandboxDetails {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct VmMetrics {
     cpus: Option<String>,
+    cpu_usage: Option<u8>,
     mem_total_kib: Option<u64>,
     mem_free_kib: Option<u64>,
     root_total_kib: Option<u64>,
@@ -558,6 +597,10 @@ fn parse_vm_metrics(output: &str) -> VmMetrics {
             if value.parse::<u64>().is_ok() {
                 metrics.cpus = Some(value.to_owned());
             }
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("cpu_usage=") {
+            metrics.cpu_usage = value.parse::<u8>().ok().filter(|usage| *usage <= 100);
             continue;
         }
         if let Some(value) = line.strip_prefix("mem_total_kb=") {
@@ -647,8 +690,8 @@ pub fn fetch_sandboxes() -> Result<Vec<Sandbox>, String> {
 }
 
 /// Read details for one sandbox. `sbx inspect` supplies the configured
-/// values; a command inside the microVM supplies the live numbers. This is
-/// called only when the user opens Info, so the values are always fresh.
+/// values; a command inside the microVM supplies the live numbers. Info calls
+/// this on a worker when the dialog opens and every ten seconds after that.
 pub fn inspect_sandbox(sandbox: &Sandbox) -> SandboxDetails {
     let mut details = SandboxDetails {
         name: sandbox.name.clone(),
@@ -666,6 +709,7 @@ pub fn inspect_sandbox(sandbox: &Sandbox) -> SandboxDetails {
         Ok(output) if output.status.success() => {
             let metrics = parse_vm_metrics(&String::from_utf8_lossy(&output.stdout));
             override_if_present(&mut details.cpus, metrics.cpus);
+            details.cpu_usage = metrics.cpu_usage;
 
             let (mem_used, mem_total) =
                 VmMetrics::usage(metrics.mem_total_kib, metrics.mem_free_kib);
@@ -832,6 +876,33 @@ struct Creation {
     result: Receiver<io::Result<std::process::Output>>,
 }
 
+/// One in-flight metrics collection for an open Info dialog. The guest-side
+/// CPU sample sleeps for a second, so this runs off the event-loop thread.
+struct InfoRefresh {
+    name: String,
+    result: Receiver<SandboxDetails>,
+}
+
+/// An action waiting for the user to confirm it in the modal dialog. Only the
+/// name is captured: the state is checked again when the user confirms, so a
+/// periodic status refresh cannot start a stopped sandbox by accident.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PendingAction {
+    Start(String),
+    Stop(String),
+    Remove(String),
+}
+
+impl PendingAction {
+    fn verb(&self) -> &'static str {
+        match self {
+            Self::Start(_) => "Start",
+            Self::Stop(_) => "Stop",
+            Self::Remove(_) => "Remove",
+        }
+    }
+}
+
 pub struct App {
     sandboxes: Vec<Sandbox>,
     /// The row the list cursor is on. Hover and arrow keys move it; the
@@ -843,6 +914,8 @@ pub struct App {
     modals: ModalState,
     form: Form,
     info: Option<SandboxDetails>,
+    info_refresh: Option<InfoRefresh>,
+    pending_action: Option<PendingAction>,
     pending_external: Option<PendingCommand>,
     creation: Option<Creation>,
     spinner_index: usize,
@@ -850,6 +923,9 @@ pub struct App {
     toasts: ToasterState<'static>,
     started: Instant,
     should_quit: bool,
+    /// In tests, `perform_action` records instead of running `sbx`.
+    #[cfg(test)]
+    confirmed_for_test: Option<PendingAction>,
 }
 
 impl App {
@@ -863,6 +939,8 @@ impl App {
             modals: ModalState::default(),
             form: Form::new(),
             info: None,
+            info_refresh: None,
+            pending_action: None,
             pending_external: None,
             creation: None,
             spinner_index: 0,
@@ -870,6 +948,8 @@ impl App {
             toasts: ToasterState::new(),
             started: Instant::now(),
             should_quit: false,
+            #[cfg(test)]
+            confirmed_for_test: None,
         };
         app.refresh_sandboxes();
         app
@@ -890,9 +970,16 @@ impl App {
             Mode::Wizard
         } else if self.modals.is_open(INFO_DIALOG) {
             Mode::Info
+        } else if self.modals.is_open(CONFIRM_DIALOG) {
+            Mode::Confirm
         } else {
             Mode::Normal
         }
+    }
+
+    /// The action the confirmation dialog is asking about, if one is open.
+    pub fn pending_action(&self) -> Option<&PendingAction> {
+        self.pending_action.as_ref()
     }
 
     pub fn focus_ref(&self) -> &FocusState {
@@ -1035,6 +1122,73 @@ impl App {
         }
     }
 
+    /// Pick up a finished metrics collection without blocking the event loop.
+    /// Results for a sandbox that is no longer shown are dropped.
+    pub fn poll_info(&mut self) {
+        let Some(refresh) = self.info_refresh.as_ref() else {
+            return;
+        };
+        let result = match refresh.result.try_recv() {
+            Ok(details) => Some(details),
+            Err(mpsc::TryRecvError::Disconnected) => None,
+            Err(mpsc::TryRecvError::Empty) => return,
+        };
+        let name = refresh.name.clone();
+        self.info_refresh = None;
+        if self.info.as_ref().is_some_and(|info| info.name == name) {
+            match result {
+                Some(details) => self.info = Some(details),
+                None => {
+                    if let Some(info) = self.info.as_mut() {
+                        push_error(info, "Metrics worker stopped.".to_owned());
+                    }
+                }
+            }
+        }
+    }
+
+    /// True while the Info dialog is waiting for its metrics worker.
+    pub fn is_refreshing_info(&self) -> bool {
+        self.info_refresh.is_some()
+    }
+
+    /// Start a new metrics collection for the sandbox shown in Info. Called
+    /// when the dialog opens and on the ten-second ticker; overlapping runs are
+    /// skipped so slow guest commands cannot pile up.
+    pub fn refresh_info(&mut self) {
+        if self.is_refreshing_info() {
+            return;
+        }
+        let Some(name) = self.info.as_ref().map(|info| info.name.clone()) else {
+            return;
+        };
+        let Some(sandbox) = self
+            .sandboxes
+            .iter()
+            .find(|sandbox| sandbox.name == name)
+            .cloned()
+        else {
+            return;
+        };
+        self.start_info_refresh(&sandbox);
+    }
+
+    fn start_info_refresh(&mut self, sandbox: &Sandbox) {
+        if self.is_refreshing_info() {
+            return;
+        }
+        let name = sandbox.name.clone();
+        let sandbox = sandbox.clone();
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = sender.send(inspect_sandbox(&sandbox));
+        });
+        self.info_refresh = Some(InfoRefresh {
+            name,
+            result: receiver,
+        });
+    }
+
     pub fn sandboxes(&self) -> &[Sandbox] {
         &self.sandboxes
     }
@@ -1150,7 +1304,15 @@ impl App {
             return;
         };
         self.select_named(name);
-        self.info = Some(inspect_sandbox(&sandbox));
+        // Show the known values immediately; the guest-side metrics arrive on
+        // a worker so the one-second CPU sample never freezes the TUI.
+        self.info = Some(SandboxDetails {
+            name: sandbox.name.clone(),
+            status: sandbox.status.clone(),
+            ..SandboxDetails::default()
+        });
+        self.info_refresh = None;
+        self.start_info_refresh(&sandbox);
         let _ = self.modals.open(INFO_DIALOG, &mut self.focus);
     }
 
@@ -1162,7 +1324,10 @@ impl App {
         {
             self.modals.close(&mut self.focus);
         }
+        // Invalidate any worker still running: its result must not land in a
+        // dialog opened later for a different sandbox.
         self.info = None;
+        self.info_refresh = None;
     }
 
     pub fn toggle_selected(&mut self) {
@@ -1170,9 +1335,9 @@ impl App {
             return;
         };
         if self.is_running(&name) {
-            self.stop_sandbox(&name);
+            self.request_action(PendingAction::Stop(name));
         } else {
-            self.start_sandbox(&name);
+            self.request_action(PendingAction::Start(name));
         }
     }
 
@@ -1181,7 +1346,7 @@ impl App {
         if let Some(name) = self.selected_name()
             && !self.is_running(&name)
         {
-            self.start_sandbox(&name);
+            self.request_action(PendingAction::Start(name));
         }
     }
 
@@ -1190,18 +1355,87 @@ impl App {
         if let Some(name) = self.selected_name()
             && self.is_running(&name)
         {
-            self.stop_sandbox(&name);
+            self.request_action(PendingAction::Stop(name));
         }
     }
 
-    pub fn start_sandbox(&mut self, name: &str) {
+    /// Start/Stop/Remove never run directly from a button or shortcut: they
+    /// first park here so the user can confirm the action in a dialog.
+    fn request_action(&mut self, action: PendingAction) {
+        if self.mode() != Mode::Normal {
+            return;
+        }
+        self.pending_action = Some(action);
+        let _ = self.modals.open(CONFIRM_DIALOG, &mut self.focus);
+    }
+
+    /// The dialog's Cancel button or Escape.
+    pub fn cancel_action(&mut self) {
+        let Some(action) = self.pending_action.take() else {
+            return;
+        };
+        if self
+            .modals
+            .top()
+            .is_some_and(|id| id.as_str() == CONFIRM_DIALOG)
+        {
+            self.modals.close(&mut self.focus);
+        }
+        self.notify_info(format!("{} cancelled.", action.verb()), None);
+    }
+
+    /// The dialog's confirm button. Recheck the sandbox state before acting:
+    /// the five-second status ticker may have changed it while the dialog was
+    /// open, and a removed sandbox should never be acted on.
+    pub fn confirm_action(&mut self) {
+        let Some(action) = self.pending_action.take() else {
+            return;
+        };
+        if self
+            .modals
+            .top()
+            .is_some_and(|id| id.as_str() == CONFIRM_DIALOG)
+        {
+            self.modals.close(&mut self.focus);
+        }
+        let should_be_running = matches!(&action, PendingAction::Stop(_));
+        let still_valid = match &action {
+            PendingAction::Start(name) | PendingAction::Stop(name) => {
+                self.has_sandbox(name) && self.is_running(name) == should_be_running
+            }
+            PendingAction::Remove(name) => self.has_sandbox(name),
+        };
+        if still_valid {
+            self.perform_action(action);
+        } else {
+            self.notify_info("Sandbox state changed; action cancelled.", None);
+        }
+    }
+
+    fn perform_action(&mut self, action: PendingAction) {
+        #[cfg(test)]
+        {
+            self.confirmed_for_test = Some(action);
+            return;
+        }
+        #[cfg(not(test))]
+        match action {
+            PendingAction::Start(name) => self.start_sandbox(&name),
+            PendingAction::Stop(name) => self.stop_sandbox(&name),
+            PendingAction::Remove(name) => self.remove_sandbox(&name),
+        }
+    }
+
+    #[cfg_attr(test, allow(dead_code))]
+    fn start_sandbox(&mut self, name: &str) {
         // `sbx` has no standalone start verb; exec starts a stopped sandbox.
         // A no-op command leaves it running after the command exits.
         let command = PendingCommand::new("sbx", &["exec", name, "--", "true"]);
         self.run_sbx(command, format!("Sandbox '{name}' started."));
     }
 
-    pub fn stop_sandbox(&mut self, name: &str) {
+    #[cfg_attr(test, allow(dead_code))]
+    fn stop_sandbox(&mut self, name: &str) {
         let command = PendingCommand::new("sbx", &["stop", name]);
         self.run_sbx(command, format!("Sandbox '{name}' stopped."));
     }
@@ -1219,11 +1453,12 @@ impl App {
 
     pub fn remove_selected(&mut self) {
         if let Some(name) = self.selected_name() {
-            self.remove_sandbox(&name);
+            self.request_action(PendingAction::Remove(name));
         }
     }
 
-    pub fn remove_sandbox(&mut self, name: &str) {
+    #[cfg_attr(test, allow(dead_code))]
+    fn remove_sandbox(&mut self, name: &str) {
         // The TUI has no TTY to answer sbx's confirmation prompt, so removal
         // is explicit and non-interactive here.
         let command = PendingCommand::new("sbx", &["remove", name, "--force"]);
@@ -1243,6 +1478,10 @@ impl App {
             .iter()
             .find(|sandbox| sandbox.name == name)
             .is_some_and(Sandbox::is_running)
+    }
+
+    fn has_sandbox(&self, name: &str) -> bool {
+        self.sandboxes.iter().any(|sandbox| sandbox.name == name)
     }
 
     fn start_creation(&mut self, pending: PendingCommand, name: &str) {
@@ -1293,6 +1532,7 @@ impl App {
         self.list_offset = self.list_offset.min(last);
     }
 
+    #[cfg_attr(test, allow(dead_code))]
     fn run_sbx(&mut self, pending: PendingCommand, success: String) {
         self.handle_sbx_result(pending.run(), success);
     }
@@ -1381,6 +1621,23 @@ impl App {
     pub fn show_info_for_test(&mut self, details: SandboxDetails) {
         self.info = Some(details);
         let _ = self.modals.open(INFO_DIALOG, &mut self.focus);
+    }
+
+    /// Queue a fake metrics result so `poll_info` can be tested without
+    /// running `sbx exec` inside the guest.
+    pub fn queue_info_result_for_test(&mut self, name: &str, details: SandboxDetails) {
+        let (sender, receiver) = mpsc::channel();
+        sender.send(details).expect("test channel");
+        self.info_refresh = Some(InfoRefresh {
+            name: name.to_owned(),
+            result: receiver,
+        });
+    }
+
+    /// The action a confirmed dialog handed to `perform_action`. Tests use
+    /// this instead of letting the app shell out to `sbx`.
+    pub fn take_confirmed_for_test(&mut self) -> Option<PendingAction> {
+        self.confirmed_for_test.take()
     }
 }
 
@@ -1623,6 +1880,7 @@ mod tests {
     fn vm_metrics_parser_reads_guest_report() {
         let output = concat!(
             "cpu=4\n",
+            "cpu_usage=37\n",
             "mem_total_kb=2097152\n",
             "mem_free_kb=1048576\n",
             "Filesystem     1K-blocks      Used Available Use% Mounted on\n",
@@ -1633,6 +1891,7 @@ mod tests {
             parse_vm_metrics(output),
             VmMetrics {
                 cpus: Some("4".to_owned()),
+                cpu_usage: Some(37),
                 mem_total_kib: Some(2097152),
                 mem_free_kib: Some(1048576),
                 root_total_kib: Some(4194304),
@@ -1686,6 +1945,144 @@ mod tests {
         let metrics = parse_vm_metrics(output);
         assert_eq!(metrics.docker_total_kib, Some(100));
         assert_eq!(metrics.mem_free_kib, None);
+    }
+
+    #[test]
+    fn cpu_usage_is_parsed_only_when_in_range() {
+        let metrics = parse_vm_metrics("cpu=4\ncpu_usage=101\n");
+        assert_eq!(metrics.cpus.as_deref(), Some("4"));
+        assert_eq!(metrics.cpu_usage, None);
+
+        let metrics = parse_vm_metrics("cpu_usage=100\n");
+        assert_eq!(metrics.cpu_usage, Some(100));
+    }
+
+    #[test]
+    fn destructive_actions_wait_for_confirmation() {
+        let mut app = App::with_sandbox_statuses(&[("alpha", "stopped")]);
+        app.start_selected();
+        assert!(matches!(app.mode(), Mode::Confirm));
+        assert!(app.modals_ref().is_open(CONFIRM_DIALOG));
+        assert_eq!(
+            app.pending_action(),
+            Some(&PendingAction::Start("alpha".to_owned()))
+        );
+        assert!(app.take_confirmed_for_test().is_none());
+
+        app.cancel_action();
+        assert!(matches!(app.mode(), Mode::Normal));
+        assert!(app.pending_action().is_none());
+        assert_eq!(app.message(), "Start cancelled.");
+
+        app.toggle_selected();
+        assert_eq!(
+            app.pending_action(),
+            Some(&PendingAction::Start("alpha".to_owned()))
+        );
+        app.confirm_action();
+        assert!(matches!(app.mode(), Mode::Normal));
+        assert_eq!(
+            app.take_confirmed_for_test(),
+            Some(PendingAction::Start("alpha".to_owned()))
+        );
+    }
+
+    #[test]
+    fn stop_and_remove_request_the_right_action() {
+        let mut running = App::with_sandboxes(&["alpha"]);
+        running.stop_selected();
+        assert_eq!(
+            running.pending_action(),
+            Some(&PendingAction::Stop("alpha".to_owned()))
+        );
+        running.confirm_action();
+        assert_eq!(
+            running.take_confirmed_for_test(),
+            Some(PendingAction::Stop("alpha".to_owned()))
+        );
+
+        let mut stopped = App::with_sandbox_statuses(&[("beta", "stopped")]);
+        stopped.remove_selected();
+        assert_eq!(
+            stopped.pending_action(),
+            Some(&PendingAction::Remove("beta".to_owned()))
+        );
+        stopped.confirm_action();
+        assert_eq!(
+            stopped.take_confirmed_for_test(),
+            Some(PendingAction::Remove("beta".to_owned()))
+        );
+    }
+
+    #[test]
+    fn confirmation_cancels_when_status_changed_or_sandbox_vanished() {
+        let mut app = App::with_sandbox_statuses(&[("alpha", "stopped")]);
+        app.start_selected();
+        app.apply_statuses(vec![Sandbox::new("alpha".to_owned(), "running".to_owned())]);
+        app.confirm_action();
+        assert!(app.take_confirmed_for_test().is_none());
+        assert!(app.message().contains("Sandbox state changed"));
+
+        app.remove_selected();
+        app.apply_statuses(vec![]);
+        app.confirm_action();
+        assert!(app.take_confirmed_for_test().is_none());
+    }
+
+    #[test]
+    fn global_shortcuts_are_inert_while_confirming() {
+        let mut app = App::with_sandbox_statuses(&[("alpha", "stopped")]);
+        app.remove_selected();
+        for key in [KeyCode::Char('q'), KeyCode::Char('s'), KeyCode::Char('d')] {
+            app.handle_global_key(KeyEvent::new(key, KeyModifiers::NONE));
+        }
+        assert!(!app.should_quit());
+        assert!(matches!(app.mode(), Mode::Confirm));
+        assert_eq!(
+            app.pending_action(),
+            Some(&PendingAction::Remove("alpha".to_owned()))
+        );
+
+        // Ctrl+C is still the escape hatch.
+        app.handle_global_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.should_quit());
+    }
+
+    #[test]
+    fn polling_info_installs_fresh_metrics_and_drops_stale_ones() {
+        let mut app = App::with_sandboxes(&["alpha"]);
+        app.info = Some(SandboxDetails {
+            name: "alpha".to_owned(),
+            status: "running".to_owned(),
+            ..SandboxDetails::default()
+        });
+        app.queue_info_result_for_test(
+            "alpha",
+            SandboxDetails {
+                name: "alpha".to_owned(),
+                status: "running".to_owned(),
+                cpus: Some("4".to_owned()),
+                cpu_usage: Some(42),
+                ..SandboxDetails::default()
+            },
+        );
+        assert!(app.is_refreshing_info());
+        app.poll_info();
+        assert!(!app.is_refreshing_info());
+        assert_eq!(app.info().unwrap().cpus.as_deref(), Some("4"));
+        assert_eq!(app.info().unwrap().cpu_usage, Some(42));
+
+        app.queue_info_result_for_test(
+            "other",
+            SandboxDetails {
+                name: "other".to_owned(),
+                cpus: Some("99".to_owned()),
+                ..SandboxDetails::default()
+            },
+        );
+        app.poll_info();
+        assert_eq!(app.info().unwrap().name, "alpha");
+        assert_eq!(app.info().unwrap().cpus.as_deref(), Some("4"));
     }
 
     #[test]

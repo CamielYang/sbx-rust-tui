@@ -23,6 +23,8 @@ The screen uses ratcn components and its Tokyo Night theme:
   sandbox, **Stop** (orange), **Exec shell** (gray), **Remove** (red), and
   **Info** (blue) for a running one. Every button changes shade on focus and
   hover, and actions that do not apply are hidden rather than disabled,
+- a confirmation dialog for **Start**, **Stop**, and **Remove**, so none of
+  those commands runs until you explicitly confirm it,
 - a footer with the latest message and keyboard shortcuts,
 - transient toast notifications in the top-right corner.
 
@@ -33,20 +35,25 @@ Sandbox names and statuses come from `sbx ls --format json` at startup and are
 refreshed after create/start/stop/remove, when `R` is pressed, and every five
 seconds. Older `sbx` versions without structured output fall back to `sbx ls -q`
 and show status `unknown`. If `sbx` is missing or fails, the last known list is
-kept and the error appears in the footer and as a toast.
+kept and the error appears in the footer and as a toast. While the Info dialog
+is open, its live metrics are re-collected every ten seconds on a worker thread.
 
 ### Actions
 
 | Button | Command | Behaviour |
 | --- | --- | --- |
-| Start / Stop | `sbx exec {name} -- true` / `sbx stop {name}` | `sbx` has no standalone `start` verb, so a stopped sandbox is started with a no-op `exec`. |
+| Start / Stop | `sbx exec {name} -- true` / `sbx stop {name}` | Opens a confirmation dialog first. `sbx` has no standalone `start` verb, so a stopped sandbox is started with a no-op `exec`. |
 | Exec shell | `sbx exec -it {name} bash` | Suspends the TUI, opens an external terminal, and restores the TUI when it closes. On Linux it tries common terminal emulators in order; on macOS it uses Terminal.app; on Windows a new `cmd` window. If no terminal opens, the command is shown in the footer. |
-| Info | `sbx inspect {name} --format json` then `sbx exec {name} -- sh -c …` | Opens a themed dialog with status, CPU count, and memory/root/Docker usage as `used / total`. Guest metrics are collected only when Info opens; `sbx inspect` supplies fallback values. Missing values render as `—`; errors appear as a note. |
-| Remove | `sbx remove {name} --force` | Removes immediately; `--force` avoids `sbx`'s confirmation prompt, which the TUI cannot answer. |
+| Info | `sbx inspect {name} --format json` then `sbx exec {name} -- sh -c …` | Opens a themed dialog with status, CPU as `{cores} ({usage}%)`, and memory/root/Docker usage as `used / total`. Guest metrics are collected when Info opens and every ten seconds while it stays open; `sbx inspect` supplies fallback values. Missing values render as `—`; errors appear as a note. |
+| Remove | `sbx remove {name} --force` | Opens a confirmation dialog first; `--force` avoids `sbx`'s own prompt, which the TUI cannot answer. |
 
-Info is only available for running sandboxes. It closes with `Esc` or the
-**Close** button. Clicking a sandbox row (or pressing Enter on it) focuses that
-sandbox for the Actions pane; hovering merely moves the list cursor.
+Start, Stop, and Remove all ask **Confirm start / stop / remove** before doing
+anything. **Cancel** or `Esc` dismisses the dialog and leaves the sandbox
+untouched; confirming while the sandbox's status has changed in the meantime is
+also cancelled. Info is only available for running sandboxes. It closes with
+`Esc` or the **Close** button. Clicking a sandbox row (or pressing
+Enter on it) focuses that sandbox for the Actions pane; hovering merely moves
+the list cursor.
 
 ## Keys
 
@@ -58,13 +65,14 @@ sandbox for the Actions pane; hovering merely moves the list cursor.
 | `Enter` / `Space` | Activate the focused button, or focus the cursor row for the Actions pane |
 | `N` | Open the create dialog |
 | `R` | Refresh the sandbox list |
-| `S` | Start a stopped sandbox, or stop a running one |
-| `X` / `D` / `I` | Exec / Remove / Inspect the selected sandbox (`X` and `I` need a running sandbox) |
+| `S` | Ask to start a stopped sandbox, or stop a running one |
+| `X` / `D` / `I` | Exec / ask to remove / Inspect the selected sandbox (`X` and `I` need a running sandbox) |
 | `q` / `Esc` / `Ctrl+C` | Quit (terminal is always restored) |
 
 Global shortcuts apply only on the dashboard; while a dialog is open, keys are
-handled by its controls. `Ctrl+C` remains available everywhere, including while
-a sandbox is being created.
+handled by its controls. In the confirmation dialog, `Esc` cancels the pending
+action. `Ctrl+C` remains available everywhere, including while a sandbox is
+being created.
 
 ## Create dialog
 
@@ -133,10 +141,13 @@ default is `4g` and host-memory warnings are skipped.
 
 ## Notes
 
-- Starting, stopping, removal, and inspection still run synchronously, so the
-  UI is briefly blocked while those `sbx` commands run.
-- Live resource values come from `nproc`, `/proc/meminfo`, and `df -k` inside
-  the microVM via `sbx exec {name} -- sh -c …`. Used space is
-  `total - available` (`MemAvailable` when present).
-- The five-second ticker only re-reads `sbx ls`, so leaving Info open does not
-  add background load.
+- Start, Stop, and Remove run only after confirmation, and those `sbx` commands
+  still run synchronously, so the UI is briefly blocked while they execute.
+- Live resource values come from `nproc`, two `/proc/stat` samples one second
+  apart, `/proc/meminfo`, and `df -k` inside the microVM via
+  `sbx exec {name} -- sh -c …`. CPU usage is the percentage of all cores busy
+  over that one-second sample. Used space is `total - available`
+  (`MemAvailable` when present).
+- The five-second ticker only re-reads `sbx ls`. The ten-second Info ticker
+  re-collects guest metrics on a worker thread; results for a dialog that was
+  closed in the meantime are discarded.

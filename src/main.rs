@@ -4,7 +4,7 @@ mod ui;
 use std::io::{self, Stdout};
 use std::time::{Duration, Instant};
 
-use app::{App, STATUS_REFRESH_INTERVAL};
+use app::{App, INFO_REFRESH_INTERVAL, Mode, STATUS_REFRESH_INTERVAL};
 use crossterm::{
     cursor,
     event::{
@@ -86,11 +86,13 @@ fn run(terminal: &mut Tui, app: &mut App) -> Result<()> {
     let mut input_modes = Some(InputModes::new().mouse().paste().enable()?);
 
     let mut next_status_check = Instant::now() + STATUS_REFRESH_INTERVAL;
+    let mut next_info_check = Instant::now() + INFO_REFRESH_INTERVAL;
 
     while !app.should_quit() {
-        // Collect a finished create (if any) before drawing, then advance the
-        // spinner so the themed progress bar shows a new frame each iteration.
+        // Collect finished worker results before drawing so the UI shows fresh
+        // data on the very next frame.
         app.poll_creation();
+        app.poll_info();
         app.tick();
         draw(terminal, app, &mut ratcn, &theme)?;
 
@@ -118,6 +120,15 @@ fn run(terminal: &mut Tui, app: &mut App) -> Result<()> {
                 app.refresh_statuses();
             }
             next_status_check = now + STATUS_REFRESH_INTERVAL;
+        }
+
+        if now >= next_info_check {
+            // Only an open Info dialog needs live metrics. The guest-side CPU
+            // sample runs on a worker, so this never blocks the event loop.
+            if app.mode() == Mode::Info {
+                app.refresh_info();
+            }
+            next_info_check = now + INFO_REFRESH_INTERVAL;
         }
 
         if event::poll(Duration::from_millis(100))? {
