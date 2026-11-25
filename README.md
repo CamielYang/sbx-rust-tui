@@ -104,7 +104,7 @@ once using ratcn inputs and an agent select:
 
 ```sh
 DOCKER_SANDBOXES_ROOT_SIZE=40g DOCKER_SANDBOXES_DOCKER_SIZE=20g \
-  sbx create --name demo-tui opencode --cpus 2 --memory 3584m
+  sbx create --name sandbox-name opencode --cpus 2 --memory 3584m
 ```
 
 Size variables are passed only to the child process via `Command::env`, so the

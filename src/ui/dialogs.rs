@@ -45,7 +45,7 @@ pub(super) fn create_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
     let name = text_input(
         FormField::Name,
         |state: &App| state.form().name(),
-        "demo-tui",
+        "sandbox-name",
         creating,
         form.invalid(FormField::Name),
     );

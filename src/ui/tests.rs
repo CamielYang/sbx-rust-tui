@@ -214,7 +214,7 @@ fn renders_create_dialog() {
     let screen = render(&app);
     assert!(screen.contains("New sandbox"));
     assert!(screen.contains("Create sandbox"));
-    assert!(screen.contains("demo-tui"));
+    assert!(screen.contains("sandbox-name"));
     assert!(screen.contains("opencode"));
     assert!(!screen.contains("Ready to create"));
 

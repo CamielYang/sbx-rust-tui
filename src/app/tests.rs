@@ -10,7 +10,7 @@ use serde_json::Value;
 
 #[test]
 fn name_validation() {
-    assert!(validate_name("demo-tui").is_ok());
+    assert!(validate_name("sandbox-name").is_ok());
     assert!(validate_name("a").is_err());
     assert!(validate_name("default").is_err());
     assert!(validate_name(".bad").is_err());
@@ -40,7 +40,7 @@ fn memory_validation() {
 #[test]
 fn form_builds_expected_command() {
     let mut form = Form::new();
-    form.name = InputState::new("demo-tui");
+    form.name = InputState::new("sandbox-name");
     form.root_size = InputState::new("40");
     form.docker_size = InputState::new("20");
     form.cpus = InputState::new("2");
@@ -48,7 +48,7 @@ fn form_builds_expected_command() {
 
     assert_eq!(
         form.preview(),
-        "DOCKER_SANDBOXES_ROOT_SIZE=40g DOCKER_SANDBOXES_DOCKER_SIZE=20g sbx create --name demo-tui opencode --cpus 2 --memory 4g"
+        "DOCKER_SANDBOXES_ROOT_SIZE=40g DOCKER_SANDBOXES_DOCKER_SIZE=20g sbx create --name sandbox-name opencode --cpus 2 --memory 4g"
     );
     assert!(form.first_error().is_none());
 }
