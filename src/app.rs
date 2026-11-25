@@ -1,5 +1,6 @@
 use std::io;
 use std::process::Command as ProcessCommand;
+use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
@@ -19,6 +20,28 @@ pub const AGENTS: &[&str] = &[
 ];
 
 pub const GRID_COLUMNS: usize = 3;
+
+/// How often the dashboard re-reads `sbx ls` to keep running-state dots fresh.
+/// VM metrics are deliberately not part of this tick; they are only collected
+/// when the user opens the Info modal.
+pub const STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Collected with `sbx exec <name> -- sh -c <script>`. Plain text keeps the
+/// command portable across the minimal shells used inside the microVM.
+const VM_METRICS_SCRIPT: &str = r#"
+printf 'cpu=%s\n' "$(nproc 2>/dev/null || printf 0)"
+awk '
+  /^MemTotal:/     { total = $2 }
+  /^MemFree:/      { free = $2 }
+  /^MemAvailable:/ { avail = $2 }
+  END {
+    if (total != "") print "mem_total_kb=" total
+    if (avail != "") print "mem_free_kb=" avail
+    else if (free != "") print "mem_free_kb=" free
+  }
+' /proc/meminfo
+df -k
+"#;
 
 /// An action bound to a rectangle on screen by the renderer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -600,17 +623,116 @@ impl Sandbox {
     }
 }
 
-/// Resource details shown in the info modal. Every value is optional because
-/// `sbx inspect` output varies between local/cloud sandboxes and versions.
+/// Resource details shown in the info modal. Values come from live commands
+/// run inside the microVM; the structured `sbx inspect` output is only a
+/// fallback for fields the guest cannot report.
 #[derive(Clone, Debug, Default)]
 pub struct SandboxDetails {
     pub name: String,
     pub status: String,
     pub cpus: Option<String>,
-    pub memory: Option<String>,
-    pub root_size: Option<String>,
-    pub docker_size: Option<String>,
+    pub mem_used: Option<String>,
+    pub mem_total: Option<String>,
+    pub root_used: Option<String>,
+    pub root_total: Option<String>,
+    pub docker_used: Option<String>,
+    pub docker_total: Option<String>,
     pub error: Option<String>,
+}
+
+/// Raw KiB values read from the guest. Used space is derived as
+/// total - available so every resource fits on one `used / total` row.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct VmMetrics {
+    cpus: Option<String>,
+    mem_total_kib: Option<u64>,
+    mem_free_kib: Option<u64>,
+    root_total_kib: Option<u64>,
+    root_free_kib: Option<u64>,
+    docker_total_kib: Option<u64>,
+    docker_free_kib: Option<u64>,
+}
+
+impl VmMetrics {
+    /// Format a resource as (used, total). Used is only known when the guest
+    /// reported both numbers; a configured total alone is still useful.
+    fn usage(total: Option<u64>, free: Option<u64>) -> (Option<String>, Option<String>) {
+        let used = total
+            .zip(free)
+            .map(|(total, free)| format_size(total.saturating_sub(free)));
+        (used, total.map(format_size))
+    }
+}
+
+/// Convert the KiB values reported by `/proc/meminfo` and `df -k` into a
+/// compact human-readable size.
+fn format_size(kib: u64) -> String {
+    const MIB: u64 = 1024;
+    const GIB: u64 = 1024 * MIB;
+    const TIB: u64 = 1024 * GIB;
+
+    if kib >= TIB {
+        format!("{:.1} TiB", kib as f64 / TIB as f64)
+    } else if kib >= GIB {
+        format!("{:.1} GiB", kib as f64 / GIB as f64)
+    } else if kib >= MIB {
+        format!("{:.1} MiB", kib as f64 / MIB as f64)
+    } else {
+        format!("{kib} KiB")
+    }
+}
+
+/// Parse the key/value report plus `df -k` table emitted by
+/// [`VM_METRICS_SCRIPT`]. The docker mount is preferred at its standard
+/// location, with any other mount containing "docker" as a fallback.
+fn parse_vm_metrics(output: &str) -> VmMetrics {
+    let mut metrics = VmMetrics::default();
+    // (total_kib, free_kib, is_standard_location)
+    let mut docker_mount: Option<(u64, u64, bool)> = None;
+
+    for line in output.lines() {
+        let line = line.trim();
+        if let Some(value) = line.strip_prefix("cpu=") {
+            if value.parse::<u64>().is_ok() {
+                metrics.cpus = Some(value.to_owned());
+            }
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("mem_total_kb=") {
+            metrics.mem_total_kib = value.parse::<u64>().ok();
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("mem_free_kb=") {
+            metrics.mem_free_kib = value.parse::<u64>().ok();
+            continue;
+        }
+
+        // df rows: Filesystem 1K-blocks Used Available Use% Mounted on
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 6 || fields[0] == "Filesystem" {
+            continue;
+        }
+        let (Ok(total), Ok(free)) = (fields[1].parse::<u64>(), fields[3].parse::<u64>()) else {
+            continue;
+        };
+        let mount = fields[5..].join(" ");
+        if mount == "/" {
+            metrics.root_total_kib = Some(total);
+            metrics.root_free_kib = Some(free);
+        } else if mount == "/var/lib/docker" {
+            docker_mount = Some((total, free, true));
+        } else if mount.contains("docker")
+            && docker_mount.as_ref().is_none_or(|(_, _, exact)| !*exact)
+        {
+            docker_mount = Some((total, free, false));
+        }
+    }
+
+    if let Some((total, free, _)) = docker_mount {
+        metrics.docker_total_kib = Some(total);
+        metrics.docker_free_kib = Some(free);
+    }
+    metrics
 }
 
 /// Fetch sandboxes with their status from `sbx ls --format json`. Falls back
@@ -662,7 +784,9 @@ pub fn fetch_sandboxes() -> Result<Vec<Sandbox>, String> {
         .collect())
 }
 
-/// Read resource details for one sandbox from `sbx inspect --format json`.
+/// Read details for one sandbox. `sbx inspect` supplies the configured
+/// values; a command inside the microVM supplies the live numbers. This is
+/// called only when the user opens Info, so the values are always fresh.
 pub fn inspect_sandbox(sandbox: &Sandbox) -> SandboxDetails {
     let mut details = SandboxDetails {
         name: sandbox.name.clone(),
@@ -670,41 +794,101 @@ pub fn inspect_sandbox(sandbox: &Sandbox) -> SandboxDetails {
         ..SandboxDetails::default()
     };
 
+    load_inspect_details(sandbox, &mut details);
+
+    let output = ProcessCommand::new("sbx")
+        .args(["exec", &sandbox.name, "--", "sh", "-c", VM_METRICS_SCRIPT])
+        .output();
+
+    match output {
+        Ok(output) if output.status.success() => {
+            let metrics = parse_vm_metrics(&String::from_utf8_lossy(&output.stdout));
+            override_if_present(&mut details.cpus, metrics.cpus);
+
+            let (mem_used, mem_total) =
+                VmMetrics::usage(metrics.mem_total_kib, metrics.mem_free_kib);
+            override_if_present(&mut details.mem_used, mem_used);
+            override_if_present(&mut details.mem_total, mem_total);
+
+            let (root_used, root_total) =
+                VmMetrics::usage(metrics.root_total_kib, metrics.root_free_kib);
+            override_if_present(&mut details.root_used, root_used);
+            override_if_present(&mut details.root_total, root_total);
+
+            let (docker_used, docker_total) =
+                VmMetrics::usage(metrics.docker_total_kib, metrics.docker_free_kib);
+            override_if_present(&mut details.docker_used, docker_used);
+            override_if_present(&mut details.docker_total, docker_total);
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            push_error(
+                &mut details,
+                if stderr.is_empty() {
+                    format!(
+                        "Could not read live metrics (sbx exec exited with {}).",
+                        output.status
+                    )
+                } else {
+                    format!("Could not read live metrics: {stderr}")
+                },
+            );
+        }
+        Err(error) => {
+            push_error(
+                &mut details,
+                format!("Could not read live metrics: {error}"),
+            );
+        }
+    }
+
+    details
+}
+
+/// Fill in configured values from `sbx inspect --format json`. These are used
+/// as fallbacks when the guest cannot report a field.
+fn load_inspect_details(sandbox: &Sandbox, details: &mut SandboxDetails) {
     let output = match ProcessCommand::new("sbx")
         .args(["inspect", &sandbox.name, "--format", "json"])
         .output()
     {
         Ok(output) => output,
         Err(error) => {
-            details.error = Some(format!("Could not inspect sandbox: {error}"));
-            return details;
+            push_error(details, format!("Could not inspect sandbox: {error}"));
+            return;
         }
     };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        details.error = Some(if stderr.is_empty() {
-            format!("sbx inspect exited with {}.", output.status)
-        } else {
-            stderr
-        });
-        return details;
+        push_error(
+            details,
+            if stderr.is_empty() {
+                format!("sbx inspect exited with {}.", output.status)
+            } else {
+                stderr
+            },
+        );
+        return;
     }
 
     let value: Value = match serde_json::from_slice(&output.stdout) {
         Ok(value) => value,
         Err(error) => {
-            details.error = Some(format!("Could not parse sbx inspect output: {error}"));
-            return details;
+            push_error(
+                details,
+                format!("Could not parse sbx inspect output: {error}"),
+            );
+            return;
         }
     };
 
     details.cpus = json_text(&value, &["cpus", "cpu", "cpu_count", "vcpus"]);
-    details.memory = json_text(
+    details.mem_total = json_text(
         &value,
         &["memory", "memoryMiB", "memory_mib", "memory_mb", "mem"],
     );
-    details.root_size = json_text(
+    details.root_total = json_text(
         &value,
         &[
             "root_size",
@@ -714,7 +898,7 @@ pub fn inspect_sandbox(sandbox: &Sandbox) -> SandboxDetails {
             "rootFilesystemSize",
         ],
     );
-    details.docker_size = json_text(
+    details.docker_total = json_text(
         &value,
         &[
             "docker_size",
@@ -724,7 +908,22 @@ pub fn inspect_sandbox(sandbox: &Sandbox) -> SandboxDetails {
             "dindVolumeSize",
         ],
     );
-    details
+}
+
+fn override_if_present(target: &mut Option<String>, value: Option<String>) {
+    if value.is_some() {
+        *target = value;
+    }
+}
+
+fn push_error(details: &mut SandboxDetails, error: String) {
+    match &mut details.error {
+        Some(existing) => {
+            existing.push_str("; ");
+            existing.push_str(&error);
+        }
+        None => details.error = Some(error),
+    }
 }
 
 /// Find a key near the root of a JSON document. `sbx inspect` nests the same
@@ -1096,9 +1295,27 @@ impl App {
     fn refresh_sandboxes(&mut self) {
         self.message.clear();
         match fetch_sandboxes() {
-            Ok(sandboxes) => self.sandboxes = sandboxes,
+            Ok(sandboxes) => self.apply_statuses(sandboxes),
             Err(error) => self.message = format!("Could not list sandboxes: {error}"),
         }
+    }
+
+    /// Periodic tick: keep the running-state dots (and an open Info modal's
+    /// status line) current without clearing the footer message or re-running
+    /// the more expensive in-guest metrics commands.
+    pub fn refresh_statuses(&mut self) {
+        if let Ok(sandboxes) = fetch_sandboxes() {
+            self.apply_statuses(sandboxes);
+        }
+    }
+
+    fn apply_statuses(&mut self, sandboxes: Vec<Sandbox>) {
+        if let Some(info) = self.info.as_mut()
+            && let Some(fresh) = sandboxes.iter().find(|sandbox| sandbox.name == info.name)
+        {
+            info.status = fresh.status.clone();
+        }
+        self.sandboxes = sandboxes;
         self.clamp_navigation();
     }
 
@@ -1229,5 +1446,99 @@ mod tests {
         assert_eq!(json_text(&value, &["rootfs"]).as_deref(), Some("20g"));
         assert_eq!(json_text(&value, &["docker"]).as_deref(), Some("10g"));
         assert_eq!(json_text(&value, &["missing"]), None);
+    }
+
+    #[test]
+    fn size_formatting_uses_binary_units() {
+        assert_eq!(format_size(512), "512 KiB");
+        assert_eq!(format_size(1024), "1.0 MiB");
+        assert_eq!(format_size(1024 * 1024), "1.0 GiB");
+        assert_eq!(format_size(1024 * 1024 * 1024), "1.0 TiB");
+    }
+
+    #[test]
+    fn vm_metrics_parser_reads_guest_report() {
+        let output = concat!(
+            "cpu=4\n",
+            "mem_total_kb=2097152\n",
+            "mem_free_kb=1048576\n",
+            "Filesystem     1K-blocks      Used Available Use% Mounted on\n",
+            "overlay         4194304    524288   3670016  13% /\n",
+            "/dev/vde       2097152    524288   1048576  25% /var/lib/docker\n",
+        );
+        assert_eq!(
+            parse_vm_metrics(output),
+            VmMetrics {
+                cpus: Some("4".to_owned()),
+                mem_total_kib: Some(2097152),
+                mem_free_kib: Some(1048576),
+                root_total_kib: Some(4194304),
+                root_free_kib: Some(3670016),
+                docker_total_kib: Some(2097152),
+                docker_free_kib: Some(1048576),
+            }
+        );
+    }
+
+    #[test]
+    fn usage_derives_used_from_total_and_free() {
+        assert_eq!(
+            VmMetrics::usage(Some(2 * 1024 * 1024), Some(1024 * 1024)),
+            (Some("1.0 GiB".to_owned()), Some("2.0 GiB".to_owned()))
+        );
+        assert_eq!(
+            VmMetrics::usage(Some(4 * 1024 * 1024), Some(1024 * 1024)),
+            (Some("3.0 GiB".to_owned()), Some("4.0 GiB".to_owned()))
+        );
+        assert_eq!(
+            VmMetrics::usage(Some(1024), None),
+            (None, Some("1.0 MiB".to_owned()))
+        );
+        assert_eq!(VmMetrics::usage(None, None), (None, None));
+    }
+
+    #[test]
+    fn vm_metrics_prefers_standard_docker_mount() {
+        let output = concat!(
+            "cpu=8\n",
+            "Filesystem 1K-blocks Used Available Use% Mounted on\n",
+            "/dev/a 100 0 100 0% /var/lib/docker-data\n",
+            "/dev/b 200 0 200 0% /var/lib/docker\n",
+            "/dev/c 300 0 300 0% /\n",
+        );
+        let metrics = parse_vm_metrics(output);
+        assert_eq!(metrics.cpus.as_deref(), Some("8"));
+        assert_eq!(metrics.docker_total_kib, Some(200));
+        assert_eq!(metrics.docker_free_kib, Some(200));
+        assert_eq!(metrics.root_total_kib, Some(300));
+    }
+
+    #[test]
+    fn vm_metrics_falls_back_to_any_docker_mount() {
+        let output = concat!(
+            "Filesystem 1K-blocks Used Available Use% Mounted on\n",
+            "/dev/a 100 0 100 0% /mnt/custom-docker\n",
+            "/dev/c 300 0 300 0% /\n",
+        );
+        let metrics = parse_vm_metrics(output);
+        assert_eq!(metrics.docker_total_kib, Some(100));
+        assert_eq!(metrics.mem_free_kib, None);
+    }
+
+    #[test]
+    fn status_tick_updates_modal_without_clearing_message() {
+        let mut app = App::with_sandbox_statuses(&[("alpha", "stopped")]);
+        app.set_message("keep me");
+        app.info = Some(SandboxDetails {
+            name: "alpha".to_owned(),
+            status: "stopped".to_owned(),
+            ..SandboxDetails::default()
+        });
+
+        app.apply_statuses(vec![Sandbox::new("alpha".to_owned(), "running".to_owned())]);
+
+        assert!(app.sandboxes()[0].is_running());
+        assert_eq!(app.info().unwrap().status, "running");
+        assert_eq!(app.message(), "keep me");
     }
 }

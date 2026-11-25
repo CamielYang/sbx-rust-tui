@@ -2,9 +2,9 @@ mod app;
 mod ui;
 
 use std::io::{self, Stdout};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use app::App;
+use app::{App, STATUS_REFRESH_INTERVAL};
 use crossterm::{
     cursor,
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind},
@@ -67,6 +67,8 @@ fn install_panic_hook() {
 }
 
 fn run(terminal: &mut Tui, app: &mut App) -> Result<()> {
+    let mut next_status_check = Instant::now() + STATUS_REFRESH_INTERVAL;
+
     while !app.should_quit() {
         terminal.draw(|frame| ui::render(frame, app))?;
 
@@ -80,6 +82,14 @@ fn run(terminal: &mut Tui, app: &mut App) -> Result<()> {
                 Ok(()) => app.set_message("External terminal closed."),
                 Err(error) => app.set_message(format!("Could not open terminal: {error}")),
             }
+        }
+
+        // Refresh the running-state dots periodically. Input polling is only
+        // 100 ms, so this fires close to the five-second mark.
+        let now = Instant::now();
+        if now >= next_status_check {
+            app.refresh_statuses();
+            next_status_check = now + STATUS_REFRESH_INTERVAL;
         }
 
         if event::poll(Duration::from_millis(100))? {

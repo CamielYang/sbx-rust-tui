@@ -380,9 +380,21 @@ fn info_lines(details: &SandboxDetails) -> Vec<Line<'static>> {
                 .add_modifier(Modifier::BOLD),
         )),
         resource_line("CPU", details.cpus.as_deref()),
-        resource_line("Memory", details.memory.as_deref()),
-        resource_line("Root size", details.root_size.as_deref()),
-        resource_line("Docker size", details.docker_size.as_deref()),
+        usage_line(
+            "Memory",
+            details.mem_used.as_deref(),
+            details.mem_total.as_deref(),
+        ),
+        usage_line(
+            "Root size",
+            details.root_used.as_deref(),
+            details.root_total.as_deref(),
+        ),
+        usage_line(
+            "Docker size",
+            details.docker_used.as_deref(),
+            details.docker_total.as_deref(),
+        ),
     ];
 
     if let Some(error) = &details.error {
@@ -397,6 +409,20 @@ fn info_lines(details: &SandboxDetails) -> Vec<Line<'static>> {
 }
 
 fn resource_line(label: &str, value: Option<&str>) -> Line<'static> {
+    labeled_line(label, value.unwrap_or("n/a").to_owned())
+}
+
+fn usage_line(label: &str, used: Option<&str>, total: Option<&str>) -> Line<'static> {
+    let value = match (used, total) {
+        (Some(used), Some(total)) => format!("{used} used / {total} total"),
+        (Some(used), None) => format!("{used} used / n/a total"),
+        (None, Some(total)) => format!("n/a used / {total} total"),
+        (None, None) => "n/a".to_owned(),
+    };
+    labeled_line(label, value)
+}
+
+fn labeled_line(label: &str, value: String) -> Line<'static> {
     let name = format!("  {label}:");
     let padding = " ".repeat(15usize.saturating_sub(name.len()));
     Line::from(vec![
@@ -404,10 +430,7 @@ fn resource_line(label: &str, value: Option<&str>) -> Line<'static> {
             format!("{name}{padding}"),
             Style::default().fg(Color::DarkGray),
         ),
-        Span::styled(
-            value.unwrap_or("n/a").to_owned(),
-            Style::default().fg(Color::White),
-        ),
+        Span::styled(value, Style::default().fg(Color::White)),
     ])
 }
 
@@ -678,6 +701,26 @@ mod tests {
 
         click(&mut app, ClickAction::CloseInfo);
         assert!(matches!(app.mode(), Mode::Normal));
+    }
+
+    #[test]
+    fn usage_line_formats_used_and_total() {
+        let line = usage_line("Memory", Some("1.0 GiB"), Some("2.0 GiB"));
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.to_string())
+            .collect();
+        assert!(text.contains("Memory:"));
+        assert!(text.contains("1.0 GiB used / 2.0 GiB total"));
+
+        let partial = usage_line("Root size", None, Some("40g"));
+        let text: String = partial
+            .spans
+            .iter()
+            .map(|span| span.content.to_string())
+            .collect();
+        assert!(text.contains("n/a used / 40g total"));
     }
 
     #[test]

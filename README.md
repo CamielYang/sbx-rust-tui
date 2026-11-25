@@ -21,9 +21,11 @@ opens the create wizard as a modal over the dashboard.
 
 Sandbox names and statuses come from `sbx ls --format json` at startup and are
 refreshed after a sandbox is created, stopped, or removed (or when `r` is
-pressed). Older `sbx` versions without structured output fall back to
-`sbx ls -q` and show status `unknown`. If `sbx` is missing or fails, the grid is
-empty and the error is shown in the footer.
+pressed). The running-state dots are also re-read every five seconds, so a
+sandbox that starts or stops outside the TUI is reflected without any input.
+Older `sbx` versions without structured output fall back to `sbx ls -q` and
+show status `unknown`. If `sbx` is missing or fails, the grid keeps the last
+known statuses and the error is shown in the footer for an explicit refresh.
 
 ### Sandbox buttons
 
@@ -32,7 +34,7 @@ empty and the error is shown in the footer.
 | Stop | `sbx stop {name}` | Stops the sandbox, then refreshes the grid. |
 | Exec | `sbx exec -it {name} bash` | Leaves the TUI, opens an external terminal, runs the shell there, and restores the TUI when that terminal closes. On Linux it tries common terminal emulators in order (`x-terminal-emulator`, `gnome-terminal`, `konsole`, `xfce4-terminal`, `mate-terminal`, `kitty`, `alacritty`, `xterm`); on macOS it uses Terminal.app; on Windows a new `cmd` window. If no terminal can be opened, the footer shows the command to run manually. |
 | Remove | `sbx remove {name} --force` | Removes the sandbox, then refreshes the grid. `--force` is added because the TUI has no TTY for `sbx`'s confirmation prompt; removal is immediate and cannot be undone. |
-| Info | `sbx inspect {name} --format json` | Opens a modal with name, status, and resource details (CPU, memory, root size, Docker size). Values not reported by `sbx` appear as `n/a`; inspection errors appear as a note in the modal. |
+| Info | `sbx inspect {name} --format json` then `sbx exec {name} -- sh -c …` | Opens a modal with name, status, CPU count, and one row each for memory, root filesystem, and Docker filesystem, shown as `used / total`. The in-guest commands run only when Info is opened, so the numbers are fresh; `sbx inspect` supplies fallback totals when the guest cannot report them. Missing values appear as `n/a`, and command errors appear as a note in the modal. |
 
 The Info modal closes with `Esc`, `q`, `i`, `Enter`, or its **[X]** button.
 
@@ -143,6 +145,11 @@ The two size variables are passed only to the child process via
 - Sandbox creation, stopping, removal, and inspection run synchronously; the UI
   is blocked while those `sbx` commands run. Moving execution to a worker thread
   with a channel would fix that.
-- Resource values in the info modal are read from `sbx inspect --format json`.
-  Which fields are present depends on the sandbox type and `sbx` version, so
-  missing values are shown as `n/a`.
+- Live resource values in the info modal come from `nproc`, `/proc/meminfo`, and
+  `df -k` inside the microVM via `sbx exec {name} -- sh -c …`. Used space is
+  `total - available` (memory uses `MemAvailable` when present). Because
+  `sbx exec` starts a stopped sandbox, opening Info on one may bring it up
+  briefly. Values the guest does not report fall back to
+  `sbx inspect --format json`, and anything still missing is shown as `n/a`.
+- The five-second ticker only re-reads `sbx ls`; it never re-runs the in-guest
+  metrics commands, so leaving Info open does not add background load.
