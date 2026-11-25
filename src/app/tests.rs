@@ -63,6 +63,35 @@ fn form_builds_expected_commands() {
 }
 
 #[test]
+fn workspace_mode_controls_the_clone_flag_and_path_position() {
+    let mut form = Form::new();
+    form.name = InputState::new("sandbox-name");
+    form.cpus = InputState::new("2");
+    form.memory = InputState::new("4g");
+    form.workspace_path = "/work/repo".to_owned();
+    form.set_add_workspace(true);
+
+    assert_eq!(form.workspace_mode(), WorkspaceMode::Mount);
+    assert_eq!(
+        form.create_command().preview(),
+        "sbx create --name sandbox-name opencode --cpus 2 --memory 4g /work/repo"
+    );
+
+    form.set_workspace_mode(1);
+    assert_eq!(form.workspace_mode(), WorkspaceMode::Clone);
+    assert_eq!(
+        form.create_command().preview(),
+        "sbx create --name sandbox-name opencode --cpus 2 --memory 4g --clone /work/repo"
+    );
+
+    form.set_add_workspace(false);
+    assert_eq!(
+        form.create_command().preview(),
+        "sbx create --name sandbox-name opencode --cpus 2 --memory 4g"
+    );
+}
+
+#[test]
 fn selecting_an_agent_closes_the_picker() {
     let mut app = App::with_sandboxes(&[]);
     app.open_wizard();

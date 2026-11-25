@@ -1,9 +1,10 @@
 use super::*;
-use crate::app::Mode;
 use crate::app::test_support::TempWorkspaceDir;
+use crate::app::{Mode, WorkspaceMode};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{Terminal, backend::TestBackend};
 use ratcn::runtime::{EventResult, Ratcn};
+use std::path::Path;
 
 fn new_runtime() -> Ratcn<App, Msg> {
     Ratcn::new()
@@ -307,6 +308,32 @@ fn workspace_checkbox_reveals_the_path_and_change_button() {
     assert!(app.modals_ref().is_open(WORKSPACE_DIALOG));
     assert!(matches!(app.mode(), Mode::Workspace));
     assert_eq!(app.form().workspace_path(), path);
+}
+
+#[test]
+fn workspace_mode_cycles_to_clone_and_adds_the_flag_before_the_path() {
+    let mut app = App::with_sandboxes(&[]);
+    app.open_wizard();
+    app.set_add_workspace(true);
+    app.set_workspace_path_for_test(Path::new("/work/repo"));
+    let mut ratcn = new_runtime();
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    draw(&mut terminal, &app, &mut ratcn);
+
+    let (x, y) = position_from_bottom(&screen(&terminal), "mount").expect("mode cycle");
+    let emitted = click(&mut terminal, &mut app, &mut ratcn, x, y);
+    assert!(
+        emitted
+            .iter()
+            .any(|message| matches!(message, Msg::WorkspaceModeChanged(1)))
+    );
+    assert_eq!(app.form().workspace_mode(), WorkspaceMode::Clone);
+    assert!(
+        app.form()
+            .create_command()
+            .preview()
+            .ends_with("--clone /work/repo")
+    );
 }
 
 #[test]

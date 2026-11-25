@@ -254,7 +254,7 @@ fn renders_create_dialog() {
 }
 
 #[test]
-fn workspace_option_reveals_path_and_change_button_when_enabled() {
+fn workspace_option_reveals_mode_path_and_change_button_when_enabled() {
     let mut app = App::with_sandboxes(&[]);
     app.open_wizard();
     let path = app.form().workspace_path().to_owned();
@@ -262,11 +262,15 @@ fn workspace_option_reveals_path_and_change_button_when_enabled() {
     assert!(screen.contains("Add workspace"));
     assert!(!screen.contains(&path));
     assert!(!screen.contains("Change"));
+    assert!(!screen.contains("Mode"));
 
     app.set_add_workspace(true);
     let screen = render(&app);
     assert!(screen.contains(&path));
     assert!(screen.contains("Change"));
+    assert!(screen.contains("Mode"));
+    assert!(screen.contains("mount"));
+    assert!(!screen.contains("clone"));
 }
 
 #[test]

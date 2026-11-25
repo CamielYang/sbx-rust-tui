@@ -22,7 +22,7 @@ mod workspace;
 
 pub use self::actions::PendingAction;
 pub use self::commands::PendingCommand;
-pub use self::form::{Form, FormField};
+pub use self::form::{Form, FormField, WorkspaceMode};
 pub use self::ports::{PortField, PortForm, PortMapping, PortsView};
 pub use self::sandbox::{Sandbox, SandboxDetails, fetch_sandboxes, inspect_sandbox};
 pub use self::workspace::{WORKSPACE_PARENT, WorkspacePicker};
@@ -203,6 +203,10 @@ impl App {
 
     pub fn set_add_workspace(&mut self, enabled: bool) {
         self.form.set_add_workspace(enabled);
+    }
+
+    pub fn set_workspace_mode(&mut self, index: usize) {
+        self.form.set_workspace_mode(index);
     }
 
     pub fn info(&self) -> Option<&SandboxDetails> {

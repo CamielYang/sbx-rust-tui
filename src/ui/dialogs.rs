@@ -6,7 +6,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratcn::color::{away_from, dim};
 use ratcn::{
-    Button, ButtonStyle, ButtonVariant, Checkbox, Dialog, InputState, List, ListItem, Select, Theme,
+    Button, ButtonStyle, ButtonVariant, Checkbox, Cycle, Dialog, InputState, List, ListItem,
+    Select, Theme,
 };
 
 use super::dashboard::{REMOVE_RED, START_GREEN, STOP_ORANGE, action_style};
@@ -14,7 +15,7 @@ use super::widgets::{detail_line, field_row, input, join_usage};
 use super::*;
 use crate::app::{
     AGENTS, FormField, PendingAction, PortField, PortMapping, SandboxDetails, WORKSPACE_PARENT,
-    WorkspacePicker,
+    WorkspaceMode, WorkspacePicker,
 };
 
 /// The confirmation dialog's focused Cancel sets the look for every dismiss
@@ -40,8 +41,8 @@ fn cancel_button<M>(label: impl Into<String>, on_press: impl Fn() -> M + 'static
 // --- create dialog ----------------------------------------------------------
 
 /// Six inputs, the workspace toggle, the status, and the creation message.
-/// The workspace path row is added only while the toggle is on; every logical
-/// row gets a blank row after it so the controls breathe.
+/// The workspace mode and path rows are added only while the toggle is on;
+/// every logical row gets a blank row after it so the controls breathe.
 const CREATE_BASE_ROWS: usize = 9;
 
 pub(super) fn create_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
@@ -117,6 +118,12 @@ pub(super) fn create_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
         .on_press(|| Msg::ChangeWorkspace)
         .disabled(creating);
     let change_width = change_workspace.width();
+    let mode = Cycle::new(WorkspaceMode::OPTIONS)
+        .selection(
+            |state: &App| state.form().workspace_mode().index(),
+            Msg::WorkspaceModeChanged,
+        )
+        .disabled(creating);
 
     // The untouched empty name is not an error yet; the Create button still
     // validates it when pressed.
@@ -150,7 +157,7 @@ pub(super) fn create_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
     } else {
         String::new()
     };
-    let path_rows = usize::from(workspace_enabled);
+    let path_rows = 2 * usize::from(workspace_enabled);
     let content_rows = CREATE_BASE_ROWS + path_rows;
     let status_index = 7 + path_rows;
 
@@ -172,12 +179,13 @@ pub(super) fn create_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
             field_row(ctx, row(6), "Add workspace", add_workspace, theme);
 
             if workspace_enabled {
+                field_row(ctx, row(7), "Mode", mode, theme);
                 let columns = Layout::horizontal([
                     Constraint::Length(20),
                     Constraint::Min(0),
                     Constraint::Length(change_width),
                 ])
-                .split(row(7));
+                .split(row(8));
                 ctx.paint_widget(
                     Paragraph::new(Line::from(Span::styled(
                         " Workspace",
