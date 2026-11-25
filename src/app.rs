@@ -1085,6 +1085,9 @@ pub struct App {
     /// In tests, publishing records the command instead of running `sbx`.
     #[cfg(test)]
     published_for_test: Option<String>,
+    /// In tests, unpublishing records the command instead of running `sbx`.
+    #[cfg(test)]
+    unpublished_for_test: Option<String>,
 }
 
 impl App {
@@ -1113,6 +1116,8 @@ impl App {
             confirmed_for_test: None,
             #[cfg(test)]
             published_for_test: None,
+            #[cfg(test)]
+            unpublished_for_test: None,
         };
         app.refresh_sandboxes();
         app
@@ -1629,6 +1634,53 @@ impl App {
         }
     }
 
+    /// The unpublish button on a table row: run
+    /// `sbx port unpublish <name> <host>:<sandbox>` and refresh the table.
+    pub fn unpublish_port(&mut self, host: u16, sandbox: u16) {
+        if self.mode() != Mode::Ports {
+            return;
+        }
+        let Some(name) = self.ports.as_ref().map(|view| view.name.clone()) else {
+            return;
+        };
+        let pending = PendingCommand::new(
+            "sbx",
+            &["port", "unpublish", &name, &format!("{host}:{sandbox}")],
+        );
+
+        #[cfg(test)]
+        {
+            self.unpublished_for_test = Some(pending.preview());
+        }
+
+        #[cfg(not(test))]
+        match pending.run() {
+            Ok(output) if output.status.success() => {
+                self.refresh_ports();
+                self.notify_success(format!("Unpublished {host}:{sandbox} for '{name}'."), None);
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let detail = stderr
+                    .lines()
+                    .find(|line| !line.trim().is_empty())
+                    .unwrap_or("sbx port unpublish failed")
+                    .to_owned();
+                if let Some(view) = self.ports.as_mut() {
+                    view.error = Some(detail.clone());
+                }
+                self.notify_error("Could not unpublish port", detail);
+            }
+            Err(error) => {
+                let detail = error.to_string();
+                if let Some(view) = self.ports.as_mut() {
+                    view.error = Some(detail.clone());
+                }
+                self.notify_error("Could not unpublish port", detail);
+            }
+        }
+    }
+
     pub fn toggle_selected(&mut self) {
         let Some(name) = self.selected_name() else {
             return;
@@ -1935,6 +1987,11 @@ impl App {
     /// The command the ports dialog handed to `perform_action`-style test hook.
     pub fn take_published_for_test(&mut self) -> Option<String> {
         self.published_for_test.take()
+    }
+
+    /// The command a row's unpublish button handed to the test hook.
+    pub fn take_unpublished_for_test(&mut self) -> Option<String> {
+        self.unpublished_for_test.take()
     }
 
     /// Queue a fake metrics result so `poll_info` can be tested without
@@ -2519,6 +2576,26 @@ mod tests {
         assert_eq!(
             app.take_published_for_test().as_deref(),
             Some("sbx port publish alpha 9000:3001")
+        );
+    }
+
+    #[test]
+    fn unpublish_port_records_the_command() {
+        let mut app = App::with_sandboxes(&["alpha"]);
+        app.show_ports_for_test(
+            "alpha",
+            vec![PortMapping {
+                host_port: 60002,
+                sandbox_port: 3000,
+                protocol: "tcp4".to_owned(),
+                host_ip: None,
+            }],
+        );
+
+        app.unpublish_port(60002, 3000);
+        assert_eq!(
+            app.take_unpublished_for_test().as_deref(),
+            Some("sbx port unpublish alpha 60002:3000")
         );
     }
 

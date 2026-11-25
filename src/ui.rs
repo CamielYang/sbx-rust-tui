@@ -46,6 +46,7 @@ pub enum Msg {
     ClosePorts,
     PortsChanged(PortField, InputState),
     PublishPort,
+    UnpublishPort(u16, u16),
     ConfirmAction,
     CancelAction,
     CloseInfo,
@@ -93,6 +94,7 @@ pub fn apply(app: &mut App, msg: Msg) {
         Msg::ClosePorts => app.close_ports(),
         Msg::PortsChanged(field, state) => app.set_port_state(field, state),
         Msg::PublishPort => app.publish_port(),
+        Msg::UnpublishPort(host, sandbox) => app.unpublish_port(host, sandbox),
         Msg::ConfirmAction => app.confirm_action(),
         Msg::CancelAction => app.cancel_action(),
         Msg::CloseInfo => app.close_info(),
@@ -808,7 +810,8 @@ fn ports_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
         app.port_invalid(PortField::Sandbox),
     );
     let add_button = Button::new("+ Add port").on_press(|| Msg::PublishPort);
-    let button_width = add_button.width();
+    let add_width = add_button.width();
+    let unpublish_width = Button::<Msg>::new("Unpublish").width();
 
     Dialog::new()
         .title(format!("Published ports · {name}"))
@@ -819,84 +822,96 @@ fn ports_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
             let rows = Layout::vertical([
                 Constraint::Length(1),
                 Constraint::Length(1),
-                Constraint::Length(1),
                 Constraint::Min(0),
                 Constraint::Length(1),
             ])
             .split(ctx.area());
 
-            // The button leads the dialog; the hint sits beside it.
-            let top =
-                Layout::horizontal([Constraint::Length(button_width + 2), Constraint::Min(0)])
-                    .split(rows[0]);
-            ctx.component("ports-add", add_button, top[0]);
-            ctx.paint_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    "  Host port : Sandbox port",
-                    Style::default().fg(theme.muted_foreground),
-                ))),
-                top[1],
-            );
-
-            let fields = Layout::horizontal([
-                Constraint::Length(11),
+            // Button, both inputs, and their short labels share one row.
+            let add = Layout::horizontal([
+                Constraint::Length(add_width),
+                Constraint::Length(6),
                 Constraint::Length(12),
-                Constraint::Length(2),
-                Constraint::Length(14),
+                Constraint::Length(6),
                 Constraint::Length(12),
                 Constraint::Min(0),
             ])
-            .split(rows[1]);
-            ctx.paint_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    " Host port",
-                    Style::default().fg(theme.muted_foreground),
-                ))),
-                fields[0],
-            );
-            ctx.component("ports-host", host, fields[1]);
-            ctx.paint_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    " Sandbox port",
-                    Style::default().fg(theme.muted_foreground),
-                ))),
-                fields[3],
-            );
-            ctx.component("ports-sandbox", sandbox, fields[4]);
+            .split(rows[0]);
+            ctx.component("ports-add", add_button, add[0]);
+            for (area, label) in [(add[1], " host "), (add[3], " port ")] {
+                ctx.paint_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        label,
+                        Style::default().fg(theme.muted_foreground),
+                    ))),
+                    area,
+                );
+            }
+            ctx.component("ports-host", host, add[2]);
+            ctx.component("ports-sandbox", sandbox, add[4]);
 
-            ctx.paint_widget(Paragraph::new(port_header_line(&theme)), rows[2]);
+            // One blank row separates the inputs from the table, which gets
+            // its own border so the rows read as a distinct group.
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.border))
+                .style(Style::default().bg(theme.surface));
+            let inner = block.inner(rows[2]);
+            ctx.paint_widget(block, rows[2]);
 
-            let table = rows[3];
-            let visible = table.height as usize;
+            if inner.height == 0 || inner.width == 0 {
+                return;
+            }
+            let columns = Layout::horizontal([
+                Constraint::Length(16),
+                Constraint::Length(18),
+                Constraint::Min(0),
+            ])
+            .split(inner);
+            ctx.paint_widget(Paragraph::new(port_header_line(&theme)), inner);
+
+            let visible = (inner.height - 1) as usize;
             if ports.is_empty() {
                 ctx.paint_widget(
                     Paragraph::new(Line::from(Span::styled(
-                        "  No published ports.",
+                        " No published ports.",
                         Style::default().fg(theme.muted_foreground),
                     ))),
-                    table,
+                    Rect::new(inner.x, inner.y + 1, inner.width, 1),
                 );
             } else {
                 for (index, mapping) in ports.iter().take(visible).enumerate() {
-                    let row = Rect::new(table.x, table.y + index as u16, table.width, 1);
+                    let row = Rect::new(inner.x, inner.y + 1 + index as u16, inner.width, 1);
                     ctx.paint_widget(Paragraph::new(port_row_line(mapping, &theme)), row);
+
+                    let width = unpublish_width.min(columns[2].width);
+                    let button_area =
+                        Rect::new(columns[2].x + columns[2].width - width, row.y, width, 1);
+                    let (host_port, sandbox_port) = (mapping.host_port, mapping.sandbox_port);
+                    ctx.component(
+                        format!("ports-unpublish-{index}"),
+                        Button::new("Unpublish")
+                            .ghost()
+                            .on_press(move || Msg::UnpublishPort(host_port, sandbox_port)),
+                        button_area,
+                    );
                 }
             }
 
             let status = match error {
-                Some(error) => {
-                    Span::styled(format!(" {error}"), Style::default().fg(theme.destructive))
-                }
-                None if ports.len() > visible => Span::styled(
+                Some(error) => Some(Span::styled(
+                    format!(" {error}"),
+                    Style::default().fg(theme.destructive),
+                )),
+                None if ports.len() > visible => Some(Span::styled(
                     format!("  Showing {visible} of {} published ports", ports.len()),
                     Style::default().fg(theme.muted_foreground),
-                ),
-                None => Span::styled(
-                    format!("  sbx port publish {name} <host>:<sandbox>"),
-                    Style::default().fg(theme.muted_foreground),
-                ),
+                )),
+                None => None,
             };
-            ctx.paint_widget(Paragraph::new(Line::from(status)), rows[4]);
+            if let Some(status) = status {
+                ctx.paint_widget(Paragraph::new(Line::from(status)), rows[3]);
+            }
         })
         .action(
             "close",
@@ -911,7 +926,7 @@ fn port_header_line(theme: &Theme) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!(" {:<16}", "HOST PORT"), style),
         Span::styled(format!("{:<18}", "SANDBOX PORT"), style),
-        Span::styled("PROTOCOL", style),
+        Span::styled("ACTION", style),
     ])
 }
 
@@ -924,10 +939,6 @@ fn port_row_line(mapping: &PortMapping, theme: &Theme) -> Line<'static> {
         Span::styled(
             format!("{:<18}", mapping.sandbox_port),
             Style::default().fg(theme.foreground),
-        ),
-        Span::styled(
-            mapping.protocol.clone(),
-            Style::default().fg(theme.muted_foreground),
         ),
     ])
 }
@@ -1095,12 +1106,15 @@ mod tests {
         let screen = render(&app);
         assert!(screen.contains("Published ports"));
         assert!(screen.contains("+ Add port"));
+        assert!(screen.contains(" host "));
+        assert!(screen.contains(" port "));
         assert!(screen.contains("HOST PORT"));
         assert!(screen.contains("SANDBOX PORT"));
-        assert!(screen.contains("PROTOCOL"));
+        assert!(!screen.contains("PROTOCOL"));
         assert!(screen.contains("60002"));
         assert!(screen.contains("60003"));
-        assert!(screen.contains("tcp4"));
+        assert!(screen.contains("Unpublish"));
+        assert!(!screen.contains("sbx port publish"));
     }
 
     #[test]
@@ -1384,6 +1398,36 @@ mod interaction_tests {
         assert_eq!(
             app.take_published_for_test().as_deref(),
             Some("sbx port publish alpha 8080:3000")
+        );
+    }
+
+    #[test]
+    fn unpublish_button_records_the_row_mapping() {
+        let mut app = App::with_sandboxes(&["alpha"]);
+        app.show_ports_for_test(
+            "alpha",
+            vec![PortMapping {
+                host_port: 60002,
+                sandbox_port: 3000,
+                protocol: "tcp4".to_owned(),
+                host_ip: None,
+            }],
+        );
+        let mut ratcn = new_runtime();
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        draw(&mut terminal, &app, &mut ratcn);
+
+        let (x, y) = position_from_bottom(&screen(&terminal), "Unpublish")
+            .expect("unpublish button is on screen");
+        let emitted = click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+        assert!(
+            emitted
+                .iter()
+                .any(|message| matches!(message, Msg::UnpublishPort(60002, 3000)))
+        );
+        assert_eq!(
+            app.take_unpublished_for_test().as_deref(),
+            Some("sbx port unpublish alpha 60002:3000")
         );
     }
 
