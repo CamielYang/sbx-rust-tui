@@ -1,4 +1,4 @@
-# Docker Sandbox Rust
+# Sbx Rust TUI
 
 > [!NOTE]
 > Demo placeholder — add your video or GIF here later. Replace this note with:
@@ -8,6 +8,10 @@
 > ```
 
 A simple terminal UI (TUI) for easily managing Docker Sandboxes and publishing ports, without leaving your terminal.
+
+## Why?
+
+The built-in Docker Sandboxes TUI covers the basics, but leaves out finer configuration—pushing you back into CLI flags or extra steps when setting resources or managing ports. `sbx-rust-tui` gives you hands-on control over local sandbox creation, workspaces, and port publishing right from your terminal.
 
 ## Features
 
