@@ -833,11 +833,83 @@ fn secrets_start_empty_until_the_cli_is_read() {
 }
 
 #[test]
-fn secret_buttons_are_read_only_for_now() {
+fn set_secret_is_still_read_only() {
     let mut app = App::with_secrets(&[("global", "github")]);
     app.set_secret();
     assert!(app.message().contains("Set secret"));
+}
 
-    app.delete_secret("github");
-    assert!(app.message().contains("github"));
+#[test]
+fn deleting_a_global_secret_waits_for_confirmation() {
+    let mut app = App::with_secrets(&[("global", "github")]);
+    app.delete_secret("github", "global");
+    assert_eq!(
+        app.pending_action(),
+        Some(&PendingAction::DeleteSecret(
+            "github".to_owned(),
+            "global".to_owned()
+        ))
+    );
+    assert!(matches!(app.mode(), Mode::Confirm));
+    assert!(app.modals_ref().is_open(CONFIRM_DIALOG));
+    assert!(app.take_deleted_for_test().is_none());
+
+    app.confirm_action();
+    assert_eq!(
+        app.take_confirmed_for_test(),
+        Some(PendingAction::DeleteSecret(
+            "github".to_owned(),
+            "global".to_owned()
+        ))
+    );
+    assert_eq!(
+        app.take_deleted_for_test().as_deref(),
+        Some("sbx secrets rm github -f")
+    );
+}
+
+#[test]
+fn deleting_a_scoped_secret_targets_its_sandbox() {
+    let mut app = App::with_secrets(&[("test", "nebius")]);
+    app.delete_secret("nebius", "test");
+    assert_eq!(
+        app.pending_action(),
+        Some(&PendingAction::DeleteSecret(
+            "nebius".to_owned(),
+            "test".to_owned()
+        ))
+    );
+    app.confirm_action();
+    assert_eq!(
+        app.take_deleted_for_test().as_deref(),
+        Some("sbx secrets rm nebius --sandbox test -f")
+    );
+}
+
+#[test]
+fn cancelling_a_secret_delete_runs_nothing() {
+    let mut app = App::with_secrets(&[("global", "github")]);
+    app.delete_secret("github", "global");
+    app.cancel_action();
+
+    assert!(app.pending_action().is_none());
+    assert!(matches!(app.mode(), Mode::Normal));
+    assert_eq!(app.message(), "Delete secret cancelled.");
+    assert!(app.take_deleted_for_test().is_none());
+    assert!(app.take_confirmed_for_test().is_none());
+}
+
+#[test]
+fn secret_delete_is_skipped_when_the_row_is_gone() {
+    let mut app = App::with_secrets(&[("test", "nebius")]);
+    app.delete_secret("nebius", "test");
+    app.set_secrets_for_test(Vec::new());
+    app.confirm_action();
+
+    assert!(app.take_deleted_for_test().is_none());
+    assert!(app.take_confirmed_for_test().is_none());
+    assert_eq!(
+        app.message(),
+        "Secret is no longer listed; action cancelled."
+    );
 }

@@ -273,20 +273,53 @@ fn position_from_bottom(screen: &str, needle: &str) -> Option<(u16, u16)> {
 
 #[test]
 fn secret_row_delete_and_toolbar_refresh_are_clickable() {
-    let mut app = App::with_secrets(&[("global", "github")]);
+    let mut app = App::with_secrets(&[("global", "github"), ("test", "nebius")]);
     app.select_tab(DashboardTab::Secrets);
     let mut ratcn = new_runtime();
     let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
     draw(&mut terminal, &app, &mut ratcn);
 
-    let (x, y) = position_from_bottom(&screen(&terminal), "Delete").expect("delete on screen");
-    let emitted = click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
-    assert!(
-        emitted
-            .iter()
-            .any(|message| matches!(message, Msg::DeleteSecret(name) if name == "github"))
-    );
-    assert!(app.message().contains("github"));
+    let deletes: Vec<(u16, u16)> = screen(&terminal)
+        .lines()
+        .enumerate()
+        .filter_map(|(y, line)| {
+            line.rfind("Delete")
+                .map(|byte| (line[..byte].chars().count() as u16, y as u16))
+        })
+        .collect();
+    assert_eq!(deletes.len(), 2);
+    for ((x, y), (name, scope, command)) in deletes.into_iter().zip([
+        ("github", "global", "sbx secrets rm github -f"),
+        ("nebius", "test", "sbx secrets rm nebius --sandbox test -f"),
+    ]) {
+        let emitted = click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+        assert!(emitted.iter().any(|message| matches!(
+            message,
+            Msg::DeleteSecret(actual_name, actual_scope)
+                if actual_name == name && actual_scope == scope
+        )));
+        assert!(app.modals_ref().is_open(CONFIRM_DIALOG));
+        assert_eq!(
+            app.pending_action(),
+            Some(&PendingAction::DeleteSecret(
+                name.to_owned(),
+                scope.to_owned()
+            ))
+        );
+        assert!(app.take_deleted_for_test().is_none());
+
+        draw(&mut terminal, &app, &mut ratcn);
+        let (cx, cy) = position_from_bottom(&screen(&terminal), "Delete secret")
+            .expect("confirmation button on screen");
+        let emitted = click(&mut terminal, &mut app, &mut ratcn, cx + 2, cy);
+        assert!(
+            emitted
+                .iter()
+                .any(|message| matches!(message, Msg::ConfirmAction))
+        );
+        assert!(!app.modals_ref().is_open(CONFIRM_DIALOG));
+        assert_eq!(app.take_deleted_for_test().as_deref(), Some(command));
+    }
 
     let (x, y) = position_from_bottom(&screen(&terminal), "Refresh").expect("refresh on screen");
     let emitted = click(&mut terminal, &mut app, &mut ratcn, x + 2, y);

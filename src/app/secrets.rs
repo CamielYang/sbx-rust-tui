@@ -69,6 +69,16 @@ fn parse_secrets(bytes: &[u8]) -> Result<Vec<Secret>, String> {
     Ok(secrets)
 }
 
+impl super::App {
+    /// A queued deletion is skipped if the row is no longer in the table when
+    /// the dialog is confirmed (e.g. after a manual Refresh).
+    pub(super) fn has_secret(&self, name: &str, scope: &str) -> bool {
+        self.secrets
+            .iter()
+            .any(|secret| secret.name == name && secret.scope == scope)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

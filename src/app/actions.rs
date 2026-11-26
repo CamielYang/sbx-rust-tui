@@ -14,6 +14,8 @@ pub enum PendingAction {
     Start(String),
     Stop(String),
     Remove(String),
+    /// Secret name followed by its scope (the sandbox name, or "global").
+    DeleteSecret(String, String),
 }
 
 impl PendingAction {
@@ -22,6 +24,7 @@ impl PendingAction {
             Self::Start(_) => "Start",
             Self::Stop(_) => "Stop",
             Self::Remove(_) => "Remove",
+            Self::DeleteSecret(..) => "Delete secret",
         }
     }
 }
@@ -56,9 +59,9 @@ impl App {
         }
     }
 
-    /// Start/Stop/Remove never run directly from a button or shortcut: they
-    /// first park here so the user can confirm the action in a dialog.
-    fn request_action(&mut self, action: PendingAction) {
+    /// Start/Stop/Remove and secret deletion never run directly from a button
+    /// or shortcut: they first park here so the user can confirm in a dialog.
+    pub(super) fn request_action(&mut self, action: PendingAction) {
         if self.mode() != Mode::Normal {
             return;
         }
@@ -84,14 +87,18 @@ impl App {
         };
         self.close_modal(CONFIRM_DIALOG);
         let should_be_running = matches!(&action, PendingAction::Stop(_));
+        let secret_action = matches!(&action, PendingAction::DeleteSecret(..));
         let still_valid = match &action {
             PendingAction::Start(name) | PendingAction::Stop(name) => {
                 self.has_sandbox(name) && self.is_running(name) == should_be_running
             }
             PendingAction::Remove(name) => self.has_sandbox(name),
+            PendingAction::DeleteSecret(name, scope) => self.has_secret(name, scope),
         };
         if still_valid {
             self.perform_action(action);
+        } else if secret_action {
+            self.notify_info("Secret is no longer listed; action cancelled.", None);
         } else {
             self.notify_info("Sandbox state changed; action cancelled.", None);
         }
@@ -100,6 +107,9 @@ impl App {
     fn perform_action(&mut self, action: PendingAction) {
         #[cfg(test)]
         {
+            if let PendingAction::DeleteSecret(name, scope) = &action {
+                self.delete_secret_now(name, scope);
+            }
             self.confirmed_for_test = Some(action);
         }
         #[cfg(not(test))]
@@ -107,6 +117,7 @@ impl App {
             PendingAction::Start(name) => self.start_sandbox(&name),
             PendingAction::Stop(name) => self.stop_sandbox(&name),
             PendingAction::Remove(name) => self.remove_sandbox(&name),
+            PendingAction::DeleteSecret(name, scope) => self.delete_secret_now(&name, &scope),
         }
     }
 

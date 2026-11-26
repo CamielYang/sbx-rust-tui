@@ -1,6 +1,8 @@
 use super::*;
 use crate::app::test_support::TempWorkspaceDir;
-use crate::app::{HostMount, INFO_DIALOG, MountMode, PORTS_DIALOG, PortMapping, SandboxDetails};
+use crate::app::{
+    CONFIRM_DIALOG, HostMount, INFO_DIALOG, MountMode, PORTS_DIALOG, PortMapping, SandboxDetails,
+};
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 use ratcn::runtime::Ratcn;
 
@@ -112,6 +114,25 @@ fn secrets_tab_has_an_empty_state() {
     let screen = render(&app);
     assert!(screen.contains("No secrets yet."));
     assert!(!screen.contains("Delete"));
+}
+
+#[test]
+fn secret_delete_confirmation_names_the_scope() {
+    let mut app = App::with_secrets(&[("test", "nebius")]);
+    app.select_tab(DashboardTab::Secrets);
+    app.delete_secret("nebius", "test");
+
+    assert!(app.modals_ref().is_open(CONFIRM_DIALOG));
+    let screen = render(&app);
+    assert!(screen.contains("Confirm delete"));
+    assert!(screen.contains("Delete secret 'nebius' from sandbox 'test'?"));
+    assert!(screen.contains("Delete secret"));
+    assert!(screen.contains("Cancel"));
+
+    let mut global = App::with_secrets(&[("global", "github")]);
+    global.select_tab(DashboardTab::Secrets);
+    global.delete_secret("github", "global");
+    assert!(render(&global).contains("Delete global secret 'github'?"));
 }
 
 #[test]

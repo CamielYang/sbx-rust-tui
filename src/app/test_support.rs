@@ -66,11 +66,18 @@ impl App {
     /// Populate the Secrets table without calling `sbx secret ls`.
     pub fn with_secrets(entries: &[(&str, &str)]) -> Self {
         let mut app = Self::new();
-        app.secrets = entries
-            .iter()
-            .map(|(scope, name)| Secret::new(*scope, *name))
-            .collect();
+        app.set_secrets_for_test(
+            entries
+                .iter()
+                .map(|(scope, name)| Secret::new(*scope, *name))
+                .collect(),
+        );
         app
+    }
+
+    /// Replace the Secrets table without calling `sbx secret ls`.
+    pub fn set_secrets_for_test(&mut self, secrets: Vec<Secret>) {
+        self.secrets = secrets;
     }
 
     pub fn show_info_for_test(&mut self, details: SandboxDetails) {
@@ -103,6 +110,11 @@ impl App {
     /// The command a row's unpublish button handed to the test hook.
     pub fn take_unpublished_for_test(&mut self) -> Option<String> {
         self.unpublished_for_test.take()
+    }
+
+    /// The command a secret's Delete button handed to the test hook.
+    pub fn take_deleted_for_test(&mut self) -> Option<String> {
+        self.deleted_for_test.take()
     }
 
     /// Queue a fake metrics result so `poll_info` can be tested without

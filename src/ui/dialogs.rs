@@ -248,8 +248,9 @@ fn text_input(
 
 // --- confirmation dialog ----------------------------------------------------
 
-/// The last gate before Start/Stop/Remove reaches `sbx`. The action's hue is
-/// kept on the confirm button so the dialog reads like the action it replaces.
+/// The last gate before Start/Stop/Remove or a secret deletion reaches `sbx`.
+/// The action's hue is kept on the confirm button so the dialog reads like the
+/// action it replaces.
 pub(super) fn confirm_dialog(app: &App) -> Dialog<App, Msg> {
     let Some(action) = app.pending_action() else {
         return Dialog::new()
@@ -276,6 +277,16 @@ pub(super) fn confirm_dialog(app: &App) -> Dialog<App, Msg> {
             "Confirm remove",
             format!("Permanently remove sandbox '{name}' and its data?"),
             "Remove sandbox",
+            REMOVE_RED,
+        ),
+        PendingAction::DeleteSecret(name, scope) => (
+            "Confirm delete",
+            if scope == "global" {
+                format!("Delete global secret '{name}'?")
+            } else {
+                format!("Delete secret '{name}' from sandbox '{scope}'?")
+            },
+            "Delete secret",
             REMOVE_RED,
         ),
     };

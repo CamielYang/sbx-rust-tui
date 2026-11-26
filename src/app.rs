@@ -115,6 +115,9 @@ pub struct App {
     /// In tests, unpublishing records the command instead of running `sbx`.
     #[cfg(test)]
     unpublished_for_test: Option<String>,
+    /// In tests, deleting a secret records the command instead of running `sbx`.
+    #[cfg(test)]
+    deleted_for_test: Option<String>,
 }
 
 impl App {
@@ -147,6 +150,8 @@ impl App {
             published_for_test: None,
             #[cfg(test)]
             unpublished_for_test: None,
+            #[cfg(test)]
+            deleted_for_test: None,
         };
         app.refresh_sandboxes();
         app.refresh_secrets();
@@ -432,10 +437,52 @@ impl App {
         self.notify_info("Set secret is not available yet", None);
     }
 
-    /// Deletes are not wired up yet. The row button is still clickable so the
-    /// interaction can be hooked up without changing the layout later.
-    pub fn delete_secret(&mut self, name: &str) {
-        self.notify_info("Delete secret is not available yet", Some(name.to_owned()));
+    /// A row's Delete button only asks for confirmation; the CLI runs once the
+    /// dialog is confirmed.
+    pub fn delete_secret(&mut self, name: &str, scope: &str) {
+        self.request_action(PendingAction::DeleteSecret(
+            name.to_owned(),
+            scope.to_owned(),
+        ));
+    }
+
+    /// The row's scope is the sandbox name; global secrets omit `--sandbox`.
+    /// `-f` skips the CLI's own prompt, which cannot be answered while the TUI
+    /// owns the terminal.
+    fn delete_secret_command(name: &str, scope: &str) -> PendingCommand {
+        let mut args = vec!["secrets", "rm", name];
+        let scoped = (scope != "global").then_some(["--sandbox", scope]);
+        if let Some([flag, value]) = scoped.as_ref() {
+            args.push(flag);
+            args.push(value);
+        }
+        args.push("-f");
+        PendingCommand::new("sbx", &args)
+    }
+
+    /// Run a confirmed deletion, then refresh the table the row came from.
+    #[cfg_attr(test, allow(dead_code))]
+    fn delete_secret_now(&mut self, name: &str, scope: &str) {
+        let pending = Self::delete_secret_command(name, scope);
+
+        #[cfg(test)]
+        {
+            self.deleted_for_test = Some(pending.preview());
+        }
+
+        #[cfg(not(test))]
+        {
+            let detail = match pending.run() {
+                Ok(output) if output.status.success() => {
+                    self.refresh_secrets();
+                    self.notify_success(format!("Deleted secret '{name}'"), None);
+                    return;
+                }
+                Ok(output) => commands::stderr_detail(&output, "sbx secrets rm failed"),
+                Err(error) => error.to_string(),
+            };
+            self.notify_error("Could not delete secret", detail);
+        }
     }
 
     /// Periodic tick: keep running-state dots (and an open Info modal's status

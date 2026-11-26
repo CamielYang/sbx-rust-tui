@@ -51,7 +51,8 @@ pub enum Msg {
     Refresh,
     SetSecret,
     RefreshSecrets,
-    DeleteSecret(String),
+    /// Secret name followed by its scope (the sandbox name, or "global").
+    DeleteSecret(String, String),
     Quit,
     CancelWizard,
     CreateSandbox,
@@ -114,7 +115,7 @@ pub fn apply(app: &mut App, msg: Msg) {
             app.refresh_secrets();
             app.notify_success("Secret list refreshed", None);
         }
-        Msg::DeleteSecret(name) => app.delete_secret(&name),
+        Msg::DeleteSecret(name, scope) => app.delete_secret(&name, &scope),
         Msg::Quit => app.quit(),
         Msg::CancelWizard => app.cancel_wizard(),
         Msg::CreateSandbox => app.create_from_form(),

@@ -192,11 +192,12 @@ pub(super) fn paint_secrets_body(
         );
 
         let name = secret.name.clone();
+        let scope = secret.scope.clone();
         ctx.component(
             format!("secrets-delete-{index}"),
             Button::new("Delete")
                 .ghost()
-                .on_press(move || Msg::DeleteSecret(name.clone())),
+                .on_press(move || Msg::DeleteSecret(name.clone(), scope.clone())),
             Rect::new(columns[2].x, row.y, delete_width.min(columns[2].width), 1),
         );
     }
