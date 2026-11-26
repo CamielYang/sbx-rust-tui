@@ -105,6 +105,46 @@ fn clicking_a_sandbox_focuses_its_actions() {
 }
 
 #[test]
+fn clicking_a_tab_switches_the_visible_section() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    let mut ratcn = new_runtime();
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    draw(&mut terminal, &app, &mut ratcn);
+
+    let emitted = click(&mut terminal, &mut app, &mut ratcn, 18, 1);
+    assert!(
+        emitted
+            .iter()
+            .any(|message| matches!(message, Msg::TabSelected(DashboardTab::Secrets)))
+    );
+    assert_eq!(app.active_tab(), DashboardTab::Secrets);
+    let screen = screen(&terminal);
+    assert!(screen.contains(" Secrets "));
+    assert!(!screen.contains("+ New sandbox"));
+    assert!(!screen.contains("alpha"));
+
+    // The tab row keeps focus, so Left switches straight back to Sandboxes.
+    let left = Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    if let EventResult::Emit(message) = ratcn.handle_event(left, &app) {
+        apply(&mut app, message);
+    }
+    assert_eq!(app.active_tab(), DashboardTab::Sandboxes);
+    assert!(app.focus_ref().contains_path([TAB_ROW]));
+}
+
+#[test]
+fn quit_button_in_the_title_row_quits() {
+    let mut app = App::with_sandboxes(&[]);
+    let mut ratcn = new_runtime();
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    draw(&mut terminal, &app, &mut ratcn);
+
+    let emitted = click(&mut terminal, &mut app, &mut ratcn, 95, 0);
+    assert!(emitted.iter().any(|message| matches!(message, Msg::Quit)));
+    assert!(app.should_quit());
+}
+
+#[test]
 fn hiding_an_action_does_not_park_focus_on_it() {
     let mut app = App::with_sandbox_statuses(&[("alpha", "stopped")]);
     *app.focus_mut() = FocusState::intent([ACTION_STOP]);

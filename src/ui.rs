@@ -12,15 +12,18 @@ use ratcn::runtime::{ChildId, DeclareCtx, FocusState};
 use ratcn::{InputState, Theme};
 
 use crate::app::{
-    App, CONFIRM_DIALOG, CREATE_DIALOG, FormField, INFO_DIALOG, PORTS_DIALOG, PortField, Sandbox,
-    WORKSPACE_DIALOG,
+    App, CONFIRM_DIALOG, CREATE_DIALOG, DashboardTab, FormField, INFO_DIALOG, PORTS_DIALOG,
+    PortField, Sandbox, TAB_ROW, WORKSPACE_DIALOG,
 };
 
 mod dashboard;
 mod dialogs;
 mod widgets;
 
-use self::dashboard::{paint_body, paint_footer, paint_header, paint_toolbar};
+use self::dashboard::{
+    paint_body, paint_empty_section, paint_footer, paint_header, paint_quit, paint_tabs,
+    paint_toolbar,
+};
 use self::dialogs::{confirm_dialog, create_dialog, info_dialog, ports_dialog, workspace_dialog};
 
 // The UI tests reach these helpers through `use super::*`.
@@ -43,6 +46,7 @@ pub enum Msg {
     SandboxFocused(String, usize),
     SandboxSelected(String),
     SandboxScrolled(usize),
+    TabSelected(DashboardTab),
     OpenWizard,
     Refresh,
     Quit,
@@ -96,6 +100,7 @@ pub fn apply(app: &mut App, msg: Msg) {
         Msg::SandboxFocused(name, offset) => app.focus_list_item(&name, offset),
         Msg::SandboxSelected(name) => app.focus_sandbox(&name),
         Msg::SandboxScrolled(offset) => app.set_list_offset(offset),
+        Msg::TabSelected(tab) => app.select_tab(tab),
         Msg::OpenWizard => app.open_wizard(),
         Msg::Refresh => {
             app.refresh_sandboxes();
@@ -136,6 +141,10 @@ pub fn apply(app: &mut App, msg: Msg) {
 /// leaves a path parked on a component that is no longer declared, and Tab
 /// cannot move from there, so hand focus back to the list instead.
 pub fn settle_focus(app: &mut App) {
+    if app.active_tab() != DashboardTab::Sandboxes {
+        *app.focus_mut() = FocusState::intent([TAB_ROW]);
+        return;
+    }
     let Some(id) = app.focus_ref().path().first().map(ChildId::as_str) else {
         return;
     };
@@ -167,20 +176,29 @@ pub fn declare(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme) {
     });
 
     let vertical = Layout::vertical([
-        Constraint::Length(1), // title
-        Constraint::Length(1), // spacing
+        Constraint::Length(1), // title + quit
+        Constraint::Length(1), // tabs
         Constraint::Length(1), // toolbar buttons
         Constraint::Length(1), // spacing
-        Constraint::Min(0),    // sandboxes + actions
+        Constraint::Min(0),    // active tab's section
         Constraint::Length(1), // spacing
         Constraint::Length(1), // footer
     ])
     .split(area);
 
     paint_header(ctx, app, &theme, vertical[0]);
-    paint_toolbar(ctx, app, &theme, vertical[2]);
-    paint_body(ctx, app, &theme, vertical[4]);
+    match app.active_tab() {
+        DashboardTab::Sandboxes => {
+            paint_toolbar(ctx, app, &theme, vertical[2]);
+            paint_body(ctx, app, &theme, vertical[4]);
+        }
+        DashboardTab::Secrets => paint_empty_section(ctx, &theme, vertical[4]),
+    }
+    // Declared after the sandbox controls so startup focus still lands on
+    // "+ New sandbox"; the visual row stays directly under the title.
+    paint_tabs(ctx, app, vertical[1]);
     paint_footer(ctx, &theme, vertical[6]);
+    paint_quit(ctx, app, vertical[0]);
 
     // Modals are declared last so their layers cover the dashboard. Ids come
     // from App's ModalState, which Ratcn validates against this declaration.

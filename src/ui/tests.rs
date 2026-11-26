@@ -43,6 +43,36 @@ fn renders_dashboard_with_themated_controls() {
 }
 
 #[test]
+fn renders_tabs_with_quit_on_the_title_row() {
+    let app = App::with_sandbox_statuses(&[("alpha", "running")]);
+    let screen = render(&app);
+    let rows: Vec<&str> = screen.lines().collect();
+
+    let title_row = rows[0];
+    let quit = title_row.find("Quit").expect("quit button on title row");
+    assert!(quit > title_row.find("DOCKER SANDBOXES RUST").unwrap());
+    assert!(rows[1].contains("Sandboxes"));
+    assert!(rows[1].contains("Secrets"));
+    assert!(rows[4].contains(" Sandboxes "));
+    assert!(rows[5].contains("alpha"));
+}
+
+#[test]
+fn secrets_tab_shows_only_an_empty_section() {
+    let mut app = App::with_sandbox_statuses(&[("alpha", "running")]);
+    app.select_tab(DashboardTab::Secrets);
+
+    let screen = render(&app);
+    assert!(screen.contains("Sandboxes"));
+    assert!(screen.contains("Secrets"));
+    assert!(screen.lines().any(|row| row.contains(" Secrets ")));
+    assert!(!screen.contains("alpha"));
+    assert!(!screen.contains("+ New sandbox"));
+    assert!(!screen.contains("Refresh"));
+    assert!(!screen.contains("Publish ports"));
+}
+
+#[test]
 fn footer_keeps_controls_when_a_notification_arrives() {
     let mut app = App::with_sandbox_statuses(&[("alpha", "running")]);
     app.notify_error("Could not run sbx", "boom");

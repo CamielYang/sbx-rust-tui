@@ -6,7 +6,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratcn::color::{DISABLED_DIM, FOCUS_SHIFT, HOVER_SHIFT, away_from, dim, nearest_to};
 use ratcn::runtime::DeclareCtx;
-use ratcn::{Button, ButtonStyle, List, ListItem, ListItemState, ListStyle, Theme};
+use ratcn::{
+    Button, ButtonStyle, List, ListItem, ListItemState, ListStyle, Tab as UiTab, Tabs,
+    TabsActivation, Theme,
+};
 
 use super::*;
 
@@ -27,7 +30,40 @@ pub(super) fn paint_header(
         format!("  {} sandbox(es)  ", app.sandboxes().len()),
         Style::default().fg(theme.muted_foreground),
     );
-    ctx.paint_widget(Paragraph::new(Line::from(vec![title, count])), area);
+    let columns = header_columns(area);
+
+    ctx.paint_widget(Paragraph::new(Line::from(vec![title, count])), columns[0]);
+}
+
+/// Quit lives on the title row, outside the tabs. It is declared last so
+/// startup focus still lands on the first sandbox action, not on Quit.
+pub(super) fn paint_quit(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, area: Rect) {
+    let columns = header_columns(area);
+    let quit_button = Button::new("Quit")
+        .ghost()
+        .on_press(|| Msg::Quit)
+        .disabled(app.is_creating());
+    ctx.component("toolbar-quit", quit_button, columns[1]);
+}
+
+fn header_columns(area: Rect) -> [Rect; 2] {
+    let quit_width = Button::<Msg>::new("Quit").width() + 2;
+    let columns =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(quit_width)]).split(area);
+    [columns[0], columns[1]]
+}
+
+/// The tab row switches which section owns the body below it. Arrows switch
+/// tabs directly, and a click selects a tab without a second confirmation.
+pub(super) fn paint_tabs(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, area: Rect) {
+    let tabs = Tabs::new([
+        UiTab::new(DashboardTab::Sandboxes, "Sandboxes"),
+        UiTab::new(DashboardTab::Secrets, "Secrets"),
+    ])
+    .selection(|app: &App| Some(app.active_tab()), Msg::TabSelected)
+    .activation(TabsActivation::Automatic)
+    .disabled(app.is_creating());
+    ctx.component(TAB_ROW, tabs, area);
 }
 
 pub(super) fn paint_toolbar(
@@ -44,39 +80,40 @@ pub(super) fn paint_toolbar(
         .secondary()
         .on_press(|| Msg::Refresh)
         .disabled(locked);
-    let quit_button = Button::new("Quit")
-        .ghost()
-        .on_press(|| Msg::Quit)
-        .disabled(locked);
 
-    let widths = [
-        new_button.width(),
-        refresh_button.width(),
-        quit_button.width(),
-    ];
     let columns = Layout::horizontal([
-        Constraint::Length(widths[0] + 2),
-        Constraint::Length(widths[1] + 2),
-        Constraint::Length(widths[2] + 2),
+        Constraint::Length(new_button.width() + 2),
+        Constraint::Length(refresh_button.width() + 2),
         Constraint::Min(0),
     ])
     .split(area);
 
     ctx.component("toolbar-new", new_button, columns[0]);
     ctx.component("toolbar-refresh", refresh_button, columns[1]);
-    ctx.component("toolbar-quit", quit_button, columns[2]);
 
     let hint = Span::styled(
         "  Tab moves focus · Enter activates",
         Style::default().fg(theme.muted_foreground),
     );
-    ctx.paint_widget(Paragraph::new(Line::from(hint)), columns[3]);
+    ctx.paint_widget(Paragraph::new(Line::from(hint)), columns[2]);
 }
 
 pub(super) fn paint_body(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme, area: Rect) {
     let columns = Layout::horizontal([Constraint::Min(24), Constraint::Length(36)]).split(area);
     paint_sandbox_list(ctx, app, theme, columns[0]);
     paint_actions(ctx, app, theme, columns[1]);
+}
+
+/// The Secrets tab is intentionally bare for now: just its own empty section.
+pub(super) fn paint_empty_section(ctx: &mut DeclareCtx<'_, App, Msg>, theme: &Theme, area: Rect) {
+    ctx.paint_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Secrets ")
+            .border_style(Style::default().fg(theme.border))
+            .style(Style::default().bg(theme.surface)),
+        area,
+    );
 }
 
 /// Hovering shows the cursor row, and hover focus puts focus on the list. Let

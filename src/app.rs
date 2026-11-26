@@ -49,6 +49,18 @@ pub const CONFIRM_DIALOG: &str = "confirm-dialog";
 pub const PORTS_DIALOG: &str = "ports-dialog";
 pub const WORKSPACE_DIALOG: &str = "workspace-dialog";
 
+/// Stable id for the tab row, used as a focus target when the visible tab changes.
+pub const TAB_ROW: &str = "tab-row";
+
+/// The dashboard's top-level tabs. The tab row owns the choice; each tab
+/// decides which body section is visible below it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum DashboardTab {
+    #[default]
+    Sandboxes,
+    Secrets,
+}
+
 /// How often the dashboard re-reads `sbx ls` to keep running-state dots fresh.
 pub const STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -69,6 +81,7 @@ pub enum Mode {
 }
 
 pub struct App {
+    tab: DashboardTab,
     sandboxes: Vec<Sandbox>,
     /// The row the list cursor is on. Hover and arrow keys move it; the
     /// Actions pane follows `selected`, which a click commits.
@@ -104,6 +117,7 @@ pub struct App {
 impl App {
     pub fn new() -> Self {
         let mut app = Self {
+            tab: DashboardTab::default(),
             sandboxes: Vec::new(),
             cursor: 0,
             selected: 0,
@@ -158,6 +172,17 @@ impl App {
         } else {
             Mode::Normal
         }
+    }
+
+    pub fn active_tab(&self) -> DashboardTab {
+        self.tab
+    }
+
+    /// Switch tabs and park focus on the row, since controls belonging to the
+    /// previous tab are no longer declared in the frame.
+    pub fn select_tab(&mut self, tab: DashboardTab) {
+        self.tab = tab;
+        *self.focus_mut() = FocusState::intent([TAB_ROW]);
     }
 
     /// The action the confirmation dialog is asking about, if one is open.
@@ -354,6 +379,10 @@ impl App {
             return;
         }
         if self.is_creating() || self.mode() != Mode::Normal {
+            return;
+        }
+        // Sandbox shortcuts must not reach through an empty Secrets tab.
+        if self.active_tab() != DashboardTab::Sandboxes {
             return;
         }
 
