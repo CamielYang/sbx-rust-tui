@@ -81,7 +81,16 @@ impl App {
     }
 
     pub fn show_info_for_test(&mut self, details: SandboxDetails) {
+        self.secret_info = None;
         self.info = Some(details);
+        let _ = self.modals.open(INFO_DIALOG, &mut self.focus);
+    }
+
+    /// Open the Info dialog on a secret row without a click, for render tests.
+    pub fn show_secret_info_for_test(&mut self, secret: Secret) {
+        self.info = None;
+        self.info_refresh = None;
+        self.secret_info = Some(secret);
         let _ = self.modals.open(INFO_DIALOG, &mut self.focus);
     }
 

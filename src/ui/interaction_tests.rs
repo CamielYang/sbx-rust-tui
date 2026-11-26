@@ -1,6 +1,6 @@
 use super::*;
 use crate::app::test_support::TempWorkspaceDir;
-use crate::app::{Mode, SET_SECRET_DIALOG, WorkspaceMode};
+use crate::app::{INFO_DIALOG, Mode, SET_SECRET_DIALOG, WorkspaceMode};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{Terminal, backend::TestBackend};
 use ratcn::runtime::{EventResult, Ratcn};
@@ -339,6 +339,28 @@ fn secret_row_delete_and_toolbar_refresh_are_clickable() {
             .iter()
             .any(|message| matches!(message, Msg::RefreshSecrets))
     );
+}
+
+#[test]
+fn clicking_a_secret_row_opens_its_info_dialog() {
+    let mut app = App::with_secrets(&[("global", "github"), ("test", "nebius")]);
+    app.select_tab(DashboardTab::Secrets);
+    let mut ratcn = new_runtime();
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    draw(&mut terminal, &app, &mut ratcn);
+
+    let (x, y) = position_from_bottom(&screen(&terminal), "github").expect("github row");
+    let emitted = click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+    assert!(emitted.iter().any(|message| matches!(
+        message,
+        Msg::OpenSecretInfo(name, scope) if name == "github" && scope == "global"
+    )));
+    assert!(app.modals_ref().is_open(INFO_DIALOG));
+
+    let text = screen(&terminal);
+    assert!(text.contains("ENV VAR"));
+    assert!(text.contains("GH_TOKEN, GITHUB_TOKEN"));
+    assert!(text.contains("api.githubcopilot.com"));
 }
 
 #[test]

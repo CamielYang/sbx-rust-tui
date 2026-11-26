@@ -118,6 +118,65 @@ fn secrets_tab_has_an_empty_state() {
 }
 
 #[test]
+fn secrets_tab_shows_an_env_var_column() {
+    let mut app = App::with_secrets(&[("global", "github"), ("test", "nebius")]);
+    app.select_tab(DashboardTab::Secrets);
+
+    let screen = render(&app);
+    assert!(screen.contains("ENV VAR"));
+    assert!(screen.contains("GH_TOKEN, GITHUB_TOKEN"));
+    assert!(screen.contains("NEBIUS_API_KEY"));
+}
+
+#[test]
+fn secrets_tab_shows_an_env_var_for_custom_secrets() {
+    let mut app = App::with_secrets(&[("custom", "MY_TOKEN")]);
+    app.select_tab(DashboardTab::Secrets);
+
+    let screen = render(&app);
+    assert!(screen.contains("MY_TOKEN"));
+}
+
+#[test]
+fn secret_info_dialog_shows_scope_name_env_var_and_api_domains() {
+    let mut app = App::with_secrets(&[("test", "nebius")]);
+    let secret = app.secrets()[0].clone();
+    app.show_secret_info_for_test(secret);
+
+    assert!(app.modals_ref().is_open(INFO_DIALOG));
+    let screen = render(&app);
+    for expected in [
+        "Secret · nebius",
+        "SCOPE",
+        "test",
+        "NAME",
+        "nebius",
+        "ENV VAR",
+        "NEBIUS_API_KEY",
+        "API DOMAINS",
+        "api.studio.nebius.com",
+        "api.tokenfactory.nebius.com",
+    ] {
+        assert!(screen.contains(expected), "missing {expected}");
+    }
+
+    let mut github = App::with_secrets(&[("global", "github")]);
+    let secret = github.secrets()[0].clone();
+    github.show_secret_info_for_test(secret);
+    let screen = render(&github);
+    for domain in [
+        "api.github.com",
+        "github.com",
+        "raw.githubusercontent.com",
+        "gist.github.com",
+        "copilot.github.com",
+        "api.githubcopilot.com",
+    ] {
+        assert!(screen.contains(domain), "missing {domain}");
+    }
+}
+
+#[test]
 fn set_secret_dialog_shows_service_scope_and_secret_fields() {
     let mut app = App::with_sandboxes(&["alpha"]);
     app.select_tab(DashboardTab::Secrets);

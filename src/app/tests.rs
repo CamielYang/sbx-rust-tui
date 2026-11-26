@@ -833,6 +833,34 @@ fn secrets_start_empty_until_the_cli_is_read() {
 }
 
 #[test]
+fn clicking_a_secret_row_opens_info_and_close_clears_it() {
+    let mut app = App::with_secrets(&[("global", "github"), ("test", "nebius")]);
+    app.open_secret_info("github", "global");
+
+    assert!(matches!(app.mode(), Mode::Info));
+    assert!(app.modals_ref().is_open(INFO_DIALOG));
+    let secret = app.secret_info().expect("secret details");
+    assert_eq!(secret.scope, "global");
+    assert_eq!(secret.env_vars, ["GH_TOKEN", "GITHUB_TOKEN"]);
+    assert_eq!(secret.api_domains[0], "api.github.com");
+
+    app.close_info();
+    assert!(app.secret_info().is_none());
+    assert!(!app.modals_ref().is_open(INFO_DIALOG));
+}
+
+#[test]
+fn opening_sandbox_info_replaces_secret_info() {
+    let mut app = App::with_sandbox_statuses(&[("alpha", "running")]);
+    app.set_secrets_for_test(vec![Secret::new("global", "github")]);
+    app.open_secret_info("github", "global");
+    app.open_info("alpha");
+
+    assert!(app.secret_info().is_none());
+    assert_eq!(app.info().unwrap().name, "alpha");
+}
+
+#[test]
 fn set_secret_opens_a_dialog_with_global_and_sandbox_scopes() {
     let mut app = App::with_sandboxes(&["alpha", "beta"]);
     app.set_secret();

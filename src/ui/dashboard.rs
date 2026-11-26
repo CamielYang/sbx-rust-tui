@@ -147,8 +147,8 @@ pub(super) fn paint_secrets_toolbar(ctx: &mut DeclareCtx<'_, App, Msg>, theme: &
     ctx.paint_widget(Paragraph::new(Line::from(hint)), columns[2]);
 }
 
-/// A single pane holding the secret inventory: scope and name in columns,
-/// with a row button for deleting each entry.
+/// A single pane holding the secret inventory: scope, name, and env var in
+/// columns. Each row opens its details; a row button deletes the entry.
 pub(super) fn paint_secrets_body(
     ctx: &mut DeclareCtx<'_, App, Msg>,
     app: &App,
@@ -165,12 +165,17 @@ pub(super) fn paint_secrets_body(
     let delete_width = Button::<Msg>::new("Delete").width();
     let columns = Layout::horizontal([
         Constraint::Length(16),
+        Constraint::Length(20),
         Constraint::Min(0),
         Constraint::Length(delete_width + 2),
     ])
     .split(inner);
     let name_width = columns[1].width.saturating_sub(1) as usize;
-    ctx.paint_widget(Paragraph::new(secret_header_line(name_width, theme)), inner);
+    let env_width = columns[2].width.saturating_sub(1) as usize;
+    ctx.paint_widget(
+        Paragraph::new(secret_header_line(name_width, env_width, theme)),
+        inner,
+    );
 
     let visible = (inner.height - 1) as usize;
     if app.secrets().is_empty() {
@@ -186,8 +191,25 @@ pub(super) fn paint_secrets_body(
 
     for (index, secret) in app.secrets().iter().take(visible).enumerate() {
         let row = Rect::new(inner.x, inner.y + 1 + index as u16, inner.width, 1);
+        let name = secret.name.clone();
+        let scope = secret.scope.clone();
+        // An invisible ghost button covers the text columns. It is declared
+        // first so the row's spans paint over it; at rest there is nothing to
+        // see, while hover and focus fill the row behind the text.
+        ctx.component(
+            format!("secrets-row-{index}"),
+            Button::new("")
+                .ghost()
+                .on_press(move || Msg::OpenSecretInfo(name.clone(), scope.clone())),
+            Rect::new(
+                inner.x,
+                row.y,
+                columns[0].width + columns[1].width + columns[2].width,
+                1,
+            ),
+        );
         ctx.paint_widget(
-            Paragraph::new(secret_row_line(secret, name_width, theme)),
+            Paragraph::new(secret_row_line(secret, name_width, env_width, theme)),
             row,
         );
 
@@ -198,24 +220,30 @@ pub(super) fn paint_secrets_body(
             Button::new("Delete")
                 .ghost()
                 .on_press(move || Msg::DeleteSecret(name.clone(), scope.clone())),
-            Rect::new(columns[2].x, row.y, delete_width.min(columns[2].width), 1),
+            Rect::new(columns[3].x, row.y, delete_width.min(columns[3].width), 1),
         );
     }
 }
 
-fn secret_header_line(name_width: usize, theme: &Theme) -> Line<'static> {
+fn secret_header_line(name_width: usize, env_width: usize, theme: &Theme) -> Line<'static> {
     let style = Style::default()
         .fg(theme.muted_foreground)
         .add_modifier(Modifier::BOLD);
     Line::from(vec![
         Span::styled(format!(" {:<15}", "SCOPE"), style),
         Span::styled(format!("{:<name_width$}", "NAME"), style),
+        Span::styled(format!("{:<env_width$}", "ENV VAR"), style),
         // Two leading cells match the button's padding, as in the ports table.
         Span::styled("  DELETE", style),
     ])
 }
 
-fn secret_row_line(secret: &Secret, name_width: usize, theme: &Theme) -> Line<'static> {
+fn secret_row_line(
+    secret: &Secret,
+    name_width: usize,
+    env_width: usize,
+    theme: &Theme,
+) -> Line<'static> {
     Line::from(vec![
         Span::styled(
             format!(" {:<15}", secret.scope),
@@ -224,6 +252,10 @@ fn secret_row_line(secret: &Secret, name_width: usize, theme: &Theme) -> Line<'s
         Span::styled(
             format!("{:<name_width$}", secret.name),
             Style::default().fg(theme.foreground),
+        ),
+        Span::styled(
+            format!("{:<env_width$}", secret.env_vars_label()),
+            Style::default().fg(theme.muted_foreground),
         ),
     ])
 }

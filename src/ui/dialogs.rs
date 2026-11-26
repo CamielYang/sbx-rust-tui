@@ -16,7 +16,7 @@ use super::widgets::{detail_line, field_row, input, join_usage};
 use super::*;
 use crate::app::{
     AGENTS, FormField, HostMount, MountMode, PendingAction, PortField, PortMapping, SandboxDetails,
-    SERVICES, SecretForm, WORKSPACE_PARENT, WorkspaceMode, WorkspacePicker,
+    SERVICES, Secret, SecretForm, WORKSPACE_PARENT, WorkspaceMode, WorkspacePicker,
 };
 
 /// The confirmation dialog's focused Cancel sets the look for every dismiss
@@ -321,6 +321,9 @@ pub(super) fn confirm_dialog(app: &App) -> Dialog<App, Msg> {
 // --- info dialog ------------------------------------------------------------
 
 pub(super) fn info_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
+    if let Some(secret) = app.secret_info() {
+        return secret_info_dialog(secret);
+    }
     let Some(details) = app.info() else {
         return Dialog::new()
             .title("Sandbox details")
@@ -335,6 +338,35 @@ pub(super) fn info_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
     Dialog::new()
         .title(title)
         .description(text)
+        .outer_width(100)
+        .on_dismiss(|| Msg::CloseInfo)
+        .action("close", cancel_button("Close", || Msg::CloseInfo))
+}
+
+/// The same Info dialog, filled from a clicked Secrets row. Domain names are
+/// listed one per line so a service with six of them stays readable.
+fn secret_info_dialog(secret: &Secret) -> Dialog<App, Msg> {
+    let mut lines = vec![
+        detail_line("SCOPE", Some(&secret.scope)),
+        detail_line("NAME", Some(&secret.name)),
+        detail_line("ENV VAR", Some(&secret.env_vars_label())),
+        String::new(),
+        "API DOMAINS".to_owned(),
+    ];
+    if secret.api_domains.is_empty() {
+        lines.push("  —".to_owned());
+    } else {
+        lines.extend(
+            secret
+                .api_domains
+                .iter()
+                .map(|domain| format!("  - {domain}")),
+        );
+    }
+
+    Dialog::new()
+        .title(format!("Secret · {}", secret.name))
+        .description(lines.join("\n"))
         .outer_width(100)
         .on_dismiss(|| Msg::CloseInfo)
         .action("close", cancel_button("Close", || Msg::CloseInfo))
@@ -386,7 +418,7 @@ fn mount_line(mount: &HostMount) -> String {
         MountMode::Clone => "clone",
         MountMode::Direct => "direct",
     };
-    format!("  {mode:<6} {}", mount.host_path)
+    format!("  - {mode:<6} {}", mount.host_path)
 }
 
 /// Show core count alone until the guest reports a usage sample, then add the

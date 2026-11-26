@@ -8,22 +8,46 @@ use serde_json::Value;
 use super::commands::stderr_detail;
 use super::sandbox::json_text;
 use super::secret_form::{GLOBAL_SCOPE, SecretForm};
-use super::{App, CONFIRM_DIALOG, Mode, PendingAction, PendingCommand, SET_SECRET_DIALOG};
+use super::{
+    App, CONFIRM_DIALOG, Mode, PendingAction, PendingCommand, SET_SECRET_DIALOG, service_info,
+};
 
 /// One row of `sbx secret ls --format json`, reduced to the fields the
-/// dashboard table shows.
+/// dashboard table shows. Service metadata is resolved from the name so a row
+/// carries everything its info dialog needs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Secret {
     pub scope: String,
     pub name: String,
+    pub env_vars: Vec<String>,
+    pub api_domains: Vec<String>,
 }
 
 impl Secret {
     pub fn new(scope: impl Into<String>, name: impl Into<String>) -> Self {
+        let name = name.into();
+        let info = service_info(&name);
         Self {
             scope: scope.into(),
-            name: name.into(),
+            // Custom secrets are keyed by their env name; there is no service
+            // entry to look up, so the name itself is the variable they use.
+            name: name.clone(),
+            env_vars: info.map_or_else(
+                || vec![name.clone()],
+                |info| info.env_vars.iter().map(|env| (*env).to_owned()).collect(),
+            ),
+            api_domains: info.map_or_else(Vec::new, |info| {
+                info.api_domains
+                    .iter()
+                    .map(|domain| (*domain).to_owned())
+                    .collect()
+            }),
         }
+    }
+
+    /// The ENV VAR cell and the info dialog's value for one row.
+    pub fn env_vars_label(&self) -> String {
+        self.env_vars.join(", ")
     }
 }
 
@@ -352,6 +376,34 @@ mod tests {
                 Secret::new("custom", "MY_TOKEN"),
             ]
         );
+    }
+
+    #[test]
+    fn service_rows_carry_their_env_vars_and_api_domains() {
+        let github = Secret::new("global", "github");
+        assert_eq!(github.env_vars_label(), "GH_TOKEN, GITHUB_TOKEN");
+        assert_eq!(
+            github.api_domains,
+            [
+                "api.github.com",
+                "github.com",
+                "raw.githubusercontent.com",
+                "gist.github.com",
+                "copilot.github.com",
+                "api.githubcopilot.com",
+            ]
+        );
+
+        let groq = Secret::new("test", "groq");
+        assert_eq!(groq.env_vars, ["GROQ_API_KEY"]);
+        assert_eq!(groq.api_domains, ["api.groq.com"]);
+    }
+
+    #[test]
+    fn a_custom_secret_uses_its_name_as_the_env_var() {
+        let custom = Secret::new("custom", "MY_TOKEN");
+        assert_eq!(custom.env_vars, ["MY_TOKEN"]);
+        assert!(custom.api_domains.is_empty());
     }
 
     #[test]

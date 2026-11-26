@@ -17,6 +17,7 @@ mod ports_flow;
 mod sandbox;
 mod secret_form;
 mod secrets;
+mod service_catalog;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod workers;
@@ -31,6 +32,7 @@ pub use self::sandbox::{
 };
 pub use self::secret_form::{SERVICES, SecretForm};
 pub use self::secrets::{Secret, fetch_secrets};
+pub use self::service_catalog::service_info;
 pub use self::workspace::{WORKSPACE_PARENT, WorkspacePicker};
 
 pub const AGENTS: &[&str] = &[
@@ -99,6 +101,8 @@ pub struct App {
     modals: ModalState,
     form: Form,
     info: Option<SandboxDetails>,
+    /// A secret row shown in the same Info dialog as sandbox details.
+    secret_info: Option<Secret>,
     info_refresh: Option<workers::InfoRefresh>,
     ports: Option<PortsView>,
     port_form: PortForm,
@@ -145,6 +149,7 @@ impl App {
             modals: ModalState::default(),
             form: Form::new(),
             info: None,
+            secret_info: None,
             info_refresh: None,
             ports: None,
             port_form: PortForm::new(),
@@ -267,6 +272,11 @@ impl App {
 
     pub fn info(&self) -> Option<&SandboxDetails> {
         self.info.as_ref()
+    }
+
+    /// The secret row the Info dialog is showing, if any.
+    pub fn secret_info(&self) -> Option<&Secret> {
+        self.secret_info.as_ref()
     }
 
     pub fn ports(&self) -> Option<&PortsView> {
