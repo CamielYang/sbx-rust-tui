@@ -1,11 +1,6 @@
-# Sbx Rust TUI
+# sbx Rust TUI
 
-> [!NOTE]
-> Demo placeholder — add your video or GIF here later. Replace this note with:
->
-> ```md
-> ![Docker Sandbox Rust demo](docs/demo.gif)
-> ```
+![sbx Rust TUI demo](docs/demo.gif)
 
 A simple terminal UI (TUI) for easily managing Docker Sandboxes and publishing ports, without leaving your terminal.
 
