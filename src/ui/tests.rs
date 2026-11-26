@@ -2,6 +2,7 @@ use super::*;
 use crate::app::test_support::TempWorkspaceDir;
 use crate::app::{
     CONFIRM_DIALOG, HostMount, INFO_DIALOG, MountMode, PORTS_DIALOG, PortMapping, SandboxDetails,
+    SERVICES, SET_SECRET_DIALOG,
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 use ratcn::runtime::Ratcn;
@@ -114,6 +115,36 @@ fn secrets_tab_has_an_empty_state() {
     let screen = render(&app);
     assert!(screen.contains("No secrets yet."));
     assert!(!screen.contains("Delete"));
+}
+
+#[test]
+fn set_secret_dialog_shows_service_scope_and_secret_fields() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.select_tab(DashboardTab::Secrets);
+    app.set_secret();
+
+    assert!(app.modals_ref().is_open(SET_SECRET_DIALOG));
+    let screen = render(&app);
+    assert!(screen.contains("Set secret"));
+    assert!(screen.contains("Service"));
+    assert!(screen.contains("Scope"));
+    assert!(screen.contains("Secret value"));
+    assert!(screen.contains("anthropic"));
+    assert!(screen.contains("(global)"));
+    assert!(screen.contains("Cancel"));
+}
+
+#[test]
+fn set_secret_dialog_lists_every_builtin_service() {
+    let mut app = App::with_sandboxes(&[]);
+    app.set_secret();
+    // Opening a Select is app state, so the panel can be rendered deterministically.
+    app.set_secret_service_open(true);
+
+    let screen = render(&app);
+    for service in SERVICES {
+        assert!(screen.contains(service), "service {service} is offered");
+    }
 }
 
 #[test]

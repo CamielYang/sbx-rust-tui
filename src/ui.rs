@@ -13,7 +13,7 @@ use ratcn::{InputState, Theme};
 
 use crate::app::{
     App, CONFIRM_DIALOG, CREATE_DIALOG, DashboardTab, FormField, INFO_DIALOG, PORTS_DIALOG,
-    PortField, Sandbox, TAB_ROW, WORKSPACE_DIALOG,
+    PortField, SET_SECRET_DIALOG, Sandbox, TAB_ROW, WORKSPACE_DIALOG,
 };
 
 mod dashboard;
@@ -24,7 +24,9 @@ use self::dashboard::{
     paint_body, paint_content_frame, paint_footer, paint_header, paint_quit, paint_secrets_body,
     paint_secrets_toolbar, paint_tabs, paint_toolbar,
 };
-use self::dialogs::{confirm_dialog, create_dialog, info_dialog, ports_dialog, workspace_dialog};
+use self::dialogs::{
+    confirm_dialog, create_dialog, info_dialog, ports_dialog, set_secret_dialog, workspace_dialog,
+};
 
 // The UI tests reach these helpers through `use super::*`.
 #[cfg(test)]
@@ -50,6 +52,15 @@ pub enum Msg {
     OpenWizard,
     Refresh,
     SetSecret,
+    CancelSetSecret,
+    SecretServiceOpenChanged(bool),
+    SecretServiceFocused(usize),
+    SecretServiceSelected(usize),
+    SecretScopeOpenChanged(bool),
+    SecretScopeFocused(usize),
+    SecretScopeSelected(usize),
+    SecretValueChanged(InputState),
+    SubmitSecret,
     RefreshSecrets,
     /// Secret name followed by its scope (the sandbox name, or "global").
     DeleteSecret(String, String),
@@ -111,6 +122,15 @@ pub fn apply(app: &mut App, msg: Msg) {
             app.notify_success("Sandbox list refreshed", None);
         }
         Msg::SetSecret => app.set_secret(),
+        Msg::CancelSetSecret => app.cancel_set_secret(),
+        Msg::SecretServiceOpenChanged(open) => app.set_secret_service_open(open),
+        Msg::SecretServiceFocused(index) => app.set_secret_service_focus(index),
+        Msg::SecretServiceSelected(index) => app.set_secret_service(index),
+        Msg::SecretScopeOpenChanged(open) => app.set_secret_scope_open(open),
+        Msg::SecretScopeFocused(index) => app.set_secret_scope_focus(index),
+        Msg::SecretScopeSelected(index) => app.set_secret_scope(index),
+        Msg::SecretValueChanged(state) => app.set_secret_state(state),
+        Msg::SubmitSecret => app.submit_secret(),
         Msg::RefreshSecrets => {
             app.refresh_secrets();
             app.notify_success("Secret list refreshed", None);
@@ -151,6 +171,11 @@ pub fn apply(app: &mut App, msg: Msg) {
 /// leaves a path parked on a component that is no longer declared, and Tab
 /// cannot move from there, so hand focus back to the list instead.
 pub fn settle_focus(app: &mut App) {
+    // A modal owns focus while it is open. Reparking the path on the tab row
+    // here would pull it off the dialog's fields every frame.
+    if app.modals_ref().top().is_some() {
+        return;
+    }
     if app.active_tab() != DashboardTab::Sandboxes {
         *app.focus_mut() = FocusState::intent([TAB_ROW]);
         return;
@@ -237,6 +262,9 @@ pub fn declare(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme) {
     // Declared last: the picker stacks above the create wizard that opened it.
     if app.modals_ref().is_open(WORKSPACE_DIALOG) {
         ctx.modal(WORKSPACE_DIALOG, workspace_dialog(app, &theme), area);
+    }
+    if app.modals_ref().is_open(SET_SECRET_DIALOG) {
+        ctx.modal(SET_SECRET_DIALOG, set_secret_dialog(app, &theme), area);
     }
 }
 

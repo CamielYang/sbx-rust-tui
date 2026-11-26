@@ -117,6 +117,11 @@ impl App {
         self.deleted_for_test.take()
     }
 
+    /// The command the Set secret dialog handed to the test hook.
+    pub fn take_set_for_test(&mut self) -> Option<String> {
+        self.set_for_test.take()
+    }
+
     /// Queue a fake metrics result so `poll_info` can be tested without
     /// running `sbx exec` inside the guest.
     pub fn queue_info_result_for_test(&mut self, name: &str, details: SandboxDetails) {

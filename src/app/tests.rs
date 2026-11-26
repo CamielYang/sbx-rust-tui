@@ -833,10 +833,95 @@ fn secrets_start_empty_until_the_cli_is_read() {
 }
 
 #[test]
-fn set_secret_is_still_read_only() {
-    let mut app = App::with_secrets(&[("global", "github")]);
+fn set_secret_opens_a_dialog_with_global_and_sandbox_scopes() {
+    let mut app = App::with_sandboxes(&["alpha", "beta"]);
     app.set_secret();
-    assert!(app.message().contains("Set secret"));
+
+    assert!(matches!(app.mode(), Mode::SetSecret));
+    assert!(app.modals_ref().is_open(SET_SECRET_DIALOG));
+    let form = app.secret_form().unwrap();
+    assert_eq!(form.scopes(), &["(global)", "alpha", "beta"]);
+    assert_eq!(form.service(), Some("anthropic"));
+    assert_eq!(form.scope(), Some("(global)"));
+    assert!(form.secret().value().is_empty());
+}
+
+#[test]
+fn setting_a_global_secret_omits_the_sandbox_flag() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_secret();
+    app.set_secret_service(3); // github
+    app.set_secret_state(InputState::new("sk-test"));
+    app.submit_secret();
+
+    assert_eq!(
+        app.take_set_for_test().as_deref(),
+        Some("echo \"sk-test\" | sbx secret set github -f")
+    );
+    assert!(!app.modals_ref().is_open(SET_SECRET_DIALOG));
+    assert!(app.secret_form().is_none());
+    assert!(app.message().contains("Set secret 'github' for global"));
+}
+
+#[test]
+fn setting_a_scoped_secret_targets_the_sandbox() {
+    let mut app = App::with_sandboxes(&["alpha", "beta"]);
+    app.set_secret();
+    app.set_secret_scope(2); // beta
+    app.set_secret_state(InputState::new("token with spaces"));
+    app.submit_secret();
+
+    assert_eq!(
+        app.take_set_for_test().as_deref(),
+        Some("echo \"token with spaces\" | sbx secret set anthropic --sandbox beta -f")
+    );
+    assert!(app.message().contains("for beta"));
+}
+
+#[test]
+fn shell_quoting_keeps_the_pipeline_intact() {
+    let mut app = App::with_sandboxes(&["my sandbox"]);
+    app.set_secret();
+    app.set_secret_scope(1);
+    app.set_secret_state(InputState::new("say \"hi\" $HOME"));
+    app.submit_secret();
+
+    assert_eq!(
+        app.take_set_for_test().as_deref(),
+        Some(
+            "echo \"say \\\"hi\\\" \\$HOME\" | sbx secret set anthropic --sandbox \"my sandbox\" -f"
+        )
+    );
+}
+
+#[test]
+fn setting_a_secret_requires_a_value() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_secret();
+    app.submit_secret();
+
+    assert!(app.take_set_for_test().is_none());
+    assert!(app.modals_ref().is_open(SET_SECRET_DIALOG));
+    assert!(app.secret_form().unwrap().attempted());
+    assert!(app.message().contains("Enter a secret value"));
+}
+
+#[test]
+fn cancelling_set_secret_runs_nothing() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_secret();
+    app.cancel_set_secret();
+
+    assert!(app.secret_form().is_none());
+    assert!(matches!(app.mode(), Mode::Normal));
+    assert_eq!(app.message(), "Set secret cancelled.");
+    assert!(app.take_set_for_test().is_none());
+}
+
+#[test]
+fn shell_preview_shows_the_pipeline_not_the_wrapper() {
+    let command = PendingCommand::shell("echo \"x\" | sbx secret set github -f");
+    assert_eq!(command.preview(), "echo \"x\" | sbx secret set github -f");
 }
 
 #[test]

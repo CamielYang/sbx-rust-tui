@@ -1,4 +1,5 @@
-//! Modal dialog builders: create wizard, confirmation, details, and ports.
+//! Modal dialog builders: create wizard, confirmation, details, ports, and the
+//! Set secret form.
 
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -15,7 +16,7 @@ use super::widgets::{detail_line, field_row, input, join_usage};
 use super::*;
 use crate::app::{
     AGENTS, FormField, HostMount, MountMode, PendingAction, PortField, PortMapping, SandboxDetails,
-    WORKSPACE_PARENT, WorkspaceMode, WorkspacePicker,
+    SERVICES, SecretForm, WORKSPACE_PARENT, WorkspaceMode, WorkspacePicker,
 };
 
 /// The confirmation dialog's focused Cancel sets the look for every dismiss
@@ -645,5 +646,103 @@ pub(super) fn workspace_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
         .action(
             "create-here",
             Button::new("Create here").on_press(|| Msg::CreateWorkspaceHere),
+        )
+}
+
+// --- set secret dialog ------------------------------------------------------
+
+/// Service and scope are index-backed `Select`s; the secret itself is an
+/// `Input`. Scope options are a snapshot taken when the dialog opened: the
+/// global store is always the first row, followed by every sandbox name.
+pub(super) fn set_secret_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
+    let theme = *theme;
+    let Some(form) = app.secret_form() else {
+        return Dialog::new()
+            .title("Set secret")
+            .description("The secret form is no longer available.")
+            .on_dismiss(|| Msg::CancelSetSecret)
+            .action("close", cancel_button("Close", || Msg::CancelSetSecret));
+    };
+
+    let service = Select::new(
+        SERVICES
+            .iter()
+            .enumerate()
+            .map(|(index, name)| ListItem::new(index, (*name).to_owned())),
+    )
+    .placeholder("Choose a service")
+    .open(
+        |state: &App| state.secret_form().is_some_and(SecretForm::service_open),
+        Msg::SecretServiceOpenChanged,
+    )
+    .item_focus(
+        |state: &App| state.secret_form().map(|form| form.service_focus()),
+        Msg::SecretServiceFocused,
+    )
+    .selection(
+        |state: &App| state.secret_form().map(SecretForm::service_index),
+        Msg::SecretServiceSelected,
+    )
+    .max_visible_items(SERVICES.len() as u16);
+
+    let scopes = Select::new(
+        form.scopes()
+            .iter()
+            .enumerate()
+            .map(|(index, scope)| ListItem::new(index, scope.clone())),
+    )
+    .open(
+        |state: &App| state.secret_form().is_some_and(SecretForm::scope_open),
+        Msg::SecretScopeOpenChanged,
+    )
+    .item_focus(
+        |state: &App| state.secret_form().map(|form| form.scope_focus()),
+        Msg::SecretScopeFocused,
+    )
+    .selection(
+        |state: &App| state.secret_form().map(SecretForm::scope_index),
+        Msg::SecretScopeSelected,
+    )
+    .max_visible_items(8);
+
+    let secret_input = input(
+        Msg::SecretValueChanged,
+        |state: &App| state.secret_form().expect("secret form").secret(),
+        "Secret value",
+        false,
+        form.attempted() && form.secret().value().trim().is_empty(),
+    );
+
+    let (status, status_color) = if form.attempted() && form.secret().value().trim().is_empty() {
+        (" Enter a secret value before setting it.", theme.destructive)
+    } else {
+        (
+            " Tab or click between fields · Esc cancels",
+            theme.muted_foreground,
+        )
+    };
+
+    Dialog::new()
+        .title("Set secret")
+        .outer_width(70)
+        .on_dismiss(|| Msg::CancelSetSecret)
+        .content(7, move |ctx| {
+            let rows = Layout::vertical([Constraint::Length(1); 7]).split(ctx.area());
+            let row = |index: usize| rows[index * 2];
+            field_row(ctx, row(0), "Service", service, theme);
+            field_row(ctx, row(1), "Scope", scopes, theme);
+            field_row(ctx, row(2), "Secret", secret_input, theme);
+            ctx.paint_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    status,
+                    Style::default().fg(status_color),
+                ))),
+                row(3),
+            );
+        })
+        .action("cancel", cancel_button("Cancel", || Msg::CancelSetSecret))
+        .action(
+            "set-secret",
+            Button::new("Set secret").on_press(|| Msg::SubmitSecret),
         )
 }

@@ -1,6 +1,6 @@
 use super::*;
 use crate::app::test_support::TempWorkspaceDir;
-use crate::app::{Mode, WorkspaceMode};
+use crate::app::{Mode, SET_SECRET_DIALOG, WorkspaceMode};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{Terminal, backend::TestBackend};
 use ratcn::runtime::{EventResult, Ratcn};
@@ -142,6 +142,17 @@ fn quit_button_in_the_title_row_quits() {
     let emitted = click(&mut terminal, &mut app, &mut ratcn, 95, 0);
     assert!(emitted.iter().any(|message| matches!(message, Msg::Quit)));
     assert!(app.should_quit());
+}
+
+#[test]
+fn an_open_modal_keeps_focus_off_the_tab_row() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.select_tab(DashboardTab::Secrets);
+    app.set_secret();
+    *app.focus_mut() = FocusState::intent(["set-secret-dialog", "field-Secret"]);
+
+    settle_focus(&mut app);
+    assert!(app.focus_ref().contains_path(["set-secret-dialog"]));
 }
 
 #[test]
@@ -612,6 +623,83 @@ fn confirming_an_action_hands_it_to_the_app() {
         app.take_confirmed_for_test(),
         Some(PendingAction::Stop("alpha".to_owned()))
     );
+}
+
+#[test]
+fn set_secret_button_opens_a_dialog_that_selects_and_submits() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.select_tab(DashboardTab::Secrets);
+    let mut ratcn = new_runtime();
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    draw(&mut terminal, &app, &mut ratcn);
+
+    let (x, y) = position_from_bottom(&screen(&terminal), "+ Set secret").expect("set button");
+    let emitted = click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+    assert!(
+        emitted
+            .iter()
+            .any(|message| matches!(message, Msg::SetSecret))
+    );
+    assert!(app.modals_ref().is_open(SET_SECRET_DIALOG));
+
+    // Pick github from the service panel.
+    let (x, y) = position_from_bottom(&screen(&terminal), "anthropic").expect("service trigger");
+    click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+    assert!(app.secret_form().unwrap().service_open());
+    let (x, y) = position_from_bottom(&screen(&terminal), "github").expect("github option");
+    click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+    assert_eq!(app.secret_form().unwrap().service(), Some("github"));
+
+    // Pick alpha from the scope panel; "(global)" stays the first option.
+    let (x, y) = position_from_bottom(&screen(&terminal), "(global)").expect("scope trigger");
+    click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+    assert!(app.secret_form().unwrap().scope_open());
+    let (x, y) = position_from_bottom(&screen(&terminal), "alpha").expect("alpha option");
+    click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+    assert_eq!(app.secret_form().unwrap().scope(), Some("alpha"));
+
+    // Type into the secret input.
+    let (x, y) = position_from_bottom(&screen(&terminal), "Secret value").expect("secret input");
+    click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+    for character in "sk-test".chars() {
+        let key = Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        if let EventResult::Emit(message) = ratcn.handle_event(key, &app) {
+            apply(&mut app, message);
+        }
+    }
+    assert_eq!(app.secret_form().unwrap().secret().value(), "sk-test");
+
+    let (x, y) = position_from_bottom(&screen(&terminal), "Set secret").expect("submit button");
+    let emitted = click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+    assert!(
+        emitted
+            .iter()
+            .any(|message| matches!(message, Msg::SubmitSecret))
+    );
+    assert_eq!(
+        app.take_set_for_test().as_deref(),
+        Some("echo \"sk-test\" | sbx secret set github --sandbox alpha -f")
+    );
+    assert!(!app.modals_ref().is_open(SET_SECRET_DIALOG));
+}
+
+#[test]
+fn escape_dismisses_the_set_secret_dialog() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.select_tab(DashboardTab::Secrets);
+    app.set_secret();
+    let mut ratcn = new_runtime();
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    draw(&mut terminal, &app, &mut ratcn);
+
+    let escape = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    match ratcn.handle_event(escape, &app) {
+        EventResult::Emit(message) => apply(&mut app, message),
+        other => panic!("Esc should dismiss the dialog, got {other:?}"),
+    }
+    assert!(!app.modals_ref().is_open(SET_SECRET_DIALOG));
+    assert!(app.secret_form().is_none());
+    assert!(app.take_set_for_test().is_none());
 }
 
 #[test]

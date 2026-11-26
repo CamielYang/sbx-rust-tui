@@ -15,6 +15,7 @@ mod form;
 mod ports;
 mod ports_flow;
 mod sandbox;
+mod secret_form;
 mod secrets;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -28,6 +29,7 @@ pub use self::ports::{PortField, PortForm, PortMapping, PortsView};
 pub use self::sandbox::{
     HostMount, MountMode, Sandbox, SandboxDetails, fetch_sandboxes, inspect_sandbox,
 };
+pub use self::secret_form::{SERVICES, SecretForm};
 pub use self::secrets::{Secret, fetch_secrets};
 pub use self::workspace::{WORKSPACE_PARENT, WorkspacePicker};
 
@@ -50,6 +52,7 @@ pub const INFO_DIALOG: &str = "info-dialog";
 pub const CONFIRM_DIALOG: &str = "confirm-dialog";
 pub const PORTS_DIALOG: &str = "ports-dialog";
 pub const WORKSPACE_DIALOG: &str = "workspace-dialog";
+pub const SET_SECRET_DIALOG: &str = "set-secret-dialog";
 
 /// Stable id for the tab row, used as a focus target when the visible tab changes.
 pub const TAB_ROW: &str = "tab-row";
@@ -80,6 +83,7 @@ pub enum Mode {
     Ports,
     /// The folder picker sits above the create wizard.
     Workspace,
+    SetSecret,
 }
 
 pub struct App {
@@ -99,6 +103,7 @@ pub struct App {
     ports: Option<PortsView>,
     port_form: PortForm,
     workspace_picker: Option<WorkspacePicker>,
+    secret_form: Option<SecretForm>,
     pending_action: Option<PendingAction>,
     pending_external: Option<PendingCommand>,
     creation: Option<workers::Creation>,
@@ -118,6 +123,9 @@ pub struct App {
     /// In tests, deleting a secret records the command instead of running `sbx`.
     #[cfg(test)]
     deleted_for_test: Option<String>,
+    /// In tests, setting a secret records the command instead of running `sbx`.
+    #[cfg(test)]
+    set_for_test: Option<String>,
 }
 
 impl App {
@@ -137,6 +145,7 @@ impl App {
             ports: None,
             port_form: PortForm::new(),
             workspace_picker: None,
+            secret_form: None,
             pending_action: None,
             pending_external: None,
             creation: None,
@@ -152,6 +161,8 @@ impl App {
             unpublished_for_test: None,
             #[cfg(test)]
             deleted_for_test: None,
+            #[cfg(test)]
+            set_for_test: None,
         };
         app.refresh_sandboxes();
         app.refresh_secrets();
@@ -179,6 +190,8 @@ impl App {
             Mode::Confirm
         } else if self.modals.is_open(PORTS_DIALOG) {
             Mode::Ports
+        } else if self.modals.is_open(SET_SECRET_DIALOG) {
+            Mode::SetSecret
         } else {
             Mode::Normal
         }
@@ -260,6 +273,10 @@ impl App {
 
     pub fn workspace_picker(&self) -> Option<&WorkspacePicker> {
         self.workspace_picker.as_ref()
+    }
+
+    pub fn secret_form(&self) -> Option<&SecretForm> {
+        self.secret_form.as_ref()
     }
 
     pub fn port_invalid(&self, field: PortField) -> bool {
@@ -429,12 +446,6 @@ impl App {
             Ok(secrets) => self.secrets = secrets,
             Err(error) => self.notify_error("Could not list secrets", error),
         }
-    }
-
-    /// Setting a secret is deliberately read-only for now; the button stays
-    /// visible so the layout matches the eventual workflow.
-    pub fn set_secret(&mut self) {
-        self.notify_info("Set secret is not available yet", None);
     }
 
     /// A row's Delete button only asks for confirmation; the CLI runs once the

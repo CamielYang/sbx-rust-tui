@@ -251,6 +251,7 @@ impl Form {
             program: "sbx".to_owned(),
             args,
             env,
+            shell_preview: None,
         }
     }
 

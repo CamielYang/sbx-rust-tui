@@ -4,7 +4,11 @@ use std::process::Command as ProcessCommand;
 
 use serde_json::Value;
 
+#[cfg(not(test))]
+use super::commands::stderr_detail;
 use super::sandbox::json_text;
+use super::secret_form::{GLOBAL_SCOPE, SecretForm};
+use super::{App, Mode, PendingCommand, SET_SECRET_DIALOG};
 
 /// One row of `sbx secret ls --format json`, reduced to the fields the
 /// dashboard table shows.
@@ -69,13 +73,169 @@ fn parse_secrets(bytes: &[u8]) -> Result<Vec<Secret>, String> {
     Ok(secrets)
 }
 
-impl super::App {
+impl App {
     /// A queued deletion is skipped if the row is no longer in the table when
     /// the dialog is confirmed (e.g. after a manual Refresh).
     pub(super) fn has_secret(&self, name: &str, scope: &str) -> bool {
         self.secrets
             .iter()
             .any(|secret| secret.name == name && secret.scope == scope)
+    }
+
+    /// Open the Set secret dialog. Scope options are snapshot from the current
+    /// sandbox list, with `"(global)"` first.
+    pub fn set_secret(&mut self) {
+        if self.mode() != Mode::Normal {
+            return;
+        }
+        self.secret_form = Some(SecretForm::new(&self.sandboxes));
+        let _ = self.modals.open(SET_SECRET_DIALOG, &mut self.focus);
+    }
+
+    pub fn cancel_set_secret(&mut self) {
+        self.close_modal(SET_SECRET_DIALOG);
+        self.secret_form = None;
+        self.notify_info("Set secret cancelled.", None);
+    }
+
+    pub fn set_secret_service_open(&mut self, open: bool) {
+        if let Some(form) = self.secret_form.as_mut() {
+            form.set_service_open(open);
+        }
+    }
+
+    pub fn set_secret_service_focus(&mut self, index: usize) {
+        if let Some(form) = self.secret_form.as_mut() {
+            form.set_service_focus(index);
+        }
+    }
+
+    pub fn set_secret_service(&mut self, index: usize) {
+        if let Some(form) = self.secret_form.as_mut() {
+            form.set_service_index(index);
+        }
+    }
+
+    pub fn set_secret_scope_open(&mut self, open: bool) {
+        if let Some(form) = self.secret_form.as_mut() {
+            form.set_scope_open(open);
+        }
+    }
+
+    pub fn set_secret_scope_focus(&mut self, index: usize) {
+        if let Some(form) = self.secret_form.as_mut() {
+            form.set_scope_focus(index);
+        }
+    }
+
+    pub fn set_secret_scope(&mut self, index: usize) {
+        if let Some(form) = self.secret_form.as_mut() {
+            form.set_scope_index(index);
+        }
+    }
+
+    pub fn set_secret_state(&mut self, state: ratcn::InputState) {
+        if let Some(form) = self.secret_form.as_mut() {
+            form.set_secret(state);
+        }
+    }
+
+    /// The dialog's **Set secret** button. The value is piped into `sbx` by the
+    /// shell, since the CLI reads it from stdin rather than an argument.
+    pub fn submit_secret(&mut self) {
+        if self.mode() != Mode::SetSecret {
+            return;
+        }
+        let Some(form) = self.secret_form.as_mut() else {
+            return;
+        };
+        form.mark_attempted();
+        let service = form.service().map(str::to_owned);
+        let scope = form.scope().map(str::to_owned);
+        let secret = form.secret().value().trim().to_owned();
+
+        let (Some(service), Some(scope)) = (service, scope) else {
+            self.notify_error("Invalid secret", "Choose a service and a scope.");
+            return;
+        };
+        if secret.is_empty() {
+            self.notify_error("Invalid secret", "Enter a secret value.");
+            return;
+        }
+
+        let pending = Self::set_secret_command(&service, &scope, &secret);
+        let target = if scope == GLOBAL_SCOPE {
+            "global".to_owned()
+        } else {
+            scope
+        };
+        let success = format!("Set secret '{service}' for {target}.");
+
+        #[cfg(test)]
+        {
+            self.set_for_test = Some(pending.preview());
+            self.close_modal(SET_SECRET_DIALOG);
+            self.secret_form = None;
+            self.notify_success(success, None);
+        }
+
+        #[cfg(not(test))]
+        {
+            let detail = match pending.run() {
+                Ok(output) if output.status.success() => {
+                    self.close_modal(SET_SECRET_DIALOG);
+                    self.secret_form = None;
+                    self.refresh_secrets();
+                    self.notify_success(success, None);
+                    return;
+                }
+                Ok(output) => stderr_detail(&output, "sbx secret set failed"),
+                Err(error) => error.to_string(),
+            };
+            self.notify_error("Could not set secret", detail);
+        }
+    }
+
+    /// `echo "<value>" | sbx secret set <service> [--sandbox <scope>] -f`
+    /// Global secrets omit the sandbox flag entirely.
+    fn set_secret_command(service: &str, scope: &str, secret: &str) -> PendingCommand {
+        let mut command = format!(
+            "echo \"{}\" | sbx secret set {}",
+            shell_double_quoted(secret),
+            service
+        );
+        if scope != GLOBAL_SCOPE {
+            command.push_str(" --sandbox ");
+            command.push_str(&shell_word(scope));
+        }
+        command.push_str(" -f");
+        PendingCommand::shell(command)
+    }
+}
+
+/// Escape the characters that would end or expand a double-quoted shell word.
+fn shell_double_quoted(value: &str) -> String {
+    let mut escaped = String::new();
+    for character in value.chars() {
+        if matches!(character, '\\' | '"' | '$' | '`') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
+/// Simple sandbox names are safe as written; anything else gets quoted so a
+/// name with spaces cannot split into two arguments.
+fn shell_word(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
+    {
+        value.to_owned()
+    } else {
+        format!("\"{}\"", shell_double_quoted(value))
     }
 }
 
