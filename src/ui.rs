@@ -21,8 +21,8 @@ mod dialogs;
 mod widgets;
 
 use self::dashboard::{
-    paint_body, paint_empty_section, paint_footer, paint_header, paint_quit, paint_tabs,
-    paint_toolbar,
+    paint_body, paint_content_frame, paint_empty_section, paint_footer, paint_header, paint_quit,
+    paint_tabs, paint_toolbar,
 };
 use self::dialogs::{confirm_dialog, create_dialog, info_dialog, ports_dialog, workspace_dialog};
 
@@ -177,26 +177,33 @@ pub fn declare(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme) {
 
     let vertical = Layout::vertical([
         Constraint::Length(1), // title + quit
-        Constraint::Length(1), // tabs
-        Constraint::Length(1), // toolbar buttons
         Constraint::Length(1), // spacing
-        Constraint::Min(0),    // active tab's section
+        Constraint::Length(1), // tabs
+        Constraint::Length(1), // spacing
+        Constraint::Min(0),    // white-bordered content wrapper
         Constraint::Length(1), // spacing
         Constraint::Length(1), // footer
     ])
     .split(area);
 
     paint_header(ctx, app, &theme, vertical[0]);
+    let content = paint_content_frame(ctx, &theme, vertical[4]);
+    let content_rows = Layout::vertical([
+        Constraint::Length(1), // toolbar buttons
+        Constraint::Length(1), // spacing
+        Constraint::Min(0),    // active tab's section
+    ])
+    .split(content);
     match app.active_tab() {
         DashboardTab::Sandboxes => {
-            paint_toolbar(ctx, app, &theme, vertical[2]);
-            paint_body(ctx, app, &theme, vertical[4]);
+            paint_toolbar(ctx, app, &theme, content_rows[0]);
+            paint_body(ctx, app, &theme, content_rows[2]);
         }
-        DashboardTab::Secrets => paint_empty_section(ctx, &theme, vertical[4]),
+        DashboardTab::Secrets => paint_empty_section(ctx, &theme, content_rows[2]),
     }
     // Declared after the sandbox controls so startup focus still lands on
-    // "+ New sandbox"; the visual row stays directly under the title.
-    paint_tabs(ctx, app, vertical[1]);
+    // "+ New sandbox"; the visual row stays just below the title spacing.
+    paint_tabs(ctx, app, vertical[2]);
     paint_footer(ctx, &theme, vertical[6]);
     paint_quit(ctx, app, vertical[0]);
 

@@ -51,10 +51,27 @@ fn renders_tabs_with_quit_on_the_title_row() {
     let title_row = rows[0];
     let quit = title_row.find("Quit").expect("quit button on title row");
     assert!(quit > title_row.find("DOCKER SANDBOXES RUST").unwrap());
-    assert!(rows[1].contains("Sandboxes"));
-    assert!(rows[1].contains("Secrets"));
-    assert!(rows[4].contains(" Sandboxes "));
-    assert!(rows[5].contains("alpha"));
+    assert!(rows[1].trim().is_empty(), "spacing below the title row");
+    assert!(rows[2].contains("Sandboxes"));
+    assert!(rows[2].contains("Secrets"));
+    assert!(
+        rows[3].trim().is_empty(),
+        "spacing between tabs and content"
+    );
+    assert!(rows[8].contains(" Sandboxes "));
+    assert!(rows[9].contains("alpha"));
+
+    let buffer = draw(&app);
+    assert_eq!(
+        buffer.cell((0, 4)).unwrap().fg,
+        Color::White,
+        "white content wrapper outline"
+    );
+    assert_eq!(
+        buffer.cell((10, 5)).unwrap().symbol(),
+        " ",
+        "padding inside the wrapper"
+    );
 }
 
 #[test]
@@ -63,9 +80,10 @@ fn secrets_tab_shows_only_an_empty_section() {
     app.select_tab(DashboardTab::Secrets);
 
     let screen = render(&app);
-    assert!(screen.contains("Sandboxes"));
-    assert!(screen.contains("Secrets"));
-    assert!(screen.lines().any(|row| row.contains(" Secrets ")));
+    let rows: Vec<&str> = screen.lines().collect();
+    assert!(rows[2].contains("Sandboxes"));
+    assert!(rows[2].contains("Secrets"));
+    assert_eq!(draw(&app).cell((0, 4)).unwrap().fg, Color::White);
     assert!(!screen.contains("alpha"));
     assert!(!screen.contains("+ New sandbox"));
     assert!(!screen.contains("Refresh"));
@@ -121,7 +139,9 @@ fn running_status_is_green_in_list_and_actions() {
         .lines()
         .position(|line| line.contains("status: running"))
         .unwrap();
-    let column = screen.lines().nth(row).unwrap().find("running").unwrap();
+    let line = screen.lines().nth(row).unwrap();
+    let byte = line.find("running").unwrap();
+    let column = line[..byte].chars().count();
     assert_eq!(
         buffer.content()[row * width + column].fg,
         RUNNING_GREEN,

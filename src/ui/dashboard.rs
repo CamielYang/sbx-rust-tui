@@ -3,7 +3,7 @@
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 use ratcn::color::{DISABLED_DIM, FOCUS_SHIFT, HOVER_SHIFT, away_from, dim, nearest_to};
 use ratcn::runtime::DeclareCtx;
 use ratcn::{
@@ -104,16 +104,39 @@ pub(super) fn paint_body(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &
     paint_actions(ctx, app, theme, columns[1]);
 }
 
+/// Paint the single white outline around everything a tab shows, and return
+/// the padded area its toolbar and body should be drawn into.
+pub(super) fn paint_content_frame(
+    ctx: &mut DeclareCtx<'_, App, Msg>,
+    theme: &Theme,
+    area: Rect,
+) -> Rect {
+    let frame = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::White))
+        .style(Style::default().bg(theme.surface))
+        .padding(Padding::new(1, 1, 1, 1));
+    let inner = frame.inner(area);
+    ctx.paint_widget(frame, area);
+    inner
+}
+
 /// The Secrets tab is intentionally bare for now: just its own empty section.
 pub(super) fn paint_empty_section(ctx: &mut DeclareCtx<'_, App, Msg>, theme: &Theme, area: Rect) {
     ctx.paint_widget(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Secrets ")
-            .border_style(Style::default().fg(theme.border))
-            .style(Style::default().bg(theme.surface)),
+        Block::default().style(Style::default().bg(theme.surface)),
         area,
     );
+}
+
+/// Inner panes keep the theme's border; the white outline belongs to the
+/// wrapper, so these stay quiet inside it.
+fn pane_block(title: &str, fill: Color, border: Color) -> Block<'_> {
+    Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(Style::default().fg(border))
+        .style(Style::default().bg(fill))
 }
 
 /// Hovering shows the cursor row, and hover focus puts focus on the list. Let
@@ -128,11 +151,7 @@ fn sandbox_list_style(theme: &Theme) -> ListStyle {
 
 fn paint_sandbox_list(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme, area: Rect) {
     let theme = *theme;
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Sandboxes ")
-        .border_style(Style::default().fg(theme.border))
-        .style(Style::default().bg(theme.field));
+    let block = pane_block(" Sandboxes ", theme.field, theme.border);
     let inner = block.inner(area);
 
     let items: Vec<ListItem<String>> = if app.sandboxes().is_empty() {
@@ -255,11 +274,7 @@ const STOPPED_ACTIONS: &[Action] = &[
 ];
 
 fn paint_actions(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Actions ")
-        .border_style(Style::default().fg(theme.border))
-        .style(Style::default().bg(theme.surface));
+    let block = pane_block(" Actions ", theme.surface, theme.border);
     let inner = block.inner(area);
     // The pane's surface goes down first; buttons paint their fills on top.
     ctx.paint_widget(block, area);

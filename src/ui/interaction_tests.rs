@@ -83,7 +83,7 @@ fn clicking_a_sandbox_focuses_its_actions() {
     let moved = Event::Mouse(crossterm::event::MouseEvent {
         kind: crossterm::event::MouseEventKind::Moved,
         column: 6,
-        row: 6,
+        row: 10,
         modifiers: KeyModifiers::NONE,
     });
     if let EventResult::Emit(message) = ratcn.handle_event(moved, &app) {
@@ -91,7 +91,7 @@ fn clicking_a_sandbox_focuses_its_actions() {
     }
     assert_eq!(app.selected_name().as_deref(), Some("alpha"));
 
-    click(&mut terminal, &mut app, &mut ratcn, 6, 6);
+    click(&mut terminal, &mut app, &mut ratcn, 6, 10);
     assert_eq!(app.selected_name().as_deref(), Some("beta"));
     assert!(app.focus_ref().contains_path(["sandbox-list"]));
 
@@ -111,7 +111,7 @@ fn clicking_a_tab_switches_the_visible_section() {
     let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
     draw(&mut terminal, &app, &mut ratcn);
 
-    let emitted = click(&mut terminal, &mut app, &mut ratcn, 18, 1);
+    let emitted = click(&mut terminal, &mut app, &mut ratcn, 18, 2);
     assert!(
         emitted
             .iter()
@@ -163,14 +163,14 @@ fn action_buttons_share_one_left_aligned_column() {
     let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
     draw(&mut terminal, &app, &mut ratcn);
     // "Publish ports" sets the shared width: 13 label cells + 4 of padding.
-    for (row, fill) in [(8, STOP_ORANGE), (9, EXEC_GRAY), (10, PORTS_CYAN)] {
-        for x in 65..82 {
+    for (row, fill) in [(12, STOP_ORANGE), (13, EXEC_GRAY), (14, PORTS_CYAN)] {
+        for x in 63..80 {
             assert_eq!(cell_bg(&terminal, x, row), fill, "fill at ({x}, {row})");
         }
         assert_ne!(
-            cell_bg(&terminal, 82, row),
+            cell_bg(&terminal, 80, row),
             fill,
-            "button must stop at x=82"
+            "button must stop at x=80"
         );
     }
 }
@@ -183,13 +183,13 @@ fn hovering_the_sandbox_list_only_highlights_the_row() {
     draw(&mut terminal, &app, &mut ratcn);
 
     // A cell below the rows belongs to the list's backdrop, not a row.
-    let resting_box = cell_bg(&terminal, 30, 12);
-    let resting_row = cell_bg(&terminal, 6, 5);
+    let resting_box = cell_bg(&terminal, 30, 16);
+    let resting_row = cell_bg(&terminal, 6, 9);
 
     let moved = Event::Mouse(crossterm::event::MouseEvent {
         kind: crossterm::event::MouseEventKind::Moved,
         column: 6,
-        row: 5,
+        row: 9,
         modifiers: KeyModifiers::NONE,
     });
     if let EventResult::Emit(message) = ratcn.handle_event(moved, &app) {
@@ -198,12 +198,12 @@ fn hovering_the_sandbox_list_only_highlights_the_row() {
     draw(&mut terminal, &app, &mut ratcn);
 
     assert_eq!(
-        cell_bg(&terminal, 30, 12),
+        cell_bg(&terminal, 30, 16),
         resting_box,
         "hover must not recolor the whole sandbox box"
     );
     assert_ne!(
-        cell_bg(&terminal, 6, 5),
+        cell_bg(&terminal, 6, 9),
         resting_row,
         "hover must still highlight the sandbox row"
     );
@@ -215,18 +215,18 @@ fn action_buttons_change_color_on_hover() {
     let mut ratcn = new_runtime();
     let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
     draw(&mut terminal, &app, &mut ratcn);
-    let resting = cell_bg(&terminal, 70, 8);
+    let resting = cell_bg(&terminal, 70, 12);
     assert_eq!(resting, STOP_ORANGE);
 
     let moved = Event::Mouse(crossterm::event::MouseEvent {
         kind: crossterm::event::MouseEventKind::Moved,
         column: 70,
-        row: 8,
+        row: 12,
         modifiers: KeyModifiers::NONE,
     });
     ratcn.handle_event(moved, &app);
     draw(&mut terminal, &app, &mut ratcn);
-    assert_ne!(cell_bg(&terminal, 70, 8), resting);
+    assert_ne!(cell_bg(&terminal, 70, 12), resting);
 }
 
 #[test]
@@ -235,7 +235,7 @@ fn action_buttons_emit_only_their_own_command() {
     let mut ratcn = new_runtime();
     let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
     draw(&mut terminal, &running, &mut ratcn);
-    let emitted = click(&mut terminal, &mut running, &mut ratcn, 70, 8);
+    let emitted = click(&mut terminal, &mut running, &mut ratcn, 70, 12);
     assert!(
         emitted
             .iter()
@@ -250,7 +250,7 @@ fn action_buttons_emit_only_their_own_command() {
     let mut stopped = App::with_sandbox_statuses(&[("alpha", "stopped")]);
     let mut ratcn = new_runtime();
     draw(&mut terminal, &stopped, &mut ratcn);
-    let emitted = click(&mut terminal, &mut stopped, &mut ratcn, 70, 8);
+    let emitted = click(&mut terminal, &mut stopped, &mut ratcn, 70, 12);
     assert!(
         emitted
             .iter()
@@ -265,11 +265,10 @@ fn action_buttons_emit_only_their_own_command() {
 
 fn position_from_bottom(screen: &str, needle: &str) -> Option<(u16, u16)> {
     let lines: Vec<_> = screen.lines().collect();
-    lines
-        .iter()
-        .enumerate()
-        .rev()
-        .find_map(|(y, line)| line.rfind(needle).map(|x| (x as u16, y as u16)))
+    lines.iter().enumerate().rev().find_map(|(y, line)| {
+        line.rfind(needle)
+            .map(|byte| (line[..byte].chars().count() as u16, y as u16))
+    })
 }
 
 #[test]
@@ -279,7 +278,7 @@ fn clicking_an_action_opens_its_confirmation_dialog() {
     let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
     draw(&mut terminal, &app, &mut ratcn);
 
-    let emitted = click(&mut terminal, &mut app, &mut ratcn, 70, 8);
+    let emitted = click(&mut terminal, &mut app, &mut ratcn, 70, 12);
     assert!(
         emitted
             .iter()
@@ -305,8 +304,8 @@ fn clicking_publish_ports_opens_the_ports_dialog() {
     let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
     draw(&mut terminal, &app, &mut ratcn);
 
-    // Action rows: Stop (8), Exec shell (9), Publish ports (10).
-    let emitted = click(&mut terminal, &mut app, &mut ratcn, 70, 10);
+    // Action rows: Stop (12), Exec shell (13), Publish ports (14).
+    let emitted = click(&mut terminal, &mut app, &mut ratcn, 70, 14);
     assert!(
         emitted
             .iter()
