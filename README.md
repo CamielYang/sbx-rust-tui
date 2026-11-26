@@ -24,7 +24,7 @@ The built-in Docker Sandboxes TUI covers the basics, but leaves out finer config
 You need [Rust](https://rustup.rs/) and the `sbx` CLI available on your `PATH`.
 
 ```sh
-git clone <your-repository-url>
+git clone https://github.com/CamielYang/sbx-rust-tui.git
 cd sbx-rust-tui
 cargo install --path .
 ```
