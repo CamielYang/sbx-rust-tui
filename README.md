@@ -1,4 +1,4 @@
-# sbx Rust TUI
+# sbx-tust-tui
 
 ![sbx Rust TUI demo](docs/demo.gif)
 
