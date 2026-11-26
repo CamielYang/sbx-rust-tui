@@ -24,7 +24,9 @@ pub use self::actions::PendingAction;
 pub use self::commands::PendingCommand;
 pub use self::form::{Form, FormField, WorkspaceMode};
 pub use self::ports::{PortField, PortForm, PortMapping, PortsView};
-pub use self::sandbox::{Sandbox, SandboxDetails, fetch_sandboxes, inspect_sandbox};
+pub use self::sandbox::{
+    HostMount, MountMode, Sandbox, SandboxDetails, fetch_sandboxes, inspect_sandbox,
+};
 pub use self::workspace::{WORKSPACE_PARENT, WorkspacePicker};
 
 pub const AGENTS: &[&str] = &[

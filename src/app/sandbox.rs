@@ -67,6 +67,21 @@ impl Sandbox {
         self.status.trim().to_ascii_lowercase().contains("running")
     }
 }
+/// How a host path is attached to the sandbox. The source clone always lands
+/// at the well-known source location; every other host path is a direct mount.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MountMode {
+    Clone,
+    Direct,
+}
+
+/// A host path exposed inside the sandbox, as reported by `sbx inspect`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostMount {
+    pub host_path: String,
+    pub mode: MountMode,
+}
+
 /// Resource details shown in the info modal. Values come from live commands
 /// run inside the microVM; the structured `sbx inspect` output is only a
 /// fallback for fields the guest cannot report.
@@ -83,6 +98,8 @@ pub struct SandboxDetails {
     pub root_total: Option<String>,
     pub docker_used: Option<String>,
     pub docker_total: Option<String>,
+    /// Host paths visible in the sandbox, with their mount mode.
+    pub mounts: Vec<HostMount>,
     pub error: Option<String>,
 }
 
@@ -360,6 +377,27 @@ fn load_inspect_details(sandbox: &Sandbox, details: &mut SandboxDetails) {
             "dindVolumeSize",
         ],
     );
+    details.mounts = parse_host_mounts(&value);
+}
+
+/// Read `host_mounts` from `sbx inspect`. A mount at `/run/sandbox/source` is
+/// the repository clone; every other host mount is a direct mount.
+pub(super) fn parse_host_mounts(value: &Value) -> Vec<HostMount> {
+    let Some(rows) = find_key(value, "host_mounts", 0).and_then(Value::as_array) else {
+        return Vec::new();
+    };
+
+    rows.iter()
+        .filter_map(|row| {
+            let host_path = json_text(row, &["host_path", "hostPath", "host", "source", "path"])?;
+            let target = json_text(row, &["container_target", "containerTarget", "target"]);
+            let mode = match target.as_deref() {
+                Some("/run/sandbox/source") => MountMode::Clone,
+                _ => MountMode::Direct,
+            };
+            Some(HostMount { host_path, mode })
+        })
+        .collect()
 }
 
 fn override_if_present(target: &mut Option<String>, value: Option<String>) {

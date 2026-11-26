@@ -6,7 +6,7 @@ use super::form::{
     parse_memory_mib, validate_cpus, validate_gb_size, validate_memory, validate_name,
 };
 use super::ports::parse_ports;
-use super::sandbox::{VmMetrics, format_size, json_text, parse_vm_metrics};
+use super::sandbox::{VmMetrics, format_size, json_text, parse_host_mounts, parse_vm_metrics};
 use super::test_support::TempWorkspaceDir;
 use super::*;
 use serde_json::Value;
@@ -311,6 +311,43 @@ fn json_lookup_finds_nested_resource_fields() {
     assert_eq!(json_text(&value, &["rootfs"]).as_deref(), Some("20g"));
     assert_eq!(json_text(&value, &["docker"]).as_deref(), Some("10g"));
     assert_eq!(json_text(&value, &["missing"]), None);
+}
+
+#[test]
+fn host_mounts_parser_classifies_clone_and_direct() {
+    let value: Value = serde_json::from_str(
+        r#"{
+            "name": "demo",
+            "host_mounts": [
+                {
+                    "container_target": "/run/sandbox/source",
+                    "host_path": "C:\\Users\\Dev\\project",
+                    "read_only": true
+                },
+                {
+                    "container_target": "/home/agent/.config/opencode/skills",
+                    "host_path": "C:\\Users\\Dev\\skills",
+                    "read_only": true
+                }
+            ]
+        }"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        parse_host_mounts(&value),
+        vec![
+            HostMount {
+                host_path: "C:\\Users\\Dev\\project".to_owned(),
+                mode: MountMode::Clone,
+            },
+            HostMount {
+                host_path: "C:\\Users\\Dev\\skills".to_owned(),
+                mode: MountMode::Direct,
+            },
+        ]
+    );
+    assert!(parse_host_mounts(&serde_json::json!({})).is_empty());
 }
 
 #[test]

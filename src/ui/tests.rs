@@ -1,6 +1,6 @@
 use super::*;
 use crate::app::test_support::TempWorkspaceDir;
-use crate::app::{INFO_DIALOG, PORTS_DIALOG, PortMapping, SandboxDetails};
+use crate::app::{HostMount, INFO_DIALOG, MountMode, PORTS_DIALOG, PortMapping, SandboxDetails};
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 use ratcn::runtime::Ratcn;
 
@@ -307,6 +307,31 @@ fn renders_info_dialog() {
     assert!(screen.contains("Sandbox"));
     assert!(screen.contains("4 (37%)"));
     assert!(screen.contains("1.0 GiB / 2.0 GiB"));
+}
+
+#[test]
+fn renders_info_dialog_mounts_with_modes() {
+    let mut app = App::with_sandbox_statuses(&[("alpha", "running")]);
+    app.show_info_for_test(SandboxDetails {
+        name: "alpha".to_owned(),
+        status: "running".to_owned(),
+        mounts: vec![
+            HostMount {
+                host_path: "C:\\Users\\Dev\\project".to_owned(),
+                mode: MountMode::Clone,
+            },
+            HostMount {
+                host_path: "C:\\Users\\Dev\\skills".to_owned(),
+                mode: MountMode::Direct,
+            },
+        ],
+        ..SandboxDetails::default()
+    });
+
+    let screen = render(&app);
+    assert!(screen.contains("Mounts"));
+    assert!(screen.contains("clone  C:\\Users\\Dev\\project"));
+    assert!(screen.contains("direct C:\\Users\\Dev\\skills"));
 }
 
 #[test]

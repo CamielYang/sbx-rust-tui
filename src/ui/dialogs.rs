@@ -14,8 +14,8 @@ use super::dashboard::{REMOVE_RED, START_GREEN, STOP_ORANGE, action_style};
 use super::widgets::{detail_line, field_row, input, join_usage};
 use super::*;
 use crate::app::{
-    AGENTS, FormField, PendingAction, PortField, PortMapping, SandboxDetails, WORKSPACE_PARENT,
-    WorkspaceMode, WorkspacePicker,
+    AGENTS, FormField, HostMount, MountMode, PendingAction, PortField, PortMapping, SandboxDetails,
+    WORKSPACE_PARENT, WorkspaceMode, WorkspacePicker,
 };
 
 /// The confirmation dialog's focused Cancel sets the look for every dismiss
@@ -311,7 +311,7 @@ pub(super) fn info_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
     Dialog::new()
         .title(title)
         .description(text)
-        .outer_width(66)
+        .outer_width(100)
         .on_dismiss(|| Msg::CloseInfo)
         .action("close", cancel_button("Close", || Msg::CloseInfo))
 }
@@ -337,11 +337,31 @@ fn details_text(details: &SandboxDetails) -> String {
             .as_deref(),
         ),
     ];
+
+    lines.push(String::new());
+    lines.push("Mounts".to_owned());
+    if details.mounts.is_empty() {
+        lines.push("  —".to_owned());
+    } else {
+        for mount in &details.mounts {
+            lines.push(mount_line(mount));
+        }
+    }
+
     if let Some(error) = &details.error {
         lines.push(String::new());
         lines.push(format!("Note: {error}"));
     }
     lines.join("\n")
+}
+
+/// One mount row: the host path with the mode that explains how it is attached.
+fn mount_line(mount: &HostMount) -> String {
+    let mode = match mount.mode {
+        MountMode::Clone => "clone",
+        MountMode::Direct => "direct",
+    };
+    format!("  {mode:<6} {}", mount.host_path)
 }
 
 /// Show core count alone until the guest reports a usage sample, then add the
