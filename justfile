@@ -1,14 +1,15 @@
 # Release builds for Windows, Linux and macOS.
 #
-# `just release` leaves only the executables in ./dist:
-#   sbx-rust-tui-windows.exe
-#   sbx-rust-tui-linux
-#   sbx-rust-tui-darwin
+# `just release` leaves one archive per platform in ./dist:
+#   sbx-rust-tui-v0.1.0-windows.gz  -> sbx-rust-tui.exe
+#   sbx-rust-tui-v0.1.0-linux.gz    -> sbx-rust-tui
+#   sbx-rust-tui-v0.1.0-darwin.gz   -> sbx-rust-tui
 #
 # Run `just setup` once to install the Rust targets, cargo-zigbuild and zig.
 # zig is used only to cross-link the macOS binary.
 
-bin := "sbx-rust-tui"
+bin := `sed -n 's/^name = "\(.*\)"/\1/p' Cargo.toml | head -n 1`
+version := `sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1`
 out := "dist"
 windows_target := "x86_64-pc-windows-gnu"
 linux_target := "x86_64-unknown-linux-gnu"
@@ -48,12 +49,17 @@ install-zig:
     curl -fsSL "https://ziglang.org/download/{{ zig_version }}/zig-${triple}-{{ zig_version }}.tar.xz" \
         | tar -xJ -C "{{ zig_dir }}" --strip-components=1
 
-# Build one target and copy only its executable into ./dist.
+# Build one target, then gzip only the executable under its plain project name.
 [private]
 build-platform target platform ext build_cmd:
+    #!/usr/bin/env bash
+    set -euo pipefail
     {{ build_cmd }} --release --target {{ target }}
+    stage="$(mktemp -d)"
+    trap 'rm -rf "$stage"' EXIT
+    cp "target/{{ target }}/release/{{ bin }}{{ ext }}" "$stage/{{ bin }}{{ ext }}"
     mkdir -p {{ out }}
-    cp "target/{{ target }}/release/{{ bin }}{{ ext }}" "{{ out }}/{{ bin }}-{{ platform }}{{ ext }}"
+    gzip -c "$stage/{{ bin }}{{ ext }}" > "{{ out }}/{{ bin }}-v{{ version }}-{{ platform }}.gz"
 
 build-windows: (build-platform windows_target "windows" ".exe" cargo)
 build-linux: (build-platform linux_target "linux" "" cargo)

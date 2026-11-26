@@ -36,23 +36,3 @@ sbx-rust-tui
 ```
 
 For a development build, use `cargo run` from the project directory instead.
-
-## Release builds
-
-Use [just](https://github.com/casey/just) to build for Windows, Linux and macOS:
-
-```sh
-just setup    # install Rust targets, cargo-zigbuild and zig (once)
-just release
-```
-
-The `dist/` folder then contains only the executables:
-
-```
-sbx-rust-tui-windows.exe
-sbx-rust-tui-linux
-sbx-rust-tui-darwin
-```
-
-`just build-windows`, `just build-linux` and `just build-darwin` build a single
-platform; `just clean` removes `dist/`.
