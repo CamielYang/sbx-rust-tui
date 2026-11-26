@@ -79,7 +79,7 @@ fn renders_tabs_with_quit_on_the_title_row() {
 
 #[test]
 fn secrets_tab_shows_toolbar_and_secret_table() {
-    let mut app = App::with_secrets(&[("global", "github"), ("test", "nebius")]);
+    let mut app = App::with_secrets(&[("(global)", "github"), ("test", "nebius")]);
     app.select_tab(DashboardTab::Secrets);
 
     let screen = render(&app);
@@ -95,7 +95,7 @@ fn secrets_tab_shows_toolbar_and_secret_table() {
     assert!(screen.contains("DELETE"));
     assert!(
         rows.iter()
-            .any(|row| row.contains("global") && row.contains("github"))
+            .any(|row| row.contains("(global)") && row.contains("github"))
     );
     assert!(
         rows.iter()
@@ -127,7 +127,7 @@ fn secrets_tab_has_an_empty_state() {
 
 #[test]
 fn secrets_tab_shows_an_env_var_column() {
-    let mut app = App::with_secrets(&[("global", "github"), ("test", "nebius")]);
+    let mut app = App::with_secrets(&[("(global)", "github"), ("test", "nebius")]);
     app.select_tab(DashboardTab::Secrets);
 
     let screen = render(&app);
@@ -168,7 +168,7 @@ fn secret_info_dialog_shows_scope_name_env_var_and_api_domains() {
         assert!(screen.contains(expected), "missing {expected}");
     }
 
-    let mut github = App::with_secrets(&[("global", "github")]);
+    let mut github = App::with_secrets(&[("(global)", "github")]);
     let secret = github.secrets()[0].clone();
     github.show_secret_info_for_test(secret);
     let screen = render(&github);
@@ -258,6 +258,11 @@ fn secret_delete_confirmation_names_the_scope() {
     global.select_tab(DashboardTab::Secrets);
     global.delete_secret("github", "(global)");
     assert!(render(&global).contains("Delete global secret 'github'?"));
+
+    let mut named_global = App::with_secrets(&[("global", "github")]);
+    named_global.select_tab(DashboardTab::Secrets);
+    named_global.delete_secret("github", "global");
+    assert!(render(&named_global).contains("Delete secret 'github' from sandbox 'global'?"));
 }
 
 #[test]

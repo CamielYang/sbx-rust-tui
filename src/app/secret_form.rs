@@ -27,10 +27,10 @@ pub const SERVICES: &[&str] = &[
 /// `--sandbox` from the CLI command.
 pub const GLOBAL_SCOPE: &str = "(global)";
 
-/// The table and the Set dialog use `"(global)"`; older fixtures and CLI
-/// output spell the same scope `"global"`. Both mean "no sandbox flag".
+/// Only the tagged `(global)` scope omits `--sandbox`. A sandbox may itself be
+/// named `global`, so that spelling must still be treated as a sandbox.
 pub fn is_global_scope(scope: &str) -> bool {
-    matches!(scope, GLOBAL_SCOPE | "global")
+    scope == GLOBAL_SCOPE
 }
 
 #[derive(Clone)]

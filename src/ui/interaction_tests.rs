@@ -284,7 +284,7 @@ fn position_from_bottom(screen: &str, needle: &str) -> Option<(u16, u16)> {
 
 #[test]
 fn secret_row_delete_and_toolbar_refresh_are_clickable() {
-    let mut app = App::with_secrets(&[("global", "github"), ("test", "nebius")]);
+    let mut app = App::with_secrets(&[("(global)", "github"), ("test", "nebius")]);
     app.select_tab(DashboardTab::Secrets);
     let mut ratcn = new_runtime();
     let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
@@ -300,7 +300,7 @@ fn secret_row_delete_and_toolbar_refresh_are_clickable() {
         .collect();
     assert_eq!(deletes.len(), 2);
     for ((x, y), (name, scope, command)) in deletes.into_iter().zip([
-        ("github", "global", "sbx secrets rm github -f"),
+        ("github", "(global)", "sbx secrets rm github -f"),
         ("nebius", "test", "sbx secrets rm nebius --sandbox test -f"),
     ]) {
         let emitted = click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
@@ -343,7 +343,7 @@ fn secret_row_delete_and_toolbar_refresh_are_clickable() {
 
 #[test]
 fn clicking_a_secret_row_opens_its_info_dialog() {
-    let mut app = App::with_secrets(&[("global", "github"), ("test", "nebius")]);
+    let mut app = App::with_secrets(&[("(global)", "github"), ("test", "nebius")]);
     app.select_tab(DashboardTab::Secrets);
     let mut ratcn = new_runtime();
     let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
@@ -353,7 +353,7 @@ fn clicking_a_secret_row_opens_its_info_dialog() {
     let emitted = click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
     assert!(emitted.iter().any(|message| matches!(
         message,
-        Msg::OpenSecretInfo(name, scope) if name == "github" && scope == "global"
+        Msg::OpenSecretInfo(name, scope) if name == "github" && scope == "(global)"
     )));
     assert!(app.modals_ref().is_open(INFO_DIALOG));
 

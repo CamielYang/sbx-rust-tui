@@ -62,7 +62,7 @@ pub enum Msg {
     SecretValueChanged(InputState),
     SubmitSecret,
     RefreshSecrets,
-    /// Secret name followed by its scope (the sandbox name, or "global").
+    /// Secret name followed by its scope (the sandbox name, or "(global)").
     DeleteSecret(String, String),
     /// A clicked secret row: name followed by scope, as in `DeleteSecret`.
     OpenSecretInfo(String, String),

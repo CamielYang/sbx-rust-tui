@@ -14,7 +14,7 @@ pub enum PendingAction {
     Start(String),
     Stop(String),
     Remove(String),
-    /// Secret name followed by its scope (the sandbox name, or "global").
+    /// Secret name followed by its scope (the sandbox name, or "(global)").
     DeleteSecret(String, String),
     /// Service and scope of a secret that already exists. The new value stays
     /// in the secret form until the overwrite is confirmed.

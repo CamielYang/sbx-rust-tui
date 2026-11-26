@@ -438,7 +438,7 @@ mod tests {
 
     #[test]
     fn service_rows_carry_their_env_vars_and_api_domains() {
-        let github = Secret::new("global", "github");
+        let github = Secret::new(GLOBAL_SCOPE, "github");
         assert_eq!(github.env_vars_label(), "GH_TOKEN, GITHUB_TOKEN");
         assert_eq!(
             github.api_domains,

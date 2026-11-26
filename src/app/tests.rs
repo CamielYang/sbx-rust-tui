@@ -828,19 +828,19 @@ fn workspace_picker_starts_at_the_nearest_existing_directory() {
 
 #[test]
 fn secrets_start_empty_until_the_cli_is_read() {
-    let app = App::with_secrets(&[("global", "github")]);
-    assert_eq!(app.secrets(), &[Secret::new("global", "github")]);
+    let app = App::with_secrets(&[("(global)", "github")]);
+    assert_eq!(app.secrets(), &[Secret::new("(global)", "github")]);
 }
 
 #[test]
 fn clicking_a_secret_row_opens_info_and_close_clears_it() {
-    let mut app = App::with_secrets(&[("global", "github"), ("test", "nebius")]);
-    app.open_secret_info("github", "global");
+    let mut app = App::with_secrets(&[("(global)", "github"), ("test", "nebius")]);
+    app.open_secret_info("github", "(global)");
 
     assert!(matches!(app.mode(), Mode::Info));
     assert!(app.modals_ref().is_open(INFO_DIALOG));
     let secret = app.secret_info().expect("secret details");
-    assert_eq!(secret.scope, "global");
+    assert_eq!(secret.scope, "(global)");
     assert_eq!(secret.env_vars, ["GH_TOKEN", "GITHUB_TOKEN"]);
     assert_eq!(secret.api_domains[0], "api.github.com");
 
@@ -852,8 +852,8 @@ fn clicking_a_secret_row_opens_info_and_close_clears_it() {
 #[test]
 fn opening_sandbox_info_replaces_secret_info() {
     let mut app = App::with_sandbox_statuses(&[("alpha", "running")]);
-    app.set_secrets_for_test(vec![Secret::new("global", "github")]);
-    app.open_secret_info("github", "global");
+    app.set_secrets_for_test(vec![Secret::new("(global)", "github")]);
+    app.open_secret_info("github", "(global)");
     app.open_info("alpha");
 
     assert!(app.secret_info().is_none());
@@ -904,6 +904,21 @@ fn setting_a_scoped_secret_targets_the_sandbox() {
         Some("echo \"token with spaces\" | sbx secret set anthropic --sandbox beta -f")
     );
     assert!(app.message().contains("for beta"));
+}
+
+#[test]
+fn a_sandbox_named_global_is_not_the_global_scope() {
+    let mut app = App::with_sandboxes(&["global"]);
+    app.set_secret();
+    app.set_secret_scope(1); // the sandbox called "global"
+    app.set_secret_state(InputState::new("sk-test"));
+    app.submit_secret();
+
+    assert_eq!(
+        app.take_set_for_test().as_deref(),
+        Some("echo \"sk-test\" | sbx secret set anthropic --sandbox global -f")
+    );
+    assert!(app.message().contains("for global"));
 }
 
 #[test]
@@ -1013,6 +1028,10 @@ fn existing_secret_lookup_targets_the_service_and_scope() {
         App::secret_lookup_command("github", "(global)").preview(),
         "sbx secret ls --global --service github --format json"
     );
+    assert_eq!(
+        App::secret_lookup_command("github", "global").preview(),
+        "sbx secret ls --sandbox global --service github --format json"
+    );
 }
 
 #[test]
@@ -1035,13 +1054,13 @@ fn shell_preview_shows_the_pipeline_not_the_wrapper() {
 
 #[test]
 fn deleting_a_global_secret_waits_for_confirmation() {
-    let mut app = App::with_secrets(&[("global", "github")]);
-    app.delete_secret("github", "global");
+    let mut app = App::with_secrets(&[("(global)", "github")]);
+    app.delete_secret("github", "(global)");
     assert_eq!(
         app.pending_action(),
         Some(&PendingAction::DeleteSecret(
             "github".to_owned(),
-            "global".to_owned()
+            "(global)".to_owned()
         ))
     );
     assert!(matches!(app.mode(), Mode::Confirm));
@@ -1053,7 +1072,7 @@ fn deleting_a_global_secret_waits_for_confirmation() {
         app.take_confirmed_for_test(),
         Some(PendingAction::DeleteSecret(
             "github".to_owned(),
-            "global".to_owned()
+            "(global)".to_owned()
         ))
     );
     assert_eq!(
@@ -1063,14 +1082,14 @@ fn deleting_a_global_secret_waits_for_confirmation() {
 }
 
 #[test]
-fn deleting_a_table_global_secret_omits_the_sandbox_flag() {
-    let mut app = App::with_secrets(&[("(global)", "github")]);
-    app.delete_secret("github", "(global)");
+fn deleting_a_secret_from_a_sandbox_named_global_keeps_the_flag() {
+    let mut app = App::with_secrets(&[("global", "github")]);
+    app.delete_secret("github", "global");
     app.confirm_action();
 
     assert_eq!(
         app.take_deleted_for_test().as_deref(),
-        Some("sbx secrets rm github -f")
+        Some("sbx secrets rm github --sandbox global -f")
     );
 }
 
@@ -1094,8 +1113,8 @@ fn deleting_a_scoped_secret_targets_its_sandbox() {
 
 #[test]
 fn cancelling_a_secret_delete_runs_nothing() {
-    let mut app = App::with_secrets(&[("global", "github")]);
-    app.delete_secret("github", "global");
+    let mut app = App::with_secrets(&[("(global)", "github")]);
+    app.delete_secret("github", "(global)");
     app.cancel_action();
 
     assert!(app.pending_action().is_none());
