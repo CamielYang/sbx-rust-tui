@@ -449,6 +449,7 @@ pub(super) fn ports_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
     let name = view.name.clone();
     let ports = view.ports.clone();
     let error = view.error.clone();
+    let loading = view.loading;
     let host = input(
         |state| Msg::PortsChanged(PortField::Host, state),
         |state: &App| state.port_form().host(),
@@ -556,6 +557,10 @@ pub(super) fn ports_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
                 Some(error) => Some(Span::styled(
                     format!(" {error}"),
                     Style::default().fg(theme.destructive),
+                )),
+                None if loading => Some(Span::styled(
+                    " Loading published ports...",
+                    Style::default().fg(theme.muted_foreground),
                 )),
                 None if ports.len() > visible => Some(Span::styled(
                     format!("  Showing {visible} of {} published ports", ports.len()),

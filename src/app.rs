@@ -108,7 +108,11 @@ pub struct App {
     /// A secret row shown in the same Info dialog as sandbox details.
     secret_info: Option<Secret>,
     info_refresh: Option<workers::InfoRefresh>,
+    /// Short-lived CLI jobs whose results are picked up in the event loop.
+    jobs: workers::Jobs,
     ports: Option<PortsView>,
+    /// Bumped on every port load so a late result cannot fill a reopened dialog.
+    ports_token: u64,
     port_form: PortForm,
     workspace_picker: Option<WorkspacePicker>,
     secret_form: Option<SecretForm>,
@@ -142,6 +146,7 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
+        #[allow(unused_mut)] // only the non-test first load needs to mutate it
         let mut app = Self {
             tab: DashboardTab::default(),
             sandboxes: Vec::new(),
@@ -155,7 +160,9 @@ impl App {
             info: None,
             secret_info: None,
             info_refresh: None,
+            jobs: workers::Jobs::new(),
             ports: None,
+            ports_token: 0,
             port_form: PortForm::new(),
             workspace_picker: None,
             secret_form: None,
@@ -179,8 +186,17 @@ impl App {
             #[cfg(test)]
             secret_exists_for_test: None,
         };
-        app.refresh_sandboxes();
-        app.refresh_secrets();
+        #[cfg(not(test))]
+        {
+            // The first frame shows an empty dashboard immediately. When the
+            // sandbox list lands, it queues the secret inventory for that list
+            // so startup never waits on a chain of `sbx` processes.
+            app.jobs.spawn(|| workers::JobResult::Sandboxes {
+                result: fetch_sandboxes(),
+                announce: false,
+                then_secrets: true,
+            });
+        }
         app
     }
 
@@ -440,10 +456,7 @@ impl App {
 
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.quit(),
-            KeyCode::Char('r') | KeyCode::Char('R') => {
-                self.refresh_sandboxes();
-                self.notify_success("Sandbox list refreshed", None);
-            }
+            KeyCode::Char('r') | KeyCode::Char('R') => self.request_sandbox_refresh(),
             KeyCode::Char('n') | KeyCode::Char('N') => self.open_wizard(),
             KeyCode::Char('s') | KeyCode::Char('S') => self.toggle_selected(),
             KeyCode::Char('x') | KeyCode::Char('X') => self.exec_selected(),
@@ -454,18 +467,50 @@ impl App {
         }
     }
 
+    /// A button/shortcut refresh gives immediate feedback; the success (or
+    /// failure) toast comes from the worker result, not from this call.
+    pub fn request_sandbox_refresh(&mut self) {
+        self.refresh_sandboxes_announced();
+        self.notify_info("Refreshing sandboxes...", None);
+    }
+
+    pub fn request_secret_refresh(&mut self) {
+        self.refresh_secrets_announced();
+        self.notify_info("Refreshing secrets...", None);
+    }
+
+    /// Queue a sandbox listing. The CLI runs on a worker thread; the event
+    /// loop keeps handling input while it is in flight.
     pub fn refresh_sandboxes(&mut self) {
-        match fetch_sandboxes() {
-            Ok(sandboxes) => self.apply_statuses(sandboxes),
-            Err(error) => self.notify_error("Could not list sandboxes", error),
-        }
+        self.refresh_sandboxes_inner(false);
+    }
+
+    pub(super) fn refresh_sandboxes_announced(&mut self) {
+        self.refresh_sandboxes_inner(true);
+    }
+
+    fn refresh_sandboxes_inner(&mut self, announce: bool) {
+        self.jobs.spawn(move || workers::JobResult::Sandboxes {
+            result: fetch_sandboxes(),
+            announce,
+            then_secrets: false,
+        });
     }
 
     pub fn refresh_secrets(&mut self) {
-        match fetch_secrets_for(&self.sandboxes) {
-            Ok(secrets) => self.secrets = secrets,
-            Err(error) => self.notify_error("Could not list secrets", error),
-        }
+        self.refresh_secrets_announced_inner(false);
+    }
+
+    pub(super) fn refresh_secrets_announced(&mut self) {
+        self.refresh_secrets_announced_inner(true);
+    }
+
+    fn refresh_secrets_announced_inner(&mut self, announce: bool) {
+        let sandboxes = self.sandboxes.clone();
+        self.jobs.spawn(move || workers::JobResult::Secrets {
+            result: fetch_secrets_for(&sandboxes),
+            announce,
+        });
     }
 
     /// A row's Delete button only asks for confirmation; the CLI runs once the
@@ -503,25 +548,19 @@ impl App {
 
         #[cfg(not(test))]
         {
-            let detail = match pending.run() {
-                Ok(output) if output.status.success() => {
-                    self.refresh_secrets();
-                    self.notify_success(format!("Deleted secret '{name}'"), None);
-                    return;
-                }
-                Ok(output) => commands::stderr_detail(&output, "sbx secrets rm failed"),
-                Err(error) => error.to_string(),
-            };
-            self.notify_error("Could not delete secret", detail);
+            let deleted = name.to_owned();
+            self.notify_info(format!("Deleting secret '{name}'..."), None);
+            self.jobs.spawn(move || workers::JobResult::SecretDelete {
+                name: deleted,
+                result: pending.run(),
+            });
         }
     }
 
     /// Periodic tick: keep running-state dots (and an open Info modal's status
     /// line) current without re-running the in-guest metrics commands.
     pub fn refresh_statuses(&mut self) {
-        if let Ok(sandboxes) = fetch_sandboxes() {
-            self.apply_statuses(sandboxes);
-        }
+        self.refresh_sandboxes();
     }
 
     pub(super) fn apply_statuses(&mut self, sandboxes: Vec<Sandbox>) {

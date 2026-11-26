@@ -8,7 +8,7 @@ use std::sync::mpsc;
 
 use ratcn::Toast;
 
-use super::workers::{CREATE_TOAST, Creation, InfoRefresh};
+use super::workers::{CREATE_TOAST, Creation, InfoRefresh, JobResult};
 use super::{
     App, CREATE_DIALOG, INFO_DIALOG, PORTS_DIALOG, PendingAction, PortMapping, PortsView, Sandbox,
     SandboxDetails, Secret,
@@ -97,12 +97,26 @@ impl App {
     /// Open the ports dialog with a known table, without calling `sbx`.
     pub fn show_ports_for_test(&mut self, name: &str, ports: Vec<PortMapping>) {
         self.select_named(name);
+        self.ports_token = self.ports_token.wrapping_add(1);
         self.ports = Some(PortsView {
             name: name.to_owned(),
             ports,
             error: None,
+            loading: false,
+            token: self.ports_token,
         });
         let _ = self.modals.open(PORTS_DIALOG, &mut self.focus);
+    }
+
+    /// Put a fake CLI result on the same channel real workers use, so `poll_jobs`
+    /// can be exercised without shelling out.
+    pub(super) fn queue_job_result_for_test(&self, result: JobResult) {
+        self.jobs.queue_for_test(result);
+    }
+
+    /// The token of the dialog's current port listing, for stale-result tests.
+    pub(super) fn ports_token_for_test(&self) -> u64 {
+        self.ports_token
     }
 
     /// Point the form at a test directory so the folder picker has real

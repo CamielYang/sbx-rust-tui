@@ -196,7 +196,11 @@ impl App {
 
     #[cfg_attr(test, allow(dead_code))]
     fn run_sbx(&mut self, pending: PendingCommand, success: String) {
-        self.handle_sbx_result(pending.run(), success);
+        self.jobs
+            .spawn(move || super::workers::JobResult::SbxCommand {
+                success,
+                result: pending.run(),
+            });
     }
 
     pub(super) fn handle_sbx_result(

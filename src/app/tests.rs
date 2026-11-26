@@ -8,6 +8,7 @@ use super::form::{
 use super::ports::parse_ports;
 use super::sandbox::{VmMetrics, format_size, json_text, parse_host_mounts, parse_vm_metrics};
 use super::test_support::TempWorkspaceDir;
+use super::workers::JobResult;
 use super::*;
 use serde_json::Value;
 
@@ -583,6 +584,82 @@ fn status_tick_updates_modal_without_clearing_toast() {
     assert!(app.sandboxes()[0].is_running());
     assert_eq!(app.info().unwrap().status, "running");
     assert_eq!(app.message(), "keep me");
+}
+
+#[test]
+fn polling_jobs_installs_tables_and_announces_manual_refreshes() {
+    let mut app = App::with_sandboxes(&[]);
+    app.queue_job_result_for_test(JobResult::Sandboxes {
+        result: Ok(vec![Sandbox::new("alpha".to_owned(), "running".to_owned())]),
+        announce: true,
+        then_secrets: false,
+    });
+    app.queue_job_result_for_test(JobResult::Secrets {
+        result: Ok(vec![Secret::new("(global)", "github")]),
+        announce: true,
+    });
+
+    app.poll_jobs();
+
+    assert_eq!(app.sandboxes()[0].name, "alpha");
+    assert_eq!(app.secrets()[0].name, "github");
+    assert_eq!(app.message(), "Secret list refreshed");
+}
+
+#[test]
+fn stale_port_listing_does_not_fill_a_reopened_dialog() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.show_ports_for_test("alpha", Vec::new());
+    let token = app.ports_token_for_test();
+    app.ports.as_mut().unwrap().loading = true;
+    let mapping = PortMapping {
+        host_port: 60002,
+        sandbox_port: 3000,
+        protocol: "tcp4".to_owned(),
+        host_ip: None,
+    };
+
+    app.queue_job_result_for_test(JobResult::Ports {
+        name: "alpha".to_owned(),
+        token: token.wrapping_sub(1),
+        result: Ok(vec![mapping.clone()]),
+    });
+    app.poll_jobs();
+    assert!(app.ports().unwrap().ports.is_empty());
+    assert!(app.ports().unwrap().loading);
+
+    app.queue_job_result_for_test(JobResult::Ports {
+        name: "alpha".to_owned(),
+        token,
+        result: Ok(vec![mapping.clone()]),
+    });
+    app.poll_jobs();
+    assert_eq!(app.ports().unwrap().ports, vec![mapping]);
+    assert!(!app.ports().unwrap().loading);
+}
+
+#[test]
+fn failed_port_command_reports_in_the_dialog() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.show_ports_for_test("alpha", Vec::new());
+    app.queue_job_result_for_test(JobResult::PortCommand {
+        name: "alpha".to_owned(),
+        success: "Published 8080:3000 for 'alpha'.".to_owned(),
+        error_title: "Could not publish port",
+        fallback: "sbx port publish failed",
+        result: Ok(fake_output(false, "error: port already in use")),
+    });
+
+    app.poll_jobs();
+
+    assert!(
+        app.ports()
+            .unwrap()
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("port already in use"))
+    );
+    assert!(app.message().contains("Could not publish port"));
 }
 
 #[test]

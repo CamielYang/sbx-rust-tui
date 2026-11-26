@@ -119,10 +119,7 @@ pub fn apply(app: &mut App, msg: Msg) {
         Msg::SandboxScrolled(offset) => app.set_list_offset(offset),
         Msg::TabSelected(tab) => app.select_tab(tab),
         Msg::OpenWizard => app.open_wizard(),
-        Msg::Refresh => {
-            app.refresh_sandboxes();
-            app.notify_success("Sandbox list refreshed", None);
-        }
+        Msg::Refresh => app.request_sandbox_refresh(),
         Msg::SetSecret => app.set_secret(),
         Msg::CancelSetSecret => app.cancel_set_secret(),
         Msg::SecretServiceOpenChanged(open) => app.set_secret_service_open(open),
@@ -133,10 +130,7 @@ pub fn apply(app: &mut App, msg: Msg) {
         Msg::SecretScopeSelected(index) => app.set_secret_scope(index),
         Msg::SecretValueChanged(state) => app.set_secret_state(state),
         Msg::SubmitSecret => app.submit_secret(),
-        Msg::RefreshSecrets => {
-            app.refresh_secrets();
-            app.notify_success("Secret list refreshed", None);
-        }
+        Msg::RefreshSecrets => app.request_secret_refresh(),
         Msg::DeleteSecret(name, scope) => app.delete_secret(&name, &scope),
         Msg::OpenSecretInfo(name, scope) => app.open_secret_info(&name, &scope),
         Msg::Quit => app.quit(),

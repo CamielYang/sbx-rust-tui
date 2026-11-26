@@ -2,8 +2,6 @@
 
 use serde_json::Value;
 
-#[cfg(not(test))]
-use super::commands::stderr_detail;
 use super::sandbox::{Sandbox, fetch_sandboxes, json_text};
 use super::secret_form::{GLOBAL_SCOPE, SecretForm, is_global_scope};
 use super::{
@@ -222,19 +220,56 @@ impl App {
             return;
         }
 
-        let exists = match self.stored_secret_exists(&service, &scope) {
-            Ok(exists) => exists,
-            Err(error) => {
-                self.notify_error("Could not check secret", error);
-                return;
-            }
-        };
-        if exists {
-            self.pending_action = Some(PendingAction::OverwriteSecret(service, scope));
-            let _ = self.modals.open(CONFIRM_DIALOG, &mut self.focus);
+        #[cfg(test)]
+        {
+            let exists = self.stored_secret_exists(&service, &scope).unwrap_or(false);
+            self.finish_secret_lookup(&service, &scope, Ok(exists));
+        }
+
+        #[cfg(not(test))]
+        {
+            // The overwrite lookup also shells out, so it runs on a worker and
+            // the dialog stays usable while `sbx secret ls` is in flight.
+            let lookup_service = service.clone();
+            let lookup_scope = scope.clone();
+            let check_service = lookup_service.clone();
+            let check_scope = lookup_scope.clone();
+            self.notify_info("Checking stored secret...", None);
+            self.jobs
+                .spawn(move || super::workers::JobResult::SecretExists {
+                    service: lookup_service,
+                    scope: lookup_scope,
+                    result: Self::stored_secret_exists(&check_service, &check_scope),
+                });
+        }
+    }
+
+    /// Apply the overwrite lookup on the UI thread. A late answer is ignored
+    /// if the dialog was closed or the user changed the form in the meantime.
+    pub(super) fn finish_secret_lookup(
+        &mut self,
+        service: &str,
+        scope: &str,
+        result: Result<bool, String>,
+    ) {
+        let still_open = self
+            .secret_form
+            .as_ref()
+            .is_some_and(|form| form.service() == Some(service) && form.scope() == Some(scope));
+        if !still_open {
             return;
         }
-        self.finish_set_secret(&service, &scope);
+        match result {
+            Ok(true) => {
+                self.pending_action = Some(PendingAction::OverwriteSecret(
+                    service.to_owned(),
+                    scope.to_owned(),
+                ));
+                let _ = self.modals.open(CONFIRM_DIALOG, &mut self.focus);
+            }
+            Ok(false) => self.finish_set_secret(service, scope),
+            Err(error) => self.notify_error("Could not check secret", error),
+        }
     }
 
     /// `sbx secret ls --sandbox <scope> --service <service> --format json`.
@@ -258,7 +293,7 @@ impl App {
     }
 
     #[cfg(not(test))]
-    fn stored_secret_exists(&self, service: &str, scope: &str) -> Result<bool, String> {
+    fn stored_secret_exists(service: &str, scope: &str) -> Result<bool, String> {
         let output = Self::secret_lookup_command(service, scope)
             .run()
             .map_err(|error| error.to_string())?;
@@ -301,18 +336,16 @@ impl App {
 
         #[cfg(not(test))]
         {
-            let detail = match pending.run() {
-                Ok(output) if output.status.success() => {
-                    self.close_modal(SET_SECRET_DIALOG);
-                    self.secret_form = None;
-                    self.refresh_secrets();
-                    self.notify_success(success, None);
-                    return;
-                }
-                Ok(output) => stderr_detail(&output, "sbx secret set failed"),
-                Err(error) => error.to_string(),
-            };
-            self.notify_error("Could not set secret", detail);
+            let set_service = service.to_owned();
+            let set_scope = scope.to_owned();
+            self.notify_info("Setting secret...", None);
+            self.jobs
+                .spawn(move || super::workers::JobResult::SecretSet {
+                    service: set_service,
+                    scope: set_scope,
+                    success,
+                    result: pending.run(),
+                });
         }
     }
 
