@@ -16,7 +16,7 @@ use super::widgets::{detail_line, field_row, input, join_usage};
 use super::*;
 use crate::app::{
     AGENTS, FormField, HostMount, MountMode, PendingAction, PortField, PortMapping, SandboxDetails,
-    SERVICES, Secret, SecretForm, WORKSPACE_PARENT, WorkspaceMode, WorkspacePicker,
+    SERVICES, Secret, SecretForm, WORKSPACE_PARENT, WorkspaceMode, WorkspacePicker, is_global_scope,
 };
 
 /// The confirmation dialog's focused Cancel sets the look for every dismiss
@@ -282,7 +282,7 @@ pub(super) fn confirm_dialog(app: &App) -> Dialog<App, Msg> {
         ),
         PendingAction::DeleteSecret(name, scope) => (
             "Confirm delete",
-            if scope == "global" {
+            if is_global_scope(scope) {
                 format!("Delete global secret '{name}'?")
             } else {
                 format!("Delete secret '{name}' from sandbox '{scope}'?")
@@ -292,7 +292,7 @@ pub(super) fn confirm_dialog(app: &App) -> Dialog<App, Msg> {
         ),
         PendingAction::OverwriteSecret(service, scope) => (
             "Confirm overwrite",
-            if scope == "global" {
+            if is_global_scope(scope) {
                 format!("A secret for '{service}' already exists globally. Overwrite it?")
             } else {
                 format!(

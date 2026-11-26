@@ -1063,6 +1063,18 @@ fn deleting_a_global_secret_waits_for_confirmation() {
 }
 
 #[test]
+fn deleting_a_table_global_secret_omits_the_sandbox_flag() {
+    let mut app = App::with_secrets(&[("(global)", "github")]);
+    app.delete_secret("github", "(global)");
+    app.confirm_action();
+
+    assert_eq!(
+        app.take_deleted_for_test().as_deref(),
+        Some("sbx secrets rm github -f")
+    );
+}
+
+#[test]
 fn deleting_a_scoped_secret_targets_its_sandbox() {
     let mut app = App::with_secrets(&[("test", "nebius")]);
     app.delete_secret("nebius", "test");

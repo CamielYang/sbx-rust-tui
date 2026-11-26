@@ -108,6 +108,14 @@ fn secrets_tab_shows_toolbar_and_secret_table() {
 }
 
 #[test]
+fn secrets_tab_shows_the_global_scope_label() {
+    let mut app = App::with_secrets(&[("(global)", "github")]);
+    app.select_tab(DashboardTab::Secrets);
+
+    assert!(render(&app).contains("(global)"));
+}
+
+#[test]
 fn secrets_tab_has_an_empty_state() {
     let mut app = App::with_secrets(&[]);
     app.select_tab(DashboardTab::Secrets);
@@ -246,9 +254,9 @@ fn secret_delete_confirmation_names_the_scope() {
     assert!(screen.contains("Delete secret"));
     assert!(screen.contains("Cancel"));
 
-    let mut global = App::with_secrets(&[("global", "github")]);
+    let mut global = App::with_secrets(&[("(global)", "github")]);
     global.select_tab(DashboardTab::Secrets);
-    global.delete_secret("github", "global");
+    global.delete_secret("github", "(global)");
     assert!(render(&global).contains("Delete global secret 'github'?"));
 }
 

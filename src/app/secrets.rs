@@ -1,18 +1,16 @@
 //! Reading the secret inventory shown in the Secrets tab.
 
-use std::process::Command as ProcessCommand;
-
 use serde_json::Value;
 
 #[cfg(not(test))]
 use super::commands::stderr_detail;
-use super::sandbox::json_text;
-use super::secret_form::{GLOBAL_SCOPE, SecretForm};
+use super::sandbox::{Sandbox, fetch_sandboxes, json_text};
+use super::secret_form::{GLOBAL_SCOPE, SecretForm, is_global_scope};
 use super::{
     App, CONFIRM_DIALOG, Mode, PendingAction, PendingCommand, SET_SECRET_DIALOG, service_info,
 };
 
-/// One row of `sbx secret ls --format json`, reduced to the fields the
+/// One row of a scoped `sbx secret ls --json`, reduced to the fields the
 /// dashboard table shows. Service metadata is resolved from the name so a row
 /// carries everything its info dialog needs.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,33 +49,59 @@ impl Secret {
     }
 }
 
-/// List stored secrets. The CLI reports the actual values as `(stored)`, so
-/// nothing sensitive is kept in the app state.
-pub fn fetch_secrets() -> Result<Vec<Secret>, String> {
-    let output = ProcessCommand::new("sbx")
-        .args(["secret", "ls", "--format", "json"])
-        .output()
-        .map_err(|error| error.to_string())?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(if stderr.is_empty() {
-            format!("sbx secret ls exited with {}.", output.status)
-        } else {
-            stderr
-        });
+/// `sbx secret ls -g --json` for the global store, or
+/// `sbx secret ls --sandbox <name> --json` for one sandbox.
+fn secret_list_command(scope: Option<&str>) -> PendingCommand {
+    let mut args = vec!["secret", "ls"];
+    match scope {
+        None => args.extend(["-g", "--json"]),
+        Some(sandbox) => args.extend(["--sandbox", sandbox, "--json"]),
     }
-
-    parse_secrets(&output.stdout)
+    PendingCommand::new("sbx", &args)
 }
 
-/// Both `secrets` and `custom_secrets` are listed; the latter has no service
-/// scope of its own, so it is grouped under "custom".
-fn parse_secrets(bytes: &[u8]) -> Result<Vec<Secret>, String> {
+/// Run one scope's listing and label every row with that scope. The CLI calls
+/// global secrets "global", while the table and the Set dialog use
+/// `"(global)"`, so the requested label wins over the JSON field.
+fn fetch_secret_scope(scope: Option<&str>, label: &str) -> Result<Vec<Secret>, String> {
+    let command = secret_list_command(scope);
+    let output = command.run().map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let detail = if stderr.is_empty() {
+            format!("exited with {}", output.status)
+        } else {
+            stderr
+        };
+        return Err(format!("{}: {detail}", command.preview()));
+    }
+    parse_secrets(&output.stdout, label)
+}
+
+/// List stored secrets across the global store and every sandbox. The CLI
+/// reports actual values as `(stored)`, so nothing sensitive is kept in state.
+#[allow(dead_code)] // Public entry point; the dashboard uses `fetch_secrets_for`.
+pub fn fetch_secrets() -> Result<Vec<Secret>, String> {
+    let sandboxes = fetch_sandboxes().unwrap_or_default();
+    fetch_secrets_for(&sandboxes)
+}
+
+/// The same listing for callers that already know their sandboxes.
+pub fn fetch_secrets_for(sandboxes: &[Sandbox]) -> Result<Vec<Secret>, String> {
+    let mut secrets = fetch_secret_scope(None, GLOBAL_SCOPE)?;
+    for sandbox in sandboxes {
+        secrets.extend(fetch_secret_scope(Some(&sandbox.name), &sandbox.name)?);
+    }
+    Ok(secrets)
+}
+
+/// Both `secrets` and `custom_secrets` from one scoped listing. The latter has
+/// no service of its own, but it still belongs to the scope being queried.
+fn parse_secrets(bytes: &[u8], scope: &str) -> Result<Vec<Secret>, String> {
     let value: Value = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
     let mut secrets = Vec::new();
 
-    for (field, fallback_scope) in [("secrets", "global"), ("custom_secrets", "custom")] {
+    for field in ["secrets", "custom_secrets"] {
         let Some(rows) = value.get(field).and_then(Value::as_array) else {
             continue;
         };
@@ -85,8 +109,6 @@ fn parse_secrets(bytes: &[u8]) -> Result<Vec<Secret>, String> {
             let Some(name) = json_text(row, &["name", "service", "env_name"]) else {
                 continue;
             };
-            let scope = json_text(row, &["scope", "sandbox"])
-                .unwrap_or_else(|| fallback_scope.to_owned());
             secrets.push(Secret::new(scope, name));
         }
     }
@@ -219,7 +241,7 @@ impl App {
     /// The global store has no sandbox, so it uses `--global` instead.
     pub(super) fn secret_lookup_command(service: &str, scope: &str) -> PendingCommand {
         let mut args = vec!["secret", "ls"];
-        if scope == GLOBAL_SCOPE {
+        if is_global_scope(scope) {
             args.push("--global");
         } else {
             args.extend(["--sandbox", scope]);
@@ -262,7 +284,7 @@ impl App {
             return;
         };
         let pending = Self::set_secret_command(service, scope, &secret);
-        let target = if scope == GLOBAL_SCOPE {
+        let target = if is_global_scope(scope) {
             "global".to_owned()
         } else {
             scope.to_owned()
@@ -342,11 +364,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_the_secret_list_from_the_cli() {
+    fn parses_the_global_secret_list_from_the_cli() {
         let json = br#"{
           "secrets": [
             { "scope": "global", "type": "service", "name": "github", "secret": "(stored)" },
-            { "scope": "test", "type": "service", "name": "nebius", "secret": "(stored)" }
+            { "scope": "global", "type": "service", "name": "nebius", "secret": "(stored)" }
           ],
           "custom_secrets": [],
           "shadowed_services": [],
@@ -354,10 +376,30 @@ mod tests {
         }"#;
 
         assert_eq!(
-            parse_secrets(json).unwrap(),
+            parse_secrets(json, GLOBAL_SCOPE).unwrap(),
             vec![
-                Secret::new("global", "github"),
+                Secret::new(GLOBAL_SCOPE, "github"),
+                Secret::new(GLOBAL_SCOPE, "nebius"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_scoped_listing_labels_every_row_with_the_sandbox_name() {
+        let json = br#"{
+          "secrets": [
+            { "scope": "global", "name": "github" },
+            { "scope": "test", "name": "nebius" }
+          ],
+          "custom_secrets": [{ "env_name": "MY_TOKEN" }, {}]
+        }"#;
+
+        assert_eq!(
+            parse_secrets(json, "test").unwrap(),
+            vec![
+                Secret::new("test", "github"),
                 Secret::new("test", "nebius"),
+                Secret::new("test", "MY_TOKEN"),
             ]
         );
     }
@@ -370,11 +412,27 @@ mod tests {
         }"#;
 
         assert_eq!(
-            parse_secrets(json).unwrap(),
+            parse_secrets(json, GLOBAL_SCOPE).unwrap(),
             vec![
-                Secret::new("global", "openai"),
-                Secret::new("custom", "MY_TOKEN"),
+                Secret::new(GLOBAL_SCOPE, "openai"),
+                Secret::new(GLOBAL_SCOPE, "MY_TOKEN"),
             ]
+        );
+    }
+
+    #[test]
+    fn list_commands_target_one_scope_at_a_time() {
+        assert_eq!(
+            secret_list_command(None).preview(),
+            "sbx secret ls -g --json"
+        );
+        assert_eq!(
+            secret_list_command(Some("alpha")).preview(),
+            "sbx secret ls --sandbox alpha --json"
+        );
+        assert_eq!(
+            secret_list_command(Some("my sandbox")).preview(),
+            "sbx secret ls --sandbox 'my sandbox' --json"
         );
     }
 
@@ -408,8 +466,8 @@ mod tests {
 
     #[test]
     fn rejects_output_without_a_secret_list() {
-        assert!(parse_secrets(br#"{"env_only_count": 7}"#).is_err());
-        assert!(parse_secrets(b"not json").is_err());
+        assert!(parse_secrets(br#"{"env_only_count": 7}"#, GLOBAL_SCOPE).is_err());
+        assert!(parse_secrets(b"not json", GLOBAL_SCOPE).is_err());
     }
 
     #[test]

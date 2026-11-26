@@ -30,8 +30,12 @@ pub use self::ports::{PortField, PortForm, PortMapping, PortsView};
 pub use self::sandbox::{
     HostMount, MountMode, Sandbox, SandboxDetails, fetch_sandboxes, inspect_sandbox,
 };
-pub use self::secret_form::{SERVICES, SecretForm};
-pub use self::secrets::{Secret, fetch_secrets};
+// `GLOBAL_SCOPE` and `fetch_secrets` are public entry points for callers that
+// don't cache sandboxes; the dashboard itself uses the cached variant.
+#[allow(unused_imports)]
+pub use self::secret_form::{GLOBAL_SCOPE, SERVICES, SecretForm, is_global_scope};
+#[allow(unused_imports)]
+pub use self::secrets::{Secret, fetch_secrets, fetch_secrets_for};
 pub use self::service_catalog::service_info;
 pub use self::workspace::{WORKSPACE_PARENT, WorkspacePicker};
 
@@ -458,7 +462,7 @@ impl App {
     }
 
     pub fn refresh_secrets(&mut self) {
-        match fetch_secrets() {
+        match fetch_secrets_for(&self.sandboxes) {
             Ok(secrets) => self.secrets = secrets,
             Err(error) => self.notify_error("Could not list secrets", error),
         }
@@ -473,12 +477,12 @@ impl App {
         ));
     }
 
-    /// The row's scope is the sandbox name; global secrets omit `--sandbox`.
+    /// The row's scope is the sandbox name; `(global)` secrets omit `--sandbox`.
     /// `-f` skips the CLI's own prompt, which cannot be answered while the TUI
     /// owns the terminal.
     fn delete_secret_command(name: &str, scope: &str) -> PendingCommand {
         let mut args = vec!["secrets", "rm", name];
-        let scoped = (scope != "global").then_some(["--sandbox", scope]);
+        let scoped = (!is_global_scope(scope)).then_some(["--sandbox", scope]);
         if let Some([flag, value]) = scoped.as_ref() {
             args.push(flag);
             args.push(value);

@@ -27,6 +27,12 @@ pub const SERVICES: &[&str] = &[
 /// `--sandbox` from the CLI command.
 pub const GLOBAL_SCOPE: &str = "(global)";
 
+/// The table and the Set dialog use `"(global)"`; older fixtures and CLI
+/// output spell the same scope `"global"`. Both mean "no sandbox flag".
+pub fn is_global_scope(scope: &str) -> bool {
+    matches!(scope, GLOBAL_SCOPE | "global")
+}
+
 #[derive(Clone)]
 pub struct SecretForm {
     pub(super) service_index: usize,
