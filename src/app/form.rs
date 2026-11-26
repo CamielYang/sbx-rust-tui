@@ -16,25 +16,29 @@ pub enum FormField {
 }
 
 /// How the workspace chosen in the create dialog is attached to a sandbox.
-/// `mount` bind-mounts the host directory; `clone` copies the repository into
+/// `direct` bind-mounts the host directory; `clone` copies the repository into
 /// the container and keeps its commits available through `sbx`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkspaceMode {
-    Mount,
+    Direct,
     Clone,
 }
 
 impl WorkspaceMode {
     /// Labels for ratcn's `Cycle`, in cycling order.
-    pub const OPTIONS: [&'static str; 2] = ["mount", "clone"];
+    pub const OPTIONS: [&'static str; 2] = ["direct", "clone"];
 
     pub(super) fn from_index(index: usize) -> Self {
-        if index == 1 { Self::Clone } else { Self::Mount }
+        if index == 1 {
+            Self::Clone
+        } else {
+            Self::Direct
+        }
     }
 
     pub fn index(self) -> usize {
         match self {
-            Self::Mount => 0,
+            Self::Direct => 0,
             Self::Clone => 1,
         }
     }
@@ -76,7 +80,7 @@ impl Form {
             memory: InputState::new(default_memory()),
             add_workspace: false,
             workspace_path: default_workspace_path(),
-            workspace_mode: WorkspaceMode::Mount,
+            workspace_mode: WorkspaceMode::Direct,
         }
     }
 

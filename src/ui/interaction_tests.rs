@@ -320,7 +320,7 @@ fn workspace_mode_cycles_to_clone_and_adds_the_flag_before_the_path() {
     let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
     draw(&mut terminal, &app, &mut ratcn);
 
-    let (x, y) = position_from_bottom(&screen(&terminal), "mount").expect("mode cycle");
+    let (x, y) = position_from_bottom(&screen(&terminal), "direct").expect("mode cycle");
     let emitted = click(&mut terminal, &mut app, &mut ratcn, x, y);
     assert!(
         emitted

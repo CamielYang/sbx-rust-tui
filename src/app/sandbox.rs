@@ -89,6 +89,7 @@ pub struct HostMount {
 pub struct SandboxDetails {
     pub name: String,
     pub status: String,
+    pub agent: Option<String>,
     pub cpus: Option<String>,
     /// Percentage of all guest cores currently busy, sampled over one second.
     pub cpu_usage: Option<u8>,
@@ -352,6 +353,7 @@ fn load_inspect_details(sandbox: &Sandbox, details: &mut SandboxDetails) {
         }
     };
 
+    details.agent = json_text(&value, &["agent", "agent_name", "agentName"]);
     details.cpus = json_text(&value, &["cpus", "cpu", "cpu_count", "vcpus"]);
     details.mem_total = json_text(
         &value,

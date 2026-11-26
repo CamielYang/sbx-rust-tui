@@ -179,7 +179,7 @@ pub(super) fn create_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
             field_row(ctx, row(6), "Add workspace", add_workspace, theme);
 
             if workspace_enabled {
-                field_row(ctx, row(7), "Mode", mode, theme);
+                field_row(ctx, row(7), "Mount mode", mode, theme);
                 let columns = Layout::horizontal([
                     Constraint::Length(20),
                     Constraint::Min(0),
@@ -319,6 +319,7 @@ pub(super) fn info_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
 fn details_text(details: &SandboxDetails) -> String {
     let mut lines = vec![
         detail_line("Status", Some(details.status.as_str())),
+        detail_line("Agent", details.agent.as_deref()),
         detail_line("CPUs", cpu_text(details).as_deref()),
         detail_line(
             "Memory",

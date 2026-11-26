@@ -73,7 +73,7 @@ fn workspace_mode_controls_the_clone_flag_and_path_position() {
     form.workspace_path = "/work/repo".to_owned();
     form.set_add_workspace(true);
 
-    assert_eq!(form.workspace_mode(), WorkspaceMode::Mount);
+    assert_eq!(form.workspace_mode(), WorkspaceMode::Direct);
     assert_eq!(
         form.create_command().preview(),
         "sbx create --name sandbox-name opencode --cpus 2 --memory 4g /work/repo"
@@ -302,10 +302,11 @@ fn sandbox_actions_build_expected_commands() {
 #[test]
 fn json_lookup_finds_nested_resource_fields() {
     let value: Value = serde_json::from_str(
-        r#"{"name":"demo","resources":{"cpus":2,"memory":"4g"},"sizes":{"rootfs":"20g","docker":"10g"}}"#,
+        r#"{"name":"demo","agent":"opencode","resources":{"cpus":2,"memory":"4g"},"sizes":{"rootfs":"20g","docker":"10g"}}"#,
     )
     .unwrap();
     assert_eq!(json_text(&value, &["name"]).as_deref(), Some("demo"));
+    assert_eq!(json_text(&value, &["agent"]).as_deref(), Some("opencode"));
     assert_eq!(json_text(&value, &["cpus"]).as_deref(), Some("2"));
     assert_eq!(json_text(&value, &["memory"]).as_deref(), Some("4g"));
     assert_eq!(json_text(&value, &["rootfs"]).as_deref(), Some("20g"));

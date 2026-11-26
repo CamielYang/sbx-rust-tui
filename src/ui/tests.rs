@@ -262,14 +262,14 @@ fn workspace_option_reveals_mode_path_and_change_button_when_enabled() {
     assert!(screen.contains("Add workspace"));
     assert!(!screen.contains(&path));
     assert!(!screen.contains("Change"));
-    assert!(!screen.contains("Mode"));
+    assert!(!screen.contains("Mount mode"));
 
     app.set_add_workspace(true);
     let screen = render(&app);
     assert!(screen.contains(&path));
     assert!(screen.contains("Change"));
-    assert!(screen.contains("Mode"));
-    assert!(screen.contains("mount"));
+    assert!(screen.contains("Mount mode"));
+    assert!(screen.contains("direct"));
     assert!(!screen.contains("clone"));
 }
 
@@ -296,6 +296,7 @@ fn renders_info_dialog() {
     app.show_info_for_test(SandboxDetails {
         name: "alpha".to_owned(),
         status: "running".to_owned(),
+        agent: Some("opencode".to_owned()),
         cpus: Some("4".to_owned()),
         cpu_usage: Some(37),
         mem_used: Some("1.0 GiB".to_owned()),
@@ -307,6 +308,20 @@ fn renders_info_dialog() {
     assert!(screen.contains("Sandbox"));
     assert!(screen.contains("4 (37%)"));
     assert!(screen.contains("1.0 GiB / 2.0 GiB"));
+
+    let rows: Vec<&str> = screen.lines().collect();
+    let row_of = |label: &str| {
+        rows.iter()
+            .position(|line| {
+                line.trim_start_matches(|c: char| c.is_whitespace() || c == '│')
+                    .starts_with(label)
+            })
+            .unwrap_or_else(|| panic!("missing {label} row"))
+    };
+    let agent_row = row_of("Agent");
+    assert!(rows[agent_row].contains("opencode"));
+    assert!(row_of("Status") < agent_row);
+    assert!(agent_row < row_of("CPUs"));
 }
 
 #[test]
