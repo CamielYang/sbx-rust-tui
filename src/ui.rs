@@ -21,8 +21,8 @@ mod dialogs;
 mod widgets;
 
 use self::dashboard::{
-    paint_body, paint_content_frame, paint_empty_section, paint_footer, paint_header, paint_quit,
-    paint_tabs, paint_toolbar,
+    paint_body, paint_content_frame, paint_footer, paint_header, paint_quit, paint_secrets_body,
+    paint_secrets_toolbar, paint_tabs, paint_toolbar,
 };
 use self::dialogs::{confirm_dialog, create_dialog, info_dialog, ports_dialog, workspace_dialog};
 
@@ -49,6 +49,9 @@ pub enum Msg {
     TabSelected(DashboardTab),
     OpenWizard,
     Refresh,
+    SetSecret,
+    RefreshSecrets,
+    DeleteSecret(String),
     Quit,
     CancelWizard,
     CreateSandbox,
@@ -106,6 +109,12 @@ pub fn apply(app: &mut App, msg: Msg) {
             app.refresh_sandboxes();
             app.notify_success("Sandbox list refreshed", None);
         }
+        Msg::SetSecret => app.set_secret(),
+        Msg::RefreshSecrets => {
+            app.refresh_secrets();
+            app.notify_success("Secret list refreshed", None);
+        }
+        Msg::DeleteSecret(name) => app.delete_secret(&name),
         Msg::Quit => app.quit(),
         Msg::CancelWizard => app.cancel_wizard(),
         Msg::CreateSandbox => app.create_from_form(),
@@ -199,7 +208,10 @@ pub fn declare(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme) {
             paint_toolbar(ctx, app, &theme, content_rows[0]);
             paint_body(ctx, app, &theme, content_rows[2]);
         }
-        DashboardTab::Secrets => paint_empty_section(ctx, &theme, content_rows[2]),
+        DashboardTab::Secrets => {
+            paint_secrets_toolbar(ctx, &theme, content_rows[0]);
+            paint_secrets_body(ctx, app, &theme, content_rows[2]);
+        }
     }
     // Declared after the sandbox controls so startup focus still lands on
     // "+ New sandbox"; the visual row stays just below the title spacing.

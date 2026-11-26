@@ -12,6 +12,7 @@ use ratcn::{
 };
 
 use super::*;
+use crate::app::Secret;
 
 pub(super) fn paint_header(
     ctx: &mut DeclareCtx<'_, App, Msg>,
@@ -121,12 +122,109 @@ pub(super) fn paint_content_frame(
     inner
 }
 
-/// The Secrets tab is intentionally bare for now: just its own empty section.
-pub(super) fn paint_empty_section(ctx: &mut DeclareCtx<'_, App, Msg>, theme: &Theme, area: Rect) {
-    ctx.paint_widget(
-        Block::default().style(Style::default().bg(theme.surface)),
-        area,
+/// The Secrets tab keeps the toolbar in the same row as the sandboxes tab,
+/// with its own two buttons.
+pub(super) fn paint_secrets_toolbar(ctx: &mut DeclareCtx<'_, App, Msg>, theme: &Theme, area: Rect) {
+    let set_button = Button::new("+ Set secret").on_press(|| Msg::SetSecret);
+    let refresh_button = Button::new("Refresh")
+        .secondary()
+        .on_press(|| Msg::RefreshSecrets);
+
+    let columns = Layout::horizontal([
+        Constraint::Length(set_button.width() + 2),
+        Constraint::Length(refresh_button.width() + 2),
+        Constraint::Min(0),
+    ])
+    .split(area);
+
+    ctx.component("secrets-set", set_button, columns[0]);
+    ctx.component("secrets-refresh", refresh_button, columns[1]);
+
+    let hint = Span::styled(
+        "  Tab moves focus · Enter activates",
+        Style::default().fg(theme.muted_foreground),
     );
+    ctx.paint_widget(Paragraph::new(Line::from(hint)), columns[2]);
+}
+
+/// A single pane holding the secret inventory: scope and name in columns,
+/// with a row button for deleting each entry.
+pub(super) fn paint_secrets_body(
+    ctx: &mut DeclareCtx<'_, App, Msg>,
+    app: &App,
+    theme: &Theme,
+    area: Rect,
+) {
+    let block = pane_block(" Secrets ", theme.field, theme.border);
+    let inner = block.inner(area);
+    ctx.paint_widget(block, area);
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let delete_width = Button::<Msg>::new("Delete").width();
+    let columns = Layout::horizontal([
+        Constraint::Length(16),
+        Constraint::Min(0),
+        Constraint::Length(delete_width + 2),
+    ])
+    .split(inner);
+    let name_width = columns[1].width.saturating_sub(1) as usize;
+    ctx.paint_widget(Paragraph::new(secret_header_line(name_width, theme)), inner);
+
+    let visible = (inner.height - 1) as usize;
+    if app.secrets().is_empty() {
+        ctx.paint_widget(
+            Paragraph::new(Line::from(Span::styled(
+                " No secrets yet.",
+                Style::default().fg(theme.muted_foreground),
+            ))),
+            Rect::new(inner.x, inner.y + 1, inner.width, 1),
+        );
+        return;
+    }
+
+    for (index, secret) in app.secrets().iter().take(visible).enumerate() {
+        let row = Rect::new(inner.x, inner.y + 1 + index as u16, inner.width, 1);
+        ctx.paint_widget(
+            Paragraph::new(secret_row_line(secret, name_width, theme)),
+            row,
+        );
+
+        let name = secret.name.clone();
+        ctx.component(
+            format!("secrets-delete-{index}"),
+            Button::new("Delete")
+                .ghost()
+                .on_press(move || Msg::DeleteSecret(name.clone())),
+            Rect::new(columns[2].x, row.y, delete_width.min(columns[2].width), 1),
+        );
+    }
+}
+
+fn secret_header_line(name_width: usize, theme: &Theme) -> Line<'static> {
+    let style = Style::default()
+        .fg(theme.muted_foreground)
+        .add_modifier(Modifier::BOLD);
+    Line::from(vec![
+        Span::styled(format!(" {:<15}", "SCOPE"), style),
+        Span::styled(format!("{:<name_width$}", "NAME"), style),
+        // Two leading cells match the button's padding, as in the ports table.
+        Span::styled("  DELETE", style),
+    ])
+}
+
+fn secret_row_line(secret: &Secret, name_width: usize, theme: &Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!(" {:<15}", secret.scope),
+            Style::default().fg(theme.muted_foreground),
+        ),
+        Span::styled(
+            format!("{:<name_width$}", secret.name),
+            Style::default().fg(theme.foreground),
+        ),
+    ])
 }
 
 /// Inner panes keep the theme's border; the white outline belongs to the

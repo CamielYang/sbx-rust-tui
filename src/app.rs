@@ -15,6 +15,7 @@ mod form;
 mod ports;
 mod ports_flow;
 mod sandbox;
+mod secrets;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod workers;
@@ -27,6 +28,7 @@ pub use self::ports::{PortField, PortForm, PortMapping, PortsView};
 pub use self::sandbox::{
     HostMount, MountMode, Sandbox, SandboxDetails, fetch_sandboxes, inspect_sandbox,
 };
+pub use self::secrets::{Secret, fetch_secrets};
 pub use self::workspace::{WORKSPACE_PARENT, WorkspacePicker};
 
 pub const AGENTS: &[&str] = &[
@@ -83,6 +85,7 @@ pub enum Mode {
 pub struct App {
     tab: DashboardTab,
     sandboxes: Vec<Sandbox>,
+    secrets: Vec<Secret>,
     /// The row the list cursor is on. Hover and arrow keys move it; the
     /// Actions pane follows `selected`, which a click commits.
     cursor: usize,
@@ -119,6 +122,7 @@ impl App {
         let mut app = Self {
             tab: DashboardTab::default(),
             sandboxes: Vec::new(),
+            secrets: Vec::new(),
             cursor: 0,
             selected: 0,
             list_offset: 0,
@@ -145,6 +149,7 @@ impl App {
             unpublished_for_test: None,
         };
         app.refresh_sandboxes();
+        app.refresh_secrets();
         app
     }
 
@@ -326,6 +331,10 @@ impl App {
         &self.sandboxes
     }
 
+    pub fn secrets(&self) -> &[Secret] {
+        &self.secrets
+    }
+
     /// The row the list cursor is on. Kept apart from the selected sandbox so
     /// hovering a row does not silently retarget the Actions pane.
     pub fn focused_name(&self) -> Option<String> {
@@ -381,7 +390,8 @@ impl App {
         if self.is_creating() || self.mode() != Mode::Normal {
             return;
         }
-        // Sandbox shortcuts must not reach through an empty Secrets tab.
+        // These shortcuts belong to the sandbox tab; the Secrets tab uses its
+        // own buttons instead.
         if self.active_tab() != DashboardTab::Sandboxes {
             return;
         }
@@ -407,6 +417,25 @@ impl App {
             Ok(sandboxes) => self.apply_statuses(sandboxes),
             Err(error) => self.notify_error("Could not list sandboxes", error),
         }
+    }
+
+    pub fn refresh_secrets(&mut self) {
+        match fetch_secrets() {
+            Ok(secrets) => self.secrets = secrets,
+            Err(error) => self.notify_error("Could not list secrets", error),
+        }
+    }
+
+    /// Setting a secret is deliberately read-only for now; the button stays
+    /// visible so the layout matches the eventual workflow.
+    pub fn set_secret(&mut self) {
+        self.notify_info("Set secret is not available yet", None);
+    }
+
+    /// Deletes are not wired up yet. The row button is still clickable so the
+    /// interaction can be hooked up without changing the layout later.
+    pub fn delete_secret(&mut self, name: &str) {
+        self.notify_info("Delete secret is not available yet", Some(name.to_owned()));
     }
 
     /// Periodic tick: keep running-state dots (and an open Info modal's status

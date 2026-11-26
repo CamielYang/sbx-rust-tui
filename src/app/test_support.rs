@@ -11,7 +11,7 @@ use ratcn::Toast;
 use super::workers::{CREATE_TOAST, Creation, InfoRefresh};
 use super::{
     App, CREATE_DIALOG, INFO_DIALOG, PORTS_DIALOG, PendingAction, PortMapping, PortsView, Sandbox,
-    SandboxDetails,
+    SandboxDetails, Secret,
 };
 
 #[cfg(test)]
@@ -59,6 +59,16 @@ impl App {
         app.sandboxes = entries
             .iter()
             .map(|(name, status)| Sandbox::new((*name).to_owned(), (*status).to_owned()))
+            .collect();
+        app
+    }
+
+    /// Populate the Secrets table without calling `sbx secret ls`.
+    pub fn with_secrets(entries: &[(&str, &str)]) -> Self {
+        let mut app = Self::new();
+        app.secrets = entries
+            .iter()
+            .map(|(scope, name)| Secret::new(*scope, *name))
             .collect();
         app
     }

@@ -272,6 +272,32 @@ fn position_from_bottom(screen: &str, needle: &str) -> Option<(u16, u16)> {
 }
 
 #[test]
+fn secret_row_delete_and_toolbar_refresh_are_clickable() {
+    let mut app = App::with_secrets(&[("global", "github")]);
+    app.select_tab(DashboardTab::Secrets);
+    let mut ratcn = new_runtime();
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    draw(&mut terminal, &app, &mut ratcn);
+
+    let (x, y) = position_from_bottom(&screen(&terminal), "Delete").expect("delete on screen");
+    let emitted = click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+    assert!(
+        emitted
+            .iter()
+            .any(|message| matches!(message, Msg::DeleteSecret(name) if name == "github"))
+    );
+    assert!(app.message().contains("github"));
+
+    let (x, y) = position_from_bottom(&screen(&terminal), "Refresh").expect("refresh on screen");
+    let emitted = click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+    assert!(
+        emitted
+            .iter()
+            .any(|message| matches!(message, Msg::RefreshSecrets))
+    );
+}
+
+#[test]
 fn clicking_an_action_opens_its_confirmation_dialog() {
     let mut app = App::with_sandboxes(&["alpha"]);
     let mut ratcn = new_runtime();

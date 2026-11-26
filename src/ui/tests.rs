@@ -75,8 +75,8 @@ fn renders_tabs_with_quit_on_the_title_row() {
 }
 
 #[test]
-fn secrets_tab_shows_only_an_empty_section() {
-    let mut app = App::with_sandbox_statuses(&[("alpha", "running")]);
+fn secrets_tab_shows_toolbar_and_secret_table() {
+    let mut app = App::with_secrets(&[("global", "github"), ("test", "nebius")]);
     app.select_tab(DashboardTab::Secrets);
 
     let screen = render(&app);
@@ -84,10 +84,34 @@ fn secrets_tab_shows_only_an_empty_section() {
     assert!(rows[2].contains("Sandboxes"));
     assert!(rows[2].contains("Secrets"));
     assert_eq!(draw(&app).cell((0, 4)).unwrap().fg, Color::White);
+    assert!(screen.contains(" Secrets "));
+    assert!(screen.contains("+ Set secret"));
+    assert!(screen.contains("Refresh"));
+    assert!(screen.contains("SCOPE"));
+    assert!(screen.contains("NAME"));
+    assert!(screen.contains("DELETE"));
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("global") && row.contains("github"))
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("test") && row.contains("nebius"))
+    );
+    assert_eq!(screen.matches("Delete").count(), 2);
     assert!(!screen.contains("alpha"));
     assert!(!screen.contains("+ New sandbox"));
-    assert!(!screen.contains("Refresh"));
     assert!(!screen.contains("Publish ports"));
+}
+
+#[test]
+fn secrets_tab_has_an_empty_state() {
+    let mut app = App::with_secrets(&[]);
+    app.select_tab(DashboardTab::Secrets);
+
+    let screen = render(&app);
+    assert!(screen.contains("No secrets yet."));
+    assert!(!screen.contains("Delete"));
 }
 
 #[test]

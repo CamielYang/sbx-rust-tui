@@ -825,3 +825,19 @@ fn workspace_picker_starts_at_the_nearest_existing_directory() {
 
     assert_eq!(app.workspace_picker().unwrap().dir(), temp.path());
 }
+
+#[test]
+fn secrets_start_empty_until_the_cli_is_read() {
+    let app = App::with_secrets(&[("global", "github")]);
+    assert_eq!(app.secrets(), &[Secret::new("global", "github")]);
+}
+
+#[test]
+fn secret_buttons_are_read_only_for_now() {
+    let mut app = App::with_secrets(&[("global", "github")]);
+    app.set_secret();
+    assert!(app.message().contains("Set secret"));
+
+    app.delete_secret("github");
+    assert!(app.message().contains("github"));
+}
