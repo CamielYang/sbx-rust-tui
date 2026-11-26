@@ -126,6 +126,10 @@ pub struct App {
     /// In tests, setting a secret records the command instead of running `sbx`.
     #[cfg(test)]
     set_for_test: Option<String>,
+    /// In tests, the answer to the "secret already exists" lookup. `None` means
+    /// no existing secret, so the usual set flow keeps working unchanged.
+    #[cfg(test)]
+    secret_exists_for_test: Option<bool>,
 }
 
 impl App {
@@ -163,6 +167,8 @@ impl App {
             deleted_for_test: None,
             #[cfg(test)]
             set_for_test: None,
+            #[cfg(test)]
+            secret_exists_for_test: None,
         };
         app.refresh_sandboxes();
         app.refresh_secrets();

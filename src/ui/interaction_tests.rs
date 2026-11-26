@@ -684,6 +684,27 @@ fn set_secret_button_opens_a_dialog_that_selects_and_submits() {
 }
 
 #[test]
+fn overwrite_confirmation_button_is_clickable_above_the_set_secret_dialog() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.select_tab(DashboardTab::Secrets);
+    app.set_secret();
+    app.set_secret_state(InputState::new("sk-test"));
+    app.set_secret_exists_for_test(true);
+    app.submit_secret();
+
+    let mut ratcn = new_runtime();
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    draw(&mut terminal, &app, &mut ratcn);
+
+    let (x, y) = position_from_bottom(&screen(&terminal), "Overwrite secret")
+        .expect("overwrite button on the confirmation dialog");
+    let emitted = click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+    assert!(emitted.iter().any(|message| matches!(message, Msg::ConfirmAction)));
+    assert!(app.take_set_for_test().is_some());
+    assert!(!app.modals_ref().is_open(SET_SECRET_DIALOG));
+}
+
+#[test]
 fn escape_dismisses_the_set_secret_dialog() {
     let mut app = App::with_sandboxes(&["alpha"]);
     app.select_tab(DashboardTab::Secrets);

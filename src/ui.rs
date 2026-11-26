@@ -253,9 +253,6 @@ pub fn declare(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme) {
     if app.modals_ref().is_open(INFO_DIALOG) {
         ctx.modal(INFO_DIALOG, info_dialog(app, &theme), area);
     }
-    if app.modals_ref().is_open(CONFIRM_DIALOG) {
-        ctx.modal(CONFIRM_DIALOG, confirm_dialog(app), area);
-    }
     if app.modals_ref().is_open(PORTS_DIALOG) {
         ctx.modal(PORTS_DIALOG, ports_dialog(app, &theme), area);
     }
@@ -265,6 +262,11 @@ pub fn declare(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme) {
     }
     if app.modals_ref().is_open(SET_SECRET_DIALOG) {
         ctx.modal(SET_SECRET_DIALOG, set_secret_dialog(app, &theme), area);
+    }
+    // Declared last so an overwrite confirmation stacks above the set secret
+    // dialog that asked for it.
+    if app.modals_ref().is_open(CONFIRM_DIALOG) {
+        ctx.modal(CONFIRM_DIALOG, confirm_dialog(app), area);
     }
 }
 

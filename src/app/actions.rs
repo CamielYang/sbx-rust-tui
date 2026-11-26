@@ -16,6 +16,9 @@ pub enum PendingAction {
     Remove(String),
     /// Secret name followed by its scope (the sandbox name, or "global").
     DeleteSecret(String, String),
+    /// Service and scope of a secret that already exists. The new value stays
+    /// in the secret form until the overwrite is confirmed.
+    OverwriteSecret(String, String),
 }
 
 impl PendingAction {
@@ -25,6 +28,7 @@ impl PendingAction {
             Self::Stop(_) => "Stop",
             Self::Remove(_) => "Remove",
             Self::DeleteSecret(..) => "Delete secret",
+            Self::OverwriteSecret(..) => "Overwrite secret",
         }
     }
 }
@@ -88,17 +92,26 @@ impl App {
         self.close_modal(CONFIRM_DIALOG);
         let should_be_running = matches!(&action, PendingAction::Stop(_));
         let secret_action = matches!(&action, PendingAction::DeleteSecret(..));
+        let overwrite_action = matches!(&action, PendingAction::OverwriteSecret(..));
         let still_valid = match &action {
             PendingAction::Start(name) | PendingAction::Stop(name) => {
                 self.has_sandbox(name) && self.is_running(name) == should_be_running
             }
             PendingAction::Remove(name) => self.has_sandbox(name),
             PendingAction::DeleteSecret(name, scope) => self.has_secret(name, scope),
+            PendingAction::OverwriteSecret(service, scope) => {
+                self.secret_form.as_ref().is_some_and(|form| {
+                    form.service() == Some(service.as_str())
+                        && form.scope() == Some(scope.as_str())
+                })
+            }
         };
         if still_valid {
             self.perform_action(action);
         } else if secret_action {
             self.notify_info("Secret is no longer listed; action cancelled.", None);
+        } else if overwrite_action {
+            self.notify_info("Secret form is no longer available; overwrite cancelled.", None);
         } else {
             self.notify_info("Sandbox state changed; action cancelled.", None);
         }
@@ -110,6 +123,9 @@ impl App {
             if let PendingAction::DeleteSecret(name, scope) = &action {
                 self.delete_secret_now(name, scope);
             }
+            if let PendingAction::OverwriteSecret(service, scope) = &action {
+                self.finish_set_secret(service, scope);
+            }
             self.confirmed_for_test = Some(action);
         }
         #[cfg(not(test))]
@@ -118,6 +134,9 @@ impl App {
             PendingAction::Stop(name) => self.stop_sandbox(&name),
             PendingAction::Remove(name) => self.remove_sandbox(&name),
             PendingAction::DeleteSecret(name, scope) => self.delete_secret_now(&name, &scope),
+            PendingAction::OverwriteSecret(service, scope) => {
+                self.finish_set_secret(&service, &scope)
+            }
         }
     }
 

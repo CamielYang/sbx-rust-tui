@@ -135,6 +135,33 @@ fn set_secret_dialog_shows_service_scope_and_secret_fields() {
 }
 
 #[test]
+fn set_secret_dialog_masks_the_typed_value() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_secret();
+    app.set_secret_state(InputState::new("sk-super-secret"));
+
+    let screen = render(&app);
+    assert!(!screen.contains("sk-super-secret"));
+    assert!(screen.contains(&"*".repeat("sk-super-secret".len())));
+}
+
+#[test]
+fn overwrite_confirmation_renders_above_the_set_secret_dialog() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_secret();
+    app.set_secret_scope(1);
+    app.set_secret_state(InputState::new("sk-test"));
+    app.set_secret_exists_for_test(true);
+    app.submit_secret();
+
+    let screen = render(&app);
+    assert!(screen.contains("Confirm overwrite"));
+    assert!(screen.contains("A secret for 'anthropic' already exists in sandbox"));
+    assert!(screen.contains("'alpha'. Overwrite it?"));
+    assert!(screen.contains("Overwrite secret"));
+}
+
+#[test]
 fn set_secret_dialog_lists_every_builtin_service() {
     let mut app = App::with_sandboxes(&[]);
     app.set_secret();

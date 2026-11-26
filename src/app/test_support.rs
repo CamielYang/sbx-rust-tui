@@ -122,6 +122,12 @@ impl App {
         self.set_for_test.take()
     }
 
+    /// Make the pre-set `sbx secret ls` lookup report an existing secret, so
+    /// the overwrite confirmation can be exercised without shelling out.
+    pub fn set_secret_exists_for_test(&mut self, exists: bool) {
+        self.secret_exists_for_test = Some(exists);
+    }
+
     /// Queue a fake metrics result so `poll_info` can be tested without
     /// running `sbx exec` inside the guest.
     pub fn queue_info_result_for_test(&mut self, name: &str, details: SandboxDetails) {

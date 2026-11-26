@@ -8,7 +8,7 @@ use serde_json::Value;
 use super::commands::stderr_detail;
 use super::sandbox::json_text;
 use super::secret_form::{GLOBAL_SCOPE, SecretForm};
-use super::{App, Mode, PendingCommand, SET_SECRET_DIALOG};
+use super::{App, CONFIRM_DIALOG, Mode, PendingAction, PendingCommand, SET_SECRET_DIALOG};
 
 /// One row of `sbx secret ls --format json`, reduced to the fields the
 /// dashboard table shows.
@@ -71,6 +71,18 @@ fn parse_secrets(bytes: &[u8]) -> Result<Vec<Secret>, String> {
         return Err("sbx secret ls did not include a secret list".to_owned());
     }
     Ok(secrets)
+}
+
+/// Whether a scoped `sbx secret ls --format json` reports a stored secret.
+/// Custom secrets are keyed by env name rather than service, so only the
+/// `secrets` array answers the overwrite question.
+fn parse_secret_exists(bytes: &[u8]) -> Result<bool, String> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+    let secrets = value
+        .get("secrets")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "sbx secret ls did not include a secret list".to_owned())?;
+    Ok(!secrets.is_empty())
 }
 
 impl App {
@@ -140,8 +152,9 @@ impl App {
         }
     }
 
-    /// The dialog's **Set secret** button. The value is piped into `sbx` by the
-    /// shell, since the CLI reads it from stdin rather than an argument.
+    /// The dialog's **Set secret** button. Look for an existing secret first:
+    /// overwriting one goes through the shared confirmation dialog, stacked
+    /// above the form so a cancel returns with the typed value intact.
     pub fn submit_secret(&mut self) {
         if self.mode() != Mode::SetSecret {
             return;
@@ -163,11 +176,72 @@ impl App {
             return;
         }
 
-        let pending = Self::set_secret_command(&service, &scope, &secret);
+        let exists = match self.stored_secret_exists(&service, &scope) {
+            Ok(exists) => exists,
+            Err(error) => {
+                self.notify_error("Could not check secret", error);
+                return;
+            }
+        };
+        if exists {
+            self.pending_action = Some(PendingAction::OverwriteSecret(service, scope));
+            let _ = self.modals.open(CONFIRM_DIALOG, &mut self.focus);
+            return;
+        }
+        self.finish_set_secret(&service, &scope);
+    }
+
+    /// `sbx secret ls --sandbox <scope> --service <service> --format json`.
+    /// The global store has no sandbox, so it uses `--global` instead.
+    pub(super) fn secret_lookup_command(service: &str, scope: &str) -> PendingCommand {
+        let mut args = vec!["secret", "ls"];
+        if scope == GLOBAL_SCOPE {
+            args.push("--global");
+        } else {
+            args.extend(["--sandbox", scope]);
+        }
+        args.extend(["--service", service, "--format", "json"]);
+        PendingCommand::new("sbx", &args)
+    }
+
+    /// Ask `sbx` whether this service already has a secret in the scope. Tests
+    /// supply the answer instead of shelling out.
+    #[cfg(test)]
+    fn stored_secret_exists(&self, _service: &str, _scope: &str) -> Result<bool, String> {
+        Ok(self.secret_exists_for_test.unwrap_or(false))
+    }
+
+    #[cfg(not(test))]
+    fn stored_secret_exists(&self, service: &str, scope: &str) -> Result<bool, String> {
+        let output = Self::secret_lookup_command(service, scope)
+            .run()
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            return Err(if stderr.is_empty() {
+                format!("sbx secret ls exited with {}.", output.status)
+            } else {
+                stderr
+            });
+        }
+        parse_secret_exists(&output.stdout)
+    }
+
+    /// Run the set command for the value still held by the form, then close the
+    /// dialog and refresh the table. Shared by the direct and confirmed paths.
+    pub(super) fn finish_set_secret(&mut self, service: &str, scope: &str) {
+        let Some(secret) = self
+            .secret_form
+            .as_ref()
+            .map(|form| form.secret().value().trim().to_owned())
+        else {
+            return;
+        };
+        let pending = Self::set_secret_command(service, scope, &secret);
         let target = if scope == GLOBAL_SCOPE {
             "global".to_owned()
         } else {
-            scope
+            scope.to_owned()
         };
         let success = format!("Set secret '{service}' for {target}.");
 
@@ -284,5 +358,12 @@ mod tests {
     fn rejects_output_without_a_secret_list() {
         assert!(parse_secrets(br#"{"env_only_count": 7}"#).is_err());
         assert!(parse_secrets(b"not json").is_err());
+    }
+
+    #[test]
+    fn existing_secret_lookup_reads_the_secrets_array() {
+        assert!(parse_secret_exists(br#"{"secrets":[{"name":"github"}]}"#).unwrap());
+        assert!(!parse_secret_exists(br#"{"secrets":[]}"#).unwrap());
+        assert!(parse_secret_exists(br#"{"custom_secrets":[{"env_name":"TOKEN"}]}"#).is_err());
     }
 }

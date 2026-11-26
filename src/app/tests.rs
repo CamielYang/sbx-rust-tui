@@ -907,6 +907,87 @@ fn setting_a_secret_requires_a_value() {
 }
 
 #[test]
+fn existing_secret_waits_for_overwrite_confirmation() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_secret();
+    app.set_secret_service(3); // github
+    app.set_secret_scope(1); // alpha
+    app.set_secret_state(InputState::new("sk-test"));
+    app.set_secret_exists_for_test(true);
+    app.submit_secret();
+
+    assert_eq!(
+        app.pending_action(),
+        Some(&PendingAction::OverwriteSecret(
+            "github".to_owned(),
+            "alpha".to_owned()
+        ))
+    );
+    assert!(matches!(app.mode(), Mode::Confirm));
+    assert!(app.modals_ref().is_open(CONFIRM_DIALOG));
+    assert!(app.modals_ref().is_open(SET_SECRET_DIALOG));
+    assert_eq!(app.secret_form().unwrap().secret().value(), "sk-test");
+    assert!(app.take_set_for_test().is_none());
+}
+
+#[test]
+fn cancelling_an_overwrite_keeps_the_secret_form() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_secret();
+    app.set_secret_state(InputState::new("sk-test"));
+    app.set_secret_exists_for_test(true);
+    app.submit_secret();
+    app.cancel_action();
+
+    assert!(app.pending_action().is_none());
+    assert!(!app.modals_ref().is_open(CONFIRM_DIALOG));
+    assert!(app.modals_ref().is_open(SET_SECRET_DIALOG));
+    assert_eq!(app.secret_form().unwrap().secret().value(), "sk-test");
+    assert!(app.take_set_for_test().is_none());
+    assert_eq!(app.message(), "Overwrite secret cancelled.");
+}
+
+#[test]
+fn confirming_an_overwrite_sets_the_secret() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_secret();
+    app.set_secret_service(3); // github
+    app.set_secret_scope(1); // alpha
+    app.set_secret_state(InputState::new("sk-test"));
+    app.set_secret_exists_for_test(true);
+    app.submit_secret();
+    app.confirm_action();
+
+    assert_eq!(
+        app.take_set_for_test().as_deref(),
+        Some("echo \"sk-test\" | sbx secret set github --sandbox alpha -f")
+    );
+    assert_eq!(
+        app.take_confirmed_for_test(),
+        Some(PendingAction::OverwriteSecret(
+            "github".to_owned(),
+            "alpha".to_owned()
+        ))
+    );
+    assert!(!app.modals_ref().is_open(CONFIRM_DIALOG));
+    assert!(!app.modals_ref().is_open(SET_SECRET_DIALOG));
+    assert!(app.secret_form().is_none());
+    assert!(app.message().contains("Set secret 'github' for alpha."));
+}
+
+#[test]
+fn existing_secret_lookup_targets_the_service_and_scope() {
+    assert_eq!(
+        App::secret_lookup_command("github", "alpha").preview(),
+        "sbx secret ls --sandbox alpha --service github --format json"
+    );
+    assert_eq!(
+        App::secret_lookup_command("github", "(global)").preview(),
+        "sbx secret ls --global --service github --format json"
+    );
+}
+
+#[test]
 fn cancelling_set_secret_runs_nothing() {
     let mut app = App::with_sandboxes(&["alpha"]);
     app.set_secret();

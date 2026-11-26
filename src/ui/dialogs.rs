@@ -249,9 +249,9 @@ fn text_input(
 
 // --- confirmation dialog ----------------------------------------------------
 
-/// The last gate before Start/Stop/Remove or a secret deletion reaches `sbx`.
-/// The action's hue is kept on the confirm button so the dialog reads like the
-/// action it replaces.
+/// The last gate before Start/Stop/Remove, a secret deletion, or a secret
+/// overwrite reaches `sbx`. The action's hue is kept on the confirm button so
+/// the dialog reads like the action it replaces.
 pub(super) fn confirm_dialog(app: &App) -> Dialog<App, Msg> {
     let Some(action) = app.pending_action() else {
         return Dialog::new()
@@ -289,6 +289,18 @@ pub(super) fn confirm_dialog(app: &App) -> Dialog<App, Msg> {
             },
             "Delete secret",
             REMOVE_RED,
+        ),
+        PendingAction::OverwriteSecret(service, scope) => (
+            "Confirm overwrite",
+            if scope == "global" {
+                format!("A secret for '{service}' already exists globally. Overwrite it?")
+            } else {
+                format!(
+                    "A secret for '{service}' already exists in sandbox '{scope}'. Overwrite it?"
+                )
+            },
+            "Overwrite secret",
+            STOP_ORANGE,
         ),
     };
 
@@ -711,7 +723,9 @@ pub(super) fn set_secret_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
         "Secret value",
         false,
         form.attempted() && form.secret().value().trim().is_empty(),
-    );
+    )
+    // ratcn keeps the typed value in state; only the painted glyphs change.
+    .mask_char('*');
 
     let (status, status_color) = if form.attempted() && form.secret().value().trim().is_empty() {
         (" Enter a secret value before setting it.", theme.destructive)
