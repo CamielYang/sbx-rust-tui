@@ -1,6 +1,6 @@
 use super::*;
 use crate::app::test_support::TempWorkspaceDir;
-use crate::app::{INFO_DIALOG, Mode, SET_SECRET_DIALOG, WorkspaceMode};
+use crate::app::{INFO_DIALOG, Mode, SET_CUSTOM_SECRET_DIALOG, SET_SECRET_DIALOG, WorkspaceMode};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{Terminal, backend::TestBackend};
 use ratcn::runtime::{EventResult, Ratcn};
@@ -69,6 +69,21 @@ fn click(
         draw(terminal, app, ratcn);
     }
     messages
+}
+
+fn type_text(
+    terminal: &mut Terminal<TestBackend>,
+    app: &mut App,
+    ratcn: &mut Ratcn<App, Msg>,
+    text: &str,
+) {
+    for character in text.chars() {
+        let key = Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        if let EventResult::Emit(message) = ratcn.handle_event(key, app) {
+            apply(app, message);
+        }
+    }
+    draw(terminal, app, ratcn);
 }
 
 #[test]
@@ -703,6 +718,74 @@ fn set_secret_button_opens_a_dialog_that_selects_and_submits() {
         Some("echo \"sk-test\" | sbx secret set github --sandbox alpha -f")
     );
     assert!(!app.modals_ref().is_open(SET_SECRET_DIALOG));
+}
+
+#[test]
+fn set_custom_secret_button_adds_hosts_and_submits_their_command() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.select_tab(DashboardTab::Secrets);
+    let mut ratcn = new_runtime();
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    draw(&mut terminal, &app, &mut ratcn);
+
+    let (x, y) = position_from_bottom(&screen(&terminal), "+ Set custom secret")
+        .expect("custom secret toolbar button");
+    let emitted = click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+    assert!(
+        emitted
+            .iter()
+            .any(|message| matches!(message, Msg::SetCustomSecret))
+    );
+    assert!(app.modals_ref().is_open(SET_CUSTOM_SECRET_DIALOG));
+
+    let (x, y) = position_from_bottom(&screen(&terminal), "API_KEY").expect("env input");
+    click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+    type_text(&mut terminal, &mut app, &mut ratcn, "API_KEY");
+    assert_eq!(
+        app.custom_secret_form().unwrap().env_key().value(),
+        "API_KEY"
+    );
+
+    let (x, y) = position_from_bottom(&screen(&terminal), "Secret value").expect("secret input");
+    click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+    type_text(&mut terminal, &mut app, &mut ratcn, "test");
+    assert_eq!(app.custom_secret_form().unwrap().secret().value(), "test");
+
+    let (x, y) = position_from_bottom(&screen(&terminal), "api.example.com").expect("host input");
+    click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+    type_text(&mut terminal, &mut app, &mut ratcn, "api.example.com");
+
+    let (x, y) = position_from_bottom(&screen(&terminal), "+ Add host").expect("add host button");
+    let emitted = click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+    assert!(
+        emitted
+            .iter()
+            .any(|message| matches!(message, Msg::AddCustomHost))
+    );
+    assert_eq!(app.custom_secret_form().unwrap().hosts().len(), 2);
+
+    // The new row is the last placeholder on screen, so it can be filled by
+    // clicking the bottom-most matching input.
+    let (x, y) = position_from_bottom(&screen(&terminal), "api.example.com").expect("new host");
+    click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+    type_text(&mut terminal, &mut app, &mut ratcn, "uploads.example.com");
+
+    let (x, y) =
+        position_from_bottom(&screen(&terminal), "Set custom secret").expect("submit button");
+    let emitted = click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+    assert!(
+        emitted
+            .iter()
+            .any(|message| matches!(message, Msg::SubmitCustomSecret))
+    );
+    assert_eq!(
+        app.take_set_for_test().as_deref(),
+        Some(
+            "sbx secret set-custom --host api.example.com --host uploads.example.com --env API_KEY --value test"
+        )
+    );
+    assert!(!app.modals_ref().is_open(SET_CUSTOM_SECRET_DIALOG));
+    assert!(app.custom_secret_form().is_none());
 }
 
 #[test]

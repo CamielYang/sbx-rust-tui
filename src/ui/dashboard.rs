@@ -123,28 +123,31 @@ pub(super) fn paint_content_frame(
 }
 
 /// The Secrets tab keeps the toolbar in the same row as the sandboxes tab,
-/// with its own two buttons.
+/// with its own three buttons.
 pub(super) fn paint_secrets_toolbar(ctx: &mut DeclareCtx<'_, App, Msg>, theme: &Theme, area: Rect) {
     let set_button = Button::new("+ Set secret").on_press(|| Msg::SetSecret);
+    let set_custom_button = Button::new("+ Set custom secret").on_press(|| Msg::SetCustomSecret);
     let refresh_button = Button::new("Refresh")
         .secondary()
         .on_press(|| Msg::RefreshSecrets);
 
     let columns = Layout::horizontal([
         Constraint::Length(set_button.width() + 2),
+        Constraint::Length(set_custom_button.width() + 2),
         Constraint::Length(refresh_button.width() + 2),
         Constraint::Min(0),
     ])
     .split(area);
 
     ctx.component("secrets-set", set_button, columns[0]);
-    ctx.component("secrets-refresh", refresh_button, columns[1]);
+    ctx.component("secrets-set-custom", set_custom_button, columns[1]);
+    ctx.component("secrets-refresh", refresh_button, columns[2]);
 
     let hint = Span::styled(
         "  Tab moves focus · Enter activates",
         Style::default().fg(theme.muted_foreground),
     );
-    ctx.paint_widget(Paragraph::new(Line::from(hint)), columns[2]);
+    ctx.paint_widget(Paragraph::new(Line::from(hint)), columns[3]);
 }
 
 /// A single pane holding the secret inventory: scope, name, and env var in

@@ -60,6 +60,10 @@ pub(super) enum JobResult {
         success: String,
         result: io::Result<Output>,
     },
+    CustomSecretSet {
+        success: String,
+        result: io::Result<Output>,
+    },
     SecretDelete {
         name: String,
         result: io::Result<Output>,
@@ -309,6 +313,28 @@ impl App {
                     stderr_detail(&output, "sbx secret set failed"),
                 ),
                 Err(error) => self.notify_error("Could not set secret", error.to_string()),
+            },
+            JobResult::CustomSecretSet { success, result } => match result {
+                Ok(output) if output.status.success() => {
+                    if self
+                        .modals
+                        .top()
+                        .is_some_and(|top| top.as_str() == super::SET_CUSTOM_SECRET_DIALOG)
+                    {
+                        self.close_modal(super::SET_CUSTOM_SECRET_DIALOG);
+                        self.custom_secret_form = None;
+                    }
+                    // Table loading is deliberately out of scope here: the
+                    // custom command writes to hosts, not to the local inventory.
+                    self.notify_success(success, None);
+                }
+                Ok(output) => self.notify_error(
+                    "Could not set custom secret",
+                    stderr_detail(&output, "sbx secret set-custom failed"),
+                ),
+                Err(error) => {
+                    self.notify_error("Could not set custom secret", error.to_string());
+                }
             },
             JobResult::SecretDelete { name, result } => match result {
                 Ok(output) if output.status.success() => {

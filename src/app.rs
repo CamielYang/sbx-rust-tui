@@ -33,7 +33,9 @@ pub use self::sandbox::{
 // `GLOBAL_SCOPE` and `fetch_secrets` are public entry points for callers that
 // don't cache sandboxes; the dashboard itself uses the cached variant.
 #[allow(unused_imports)]
-pub use self::secret_form::{GLOBAL_SCOPE, SERVICES, SecretForm, is_global_scope};
+pub use self::secret_form::{
+    CustomSecretForm, GLOBAL_SCOPE, SERVICES, SecretForm, is_global_scope,
+};
 #[allow(unused_imports)]
 pub use self::secrets::{Secret, fetch_secrets, fetch_secrets_for};
 pub use self::service_catalog::service_info;
@@ -59,6 +61,7 @@ pub const CONFIRM_DIALOG: &str = "confirm-dialog";
 pub const PORTS_DIALOG: &str = "ports-dialog";
 pub const WORKSPACE_DIALOG: &str = "workspace-dialog";
 pub const SET_SECRET_DIALOG: &str = "set-secret-dialog";
+pub const SET_CUSTOM_SECRET_DIALOG: &str = "set-custom-secret-dialog";
 
 /// Stable id for the tab row, used as a focus target when the visible tab changes.
 pub const TAB_ROW: &str = "tab-row";
@@ -90,6 +93,7 @@ pub enum Mode {
     /// The folder picker sits above the create wizard.
     Workspace,
     SetSecret,
+    SetCustomSecret,
 }
 
 pub struct App {
@@ -116,6 +120,7 @@ pub struct App {
     port_form: PortForm,
     workspace_picker: Option<WorkspacePicker>,
     secret_form: Option<SecretForm>,
+    custom_secret_form: Option<CustomSecretForm>,
     pending_action: Option<PendingAction>,
     pending_external: Option<PendingCommand>,
     creation: Option<workers::Creation>,
@@ -166,6 +171,7 @@ impl App {
             port_form: PortForm::new(),
             workspace_picker: None,
             secret_form: None,
+            custom_secret_form: None,
             pending_action: None,
             pending_external: None,
             creation: None,
@@ -223,6 +229,8 @@ impl App {
             Mode::Ports
         } else if self.modals.is_open(SET_SECRET_DIALOG) {
             Mode::SetSecret
+        } else if self.modals.is_open(SET_CUSTOM_SECRET_DIALOG) {
+            Mode::SetCustomSecret
         } else {
             Mode::Normal
         }
@@ -313,6 +321,10 @@ impl App {
 
     pub fn secret_form(&self) -> Option<&SecretForm> {
         self.secret_form.as_ref()
+    }
+
+    pub fn custom_secret_form(&self) -> Option<&CustomSecretForm> {
+        self.custom_secret_form.as_ref()
     }
 
     pub fn port_invalid(&self, field: PortField) -> bool {

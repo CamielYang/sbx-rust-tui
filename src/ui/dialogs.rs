@@ -797,3 +797,154 @@ pub(super) fn set_secret_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
             Button::new("Set secret").on_press(|| Msg::SubmitSecret),
         )
 }
+
+// --- set custom secret dialog ----------------------------------------------
+
+/// The custom form keeps the feel of Set secret without a service or scope to
+/// choose: an env key, a masked value, and a growable list of hosts become one
+/// `sbx secret set-custom` command with a `--host` per row.
+pub(super) fn set_custom_secret_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
+    let theme = *theme;
+    let Some(form) = app.custom_secret_form() else {
+        return Dialog::new()
+            .title("Set custom secret")
+            .description("The custom secret form is no longer available.")
+            .on_dismiss(|| Msg::CancelSetCustomSecret)
+            .action(
+                "close",
+                cancel_button("Close", || Msg::CancelSetCustomSecret),
+            );
+    };
+
+    let invalid_env = form.attempted() && form.env_key().value().trim().is_empty();
+    let invalid_secret = form.attempted() && form.secret().value().trim().is_empty();
+    let invalid_hosts: Vec<bool> = form
+        .hosts()
+        .iter()
+        .map(|host| form.attempted() && host.value().trim().is_empty())
+        .collect();
+    let host_count = form.hosts().len();
+
+    let env_input = input(
+        Msg::CustomSecretEnvChanged,
+        |state: &App| {
+            state
+                .custom_secret_form()
+                .expect("custom secret form")
+                .env_key()
+        },
+        "API_KEY",
+        false,
+        invalid_env,
+    );
+    let secret_input = input(
+        Msg::CustomSecretValueChanged,
+        |state: &App| {
+            state
+                .custom_secret_form()
+                .expect("custom secret form")
+                .secret()
+        },
+        "Secret value",
+        false,
+        invalid_secret,
+    )
+    .mask_char('*');
+
+    let (status, status_color) = if invalid_env {
+        (" Enter an env key before setting it.", theme.destructive)
+    } else if invalid_secret {
+        (
+            " Enter a secret value before setting it.",
+            theme.destructive,
+        )
+    } else if invalid_hosts.iter().any(|&invalid| invalid) {
+        let message = if invalid_hosts.iter().all(|&invalid| invalid) {
+            " Enter at least one host before setting it."
+        } else {
+            " Enter a value for every host before setting it."
+        };
+        (message, theme.destructive)
+    } else {
+        (
+            " Tab or click between fields · Esc cancels",
+            theme.muted_foreground,
+        )
+    };
+
+    // Two logical rows per control, with a blank row between them. Hosts add
+    // their own rows so each input stays in the same column as Env key/Secret.
+    let total_rows = 5 + host_count;
+    Dialog::new()
+        .title("Set custom secret")
+        .outer_width(70)
+        .on_dismiss(|| Msg::CancelSetCustomSecret)
+        .content((total_rows * 2 - 1) as u16, move |ctx| {
+            let rows =
+                Layout::vertical(vec![Constraint::Length(1); total_rows * 2 - 1]).split(ctx.area());
+            let row = |index: usize| rows[index * 2];
+            field_row(ctx, row(0), "Env key", env_input, theme);
+            field_row(ctx, row(1), "Secret", secret_input, theme);
+            ctx.paint_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    " Hosts",
+                    Style::default()
+                        .fg(theme.muted_foreground)
+                        .add_modifier(Modifier::BOLD),
+                ))),
+                row(2),
+            );
+
+            for (index, &invalid) in invalid_hosts.iter().enumerate() {
+                let host_input = input(
+                    move |state| Msg::CustomSecretHostChanged(index, state),
+                    move |state: &App| {
+                        &state
+                            .custom_secret_form()
+                            .expect("custom secret form")
+                            .hosts()[index]
+                    },
+                    "api.example.com",
+                    false,
+                    invalid,
+                );
+                let columns = Layout::horizontal([Constraint::Length(20), Constraint::Min(10)])
+                    .split(row(3 + index));
+                ctx.paint_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        format!(" Host {}", index + 1),
+                        Style::default().fg(theme.muted_foreground),
+                    ))),
+                    columns[0],
+                );
+                ctx.component(
+                    format!("custom-secret-host-{index}"),
+                    host_input,
+                    columns[1],
+                );
+            }
+
+            let add_columns = Layout::horizontal([Constraint::Length(20), Constraint::Min(10)])
+                .split(row(3 + host_count));
+            ctx.component(
+                "custom-secret-add-host",
+                Button::new("+ Add host").on_press(|| Msg::AddCustomHost),
+                add_columns[1],
+            );
+            ctx.paint_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    status,
+                    Style::default().fg(status_color),
+                ))),
+                row(4 + host_count),
+            );
+        })
+        .action(
+            "cancel",
+            cancel_button("Cancel", || Msg::CancelSetCustomSecret),
+        )
+        .action(
+            "set-custom-secret",
+            Button::new("Set custom secret").on_press(|| Msg::SubmitCustomSecret),
+        )
+}

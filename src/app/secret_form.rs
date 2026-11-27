@@ -1,8 +1,10 @@
-//! State for the Set secret dialog.
+//! State for the Set secret and Set custom secret dialogs.
 //!
-//! Both choices are index-backed so ratcn's `Select` can read and replace them
-//! as plain values. The scope list is snapshotted when the dialog opens: a
-//! periodic sandbox refresh must not shift the option under the user's cursor.
+//! The service and scope choices are index-backed so ratcn's `Select` can read
+//! and replace them as plain values. The scope list is snapshotted when the
+//! dialog opens: a periodic sandbox refresh must not shift the option under the
+//! user's cursor. The custom form has no choices — just an env key, a secret
+//! value, and a growable list of hosts.
 
 use ratcn::InputState;
 
@@ -142,6 +144,67 @@ impl SecretForm {
 
     pub fn set_secret(&mut self, state: InputState) {
         self.secret = state;
+    }
+
+    pub fn mark_attempted(&mut self) {
+        self.attempted = true;
+    }
+}
+
+/// State for the Set custom secret dialog. Each host is its own input so the
+/// dialog can send one `--host` per filled row, in the order shown.
+#[derive(Clone)]
+pub struct CustomSecretForm {
+    pub(super) env_key: InputState,
+    pub(super) secret: InputState,
+    pub(super) hosts: Vec<InputState>,
+    /// Set once **Set custom secret** is pressed, so empty fields can be
+    /// called out inside the dialog as well as in a toast.
+    pub(super) attempted: bool,
+}
+
+impl CustomSecretForm {
+    pub(super) fn new() -> Self {
+        Self {
+            env_key: InputState::new(""),
+            secret: InputState::new(""),
+            hosts: vec![InputState::new("")],
+            attempted: false,
+        }
+    }
+
+    pub fn env_key(&self) -> &InputState {
+        &self.env_key
+    }
+
+    pub fn secret(&self) -> &InputState {
+        &self.secret
+    }
+
+    pub fn hosts(&self) -> &[InputState] {
+        &self.hosts
+    }
+
+    pub fn attempted(&self) -> bool {
+        self.attempted
+    }
+
+    pub fn set_env_key(&mut self, state: InputState) {
+        self.env_key = state;
+    }
+
+    pub fn set_secret(&mut self, state: InputState) {
+        self.secret = state;
+    }
+
+    pub fn set_host(&mut self, index: usize, state: InputState) {
+        if let Some(host) = self.hosts.get_mut(index) {
+            *host = state;
+        }
+    }
+
+    pub fn add_host(&mut self) {
+        self.hosts.push(InputState::new(""));
     }
 
     pub fn mark_attempted(&mut self) {

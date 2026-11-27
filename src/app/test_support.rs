@@ -140,7 +140,7 @@ impl App {
         self.deleted_for_test.take()
     }
 
-    /// The command the Set secret dialog handed to the test hook.
+    /// The command a Set secret or Set custom secret dialog handed to the hook.
     pub fn take_set_for_test(&mut self) -> Option<String> {
         self.set_for_test.take()
     }

@@ -3,9 +3,10 @@
 use serde_json::Value;
 
 use super::sandbox::{Sandbox, fetch_sandboxes, json_text};
-use super::secret_form::{GLOBAL_SCOPE, SecretForm, is_global_scope};
+use super::secret_form::{CustomSecretForm, GLOBAL_SCOPE, SecretForm, is_global_scope};
 use super::{
-    App, CONFIRM_DIALOG, Mode, PendingAction, PendingCommand, SET_SECRET_DIALOG, service_info,
+    App, CONFIRM_DIALOG, Mode, PendingAction, PendingCommand, SET_CUSTOM_SECRET_DIALOG,
+    SET_SECRET_DIALOG, service_info,
 };
 
 /// One row of a scoped `sbx secret ls --json`, reduced to the fields the
@@ -196,6 +197,100 @@ impl App {
         }
     }
 
+    /// Open the Set custom secret dialog with one empty host row. Unlike the
+    /// service form, this has no lookup or scope: it writes one env key to a
+    /// list of hosts with `sbx secret set-custom`.
+    pub fn set_custom_secret(&mut self) {
+        if self.mode() != Mode::Normal {
+            return;
+        }
+        self.custom_secret_form = Some(CustomSecretForm::new());
+        let _ = self.modals.open(SET_CUSTOM_SECRET_DIALOG, &mut self.focus);
+    }
+
+    pub fn cancel_custom_secret(&mut self) {
+        self.close_modal(SET_CUSTOM_SECRET_DIALOG);
+        self.custom_secret_form = None;
+        self.notify_info("Set custom secret cancelled.", None);
+    }
+
+    pub fn set_custom_env_key(&mut self, state: ratcn::InputState) {
+        if let Some(form) = self.custom_secret_form.as_mut() {
+            form.set_env_key(state);
+        }
+    }
+
+    pub fn set_custom_secret_value(&mut self, state: ratcn::InputState) {
+        if let Some(form) = self.custom_secret_form.as_mut() {
+            form.set_secret(state);
+        }
+    }
+
+    pub fn set_custom_host(&mut self, index: usize, state: ratcn::InputState) {
+        if let Some(form) = self.custom_secret_form.as_mut() {
+            form.set_host(index, state);
+        }
+    }
+
+    pub fn add_custom_host(&mut self) {
+        if let Some(form) = self.custom_secret_form.as_mut() {
+            form.add_host();
+        }
+    }
+
+    /// Validate and submit the custom form. The value travels as a plain CLI
+    /// argument, so no shell quoting is needed around the secret.
+    pub fn submit_custom_secret(&mut self) {
+        if self.mode() != Mode::SetCustomSecret {
+            return;
+        }
+        let Some(form) = self.custom_secret_form.as_mut() else {
+            return;
+        };
+        form.mark_attempted();
+        let env_key = form.env_key().value().trim().to_owned();
+        let secret = form.secret().value().trim().to_owned();
+        let hosts: Vec<String> = form
+            .hosts()
+            .iter()
+            .map(|host| host.value().trim().to_owned())
+            .collect();
+
+        if env_key.is_empty() {
+            self.notify_error("Invalid custom secret", "Enter an env key.");
+            return;
+        }
+        if secret.is_empty() {
+            self.notify_error("Invalid custom secret", "Enter a secret value.");
+            return;
+        }
+        if hosts.iter().any(String::is_empty) {
+            self.notify_error("Invalid custom secret", "Enter a value for every host.");
+            return;
+        }
+
+        let pending = Self::set_custom_secret_command(&env_key, &hosts, &secret);
+        let success = format!("Set custom secret '{env_key}'.");
+
+        #[cfg(test)]
+        {
+            self.set_for_test = Some(pending.preview());
+            self.close_modal(SET_CUSTOM_SECRET_DIALOG);
+            self.custom_secret_form = None;
+            self.notify_success(success, None);
+        }
+
+        #[cfg(not(test))]
+        {
+            self.notify_info("Setting custom secret...", None);
+            self.jobs
+                .spawn(move || super::workers::JobResult::CustomSecretSet {
+                    success,
+                    result: pending.run(),
+                });
+        }
+    }
+
     /// The dialog's **Set secret** button. Look for an existing secret first:
     /// overwriting one goes through the shared confirmation dialog, stacked
     /// above the form so a cancel returns with the typed value intact.
@@ -363,6 +458,25 @@ impl App {
         }
         command.push_str(" -f");
         PendingCommand::shell(command)
+    }
+
+    /// `sbx secret set-custom --host <host>... --env <key> --value <secret>`.
+    /// Arguments are passed directly, so values with spaces or shell metachars
+    /// stay a single argument instead of being reinterpreted by a shell.
+    fn set_custom_secret_command(env_key: &str, hosts: &[String], secret: &str) -> PendingCommand {
+        let mut args = vec!["secret".to_owned(), "set-custom".to_owned()];
+        for host in hosts {
+            args.push("--host".to_owned());
+            args.push(host.clone());
+        }
+        args.extend([
+            "--env".to_owned(),
+            env_key.to_owned(),
+            "--value".to_owned(),
+            secret.to_owned(),
+        ]);
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        PendingCommand::new("sbx", &borrowed)
     }
 }
 

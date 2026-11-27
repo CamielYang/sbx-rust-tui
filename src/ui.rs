@@ -13,7 +13,7 @@ use ratcn::{InputState, Theme};
 
 use crate::app::{
     App, CONFIRM_DIALOG, CREATE_DIALOG, DashboardTab, FormField, INFO_DIALOG, PORTS_DIALOG,
-    PortField, SET_SECRET_DIALOG, Sandbox, TAB_ROW, WORKSPACE_DIALOG,
+    PortField, SET_CUSTOM_SECRET_DIALOG, SET_SECRET_DIALOG, Sandbox, TAB_ROW, WORKSPACE_DIALOG,
 };
 
 mod dashboard;
@@ -25,7 +25,8 @@ use self::dashboard::{
     paint_secrets_toolbar, paint_tabs, paint_toolbar,
 };
 use self::dialogs::{
-    confirm_dialog, create_dialog, info_dialog, ports_dialog, set_secret_dialog, workspace_dialog,
+    confirm_dialog, create_dialog, info_dialog, ports_dialog, set_custom_secret_dialog,
+    set_secret_dialog, workspace_dialog,
 };
 
 // The UI tests reach these helpers through `use super::*`.
@@ -53,6 +54,13 @@ pub enum Msg {
     Refresh,
     SetSecret,
     CancelSetSecret,
+    SetCustomSecret,
+    CancelSetCustomSecret,
+    CustomSecretEnvChanged(InputState),
+    CustomSecretValueChanged(InputState),
+    CustomSecretHostChanged(usize, InputState),
+    AddCustomHost,
+    SubmitCustomSecret,
     SecretServiceOpenChanged(bool),
     SecretServiceFocused(usize),
     SecretServiceSelected(usize),
@@ -122,6 +130,13 @@ pub fn apply(app: &mut App, msg: Msg) {
         Msg::Refresh => app.request_sandbox_refresh(),
         Msg::SetSecret => app.set_secret(),
         Msg::CancelSetSecret => app.cancel_set_secret(),
+        Msg::SetCustomSecret => app.set_custom_secret(),
+        Msg::CancelSetCustomSecret => app.cancel_custom_secret(),
+        Msg::CustomSecretEnvChanged(state) => app.set_custom_env_key(state),
+        Msg::CustomSecretValueChanged(state) => app.set_custom_secret_value(state),
+        Msg::CustomSecretHostChanged(index, state) => app.set_custom_host(index, state),
+        Msg::AddCustomHost => app.add_custom_host(),
+        Msg::SubmitCustomSecret => app.submit_custom_secret(),
         Msg::SecretServiceOpenChanged(open) => app.set_secret_service_open(open),
         Msg::SecretServiceFocused(index) => app.set_secret_service_focus(index),
         Msg::SecretServiceSelected(index) => app.set_secret_service(index),
@@ -259,6 +274,13 @@ pub fn declare(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme) {
     }
     if app.modals_ref().is_open(SET_SECRET_DIALOG) {
         ctx.modal(SET_SECRET_DIALOG, set_secret_dialog(app, &theme), area);
+    }
+    if app.modals_ref().is_open(SET_CUSTOM_SECRET_DIALOG) {
+        ctx.modal(
+            SET_CUSTOM_SECRET_DIALOG,
+            set_custom_secret_dialog(app, &theme),
+            area,
+        );
     }
     // Declared last so an overwrite confirmation stacks above the set secret
     // dialog that asked for it.

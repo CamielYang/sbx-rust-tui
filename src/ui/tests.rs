@@ -1,8 +1,8 @@
 use super::*;
 use crate::app::test_support::TempWorkspaceDir;
 use crate::app::{
-    CONFIRM_DIALOG, HostMount, INFO_DIALOG, MountMode, PORTS_DIALOG, PortMapping, SandboxDetails,
-    SERVICES, SET_SECRET_DIALOG,
+    CONFIRM_DIALOG, HostMount, INFO_DIALOG, Mode, MountMode, PORTS_DIALOG, PortMapping, SERVICES,
+    SET_CUSTOM_SECRET_DIALOG, SET_SECRET_DIALOG, SandboxDetails,
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 use ratcn::runtime::Ratcn;
@@ -89,6 +89,7 @@ fn secrets_tab_shows_toolbar_and_secret_table() {
     assert_eq!(draw(&app).cell((0, 4)).unwrap().fg, Color::White);
     assert!(screen.contains(" Secrets "));
     assert!(screen.contains("+ Set secret"));
+    assert!(screen.contains("+ Set custom secret"));
     assert!(screen.contains("Refresh"));
     assert!(screen.contains("SCOPE"));
     assert!(screen.contains("NAME"));
@@ -199,6 +200,55 @@ fn set_secret_dialog_shows_service_scope_and_secret_fields() {
     assert!(screen.contains("anthropic"));
     assert!(screen.contains("(global)"));
     assert!(screen.contains("Cancel"));
+}
+
+#[test]
+fn set_custom_secret_dialog_shows_env_secret_and_hosts() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.select_tab(DashboardTab::Secrets);
+    app.set_custom_secret();
+
+    assert!(app.modals_ref().is_open(SET_CUSTOM_SECRET_DIALOG));
+    assert_eq!(app.mode(), Mode::SetCustomSecret);
+    let screen = render(&app);
+    assert!(screen.contains("Set custom secret"));
+    assert!(screen.contains("Env key"));
+    assert!(screen.contains("Secret value"));
+    assert!(screen.contains("Hosts"));
+    assert!(screen.contains("Host 1"));
+    assert!(screen.contains("api.example.com"));
+    assert!(screen.contains("+ Add host"));
+    assert!(screen.contains("Cancel"));
+    // There is no service dropdown or scope picker in this dialog.
+    assert!(!screen.contains("Choose a service"));
+    assert!(!screen.contains("(global)"));
+}
+
+#[test]
+fn set_custom_secret_dialog_grows_one_host_at_a_time() {
+    let mut app = App::new();
+    app.set_custom_secret();
+    assert_eq!(app.custom_secret_form().unwrap().hosts().len(), 1);
+
+    app.add_custom_host();
+    app.add_custom_host();
+    assert_eq!(app.custom_secret_form().unwrap().hosts().len(), 3);
+
+    let screen = render(&app);
+    assert!(screen.contains("Host 1"));
+    assert!(screen.contains("Host 2"));
+    assert!(screen.contains("Host 3"));
+}
+
+#[test]
+fn set_custom_secret_dialog_masks_the_typed_value() {
+    let mut app = App::new();
+    app.set_custom_secret();
+    app.set_custom_secret_value(InputState::new("sk-super-secret"));
+
+    let screen = render(&app);
+    assert!(!screen.contains("sk-super-secret"));
+    assert!(screen.contains(&"*".repeat("sk-super-secret".len())));
 }
 
 #[test]
