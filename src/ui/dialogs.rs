@@ -1062,11 +1062,10 @@ pub(super) fn set_custom_secret_dialog(app: &App, theme: &Theme) -> Dialog<App, 
                     false,
                     invalid,
                 );
-                // The first host is required, so its Remove button is shown
-                // but disabled. Later rows can be dropped from the form.
+                // The first host is required, so only later rows get a Remove
+                // button. The reserved column keeps every input aligned.
                 let remove = Button::new("Remove")
                     .secondary()
-                    .disabled(index == 0)
                     .on_press(move || Msg::RemoveCustomHost(index));
                 let columns = Layout::horizontal([
                     Constraint::Length(20),
@@ -1086,11 +1085,13 @@ pub(super) fn set_custom_secret_dialog(app: &App, theme: &Theme) -> Dialog<App, 
                     host_input,
                     columns[1],
                 );
-                ctx.component(
-                    format!("custom-secret-remove-host-{index}"),
-                    remove,
-                    columns[2],
-                );
+                if index > 0 {
+                    ctx.component(
+                        format!("custom-secret-remove-host-{index}"),
+                        remove,
+                        columns[2],
+                    );
+                }
             }
 
             let add_columns = Layout::horizontal([Constraint::Length(20), Constraint::Min(10)])

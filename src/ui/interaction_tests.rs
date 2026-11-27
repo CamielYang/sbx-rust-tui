@@ -320,19 +320,15 @@ fn position_from_bottom(screen: &str, needle: &str) -> Option<(u16, u16)> {
     })
 }
 
-/// Find the Remove button on a specific custom-secret host row.
-fn host_remove_position(screen: &str, host: &str) -> (u16, u16) {
-    screen
-        .lines()
-        .enumerate()
-        .find_map(|(y, line)| {
-            if !line.contains(host) {
-                return None;
-            }
-            line.rfind("Remove")
-                .map(|byte| (line[..byte].chars().count() as u16, y as u16))
-        })
-        .expect("host Remove button")
+/// Find the Remove button on a specific custom-secret host row, if it has one.
+fn host_remove_position(screen: &str, host: &str) -> Option<(u16, u16)> {
+    screen.lines().enumerate().find_map(|(y, line)| {
+        if !line.contains(host) {
+            return None;
+        }
+        line.rfind("Remove")
+            .map(|byte| (line[..byte].chars().count() as u16, y as u16))
+    })
 }
 
 #[test]
@@ -918,17 +914,11 @@ fn custom_secret_host_rows_can_be_removed_by_clicking_their_buttons() {
     let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
     draw(&mut terminal, &app, &mut ratcn);
 
-    // Host 1 is mandatory, so its Remove button is disabled.
-    let (x, y) = host_remove_position(&screen(&terminal), "Host 1");
-    let emitted = click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
-    assert!(
-        !emitted
-            .iter()
-            .any(|message| matches!(message, Msg::RemoveCustomHost(_)))
-    );
-    assert_eq!(app.custom_secret_form().unwrap().hosts().len(), 2);
+    // Host 1 is mandatory, so it has no Remove button at all.
+    assert!(host_remove_position(&screen(&terminal), "Host 1").is_none());
 
-    let (x, y) = host_remove_position(&screen(&terminal), "Host 2");
+    let (x, y) =
+        host_remove_position(&screen(&terminal), "Host 2").expect("second host Remove button");
     let emitted = click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
     assert!(
         emitted

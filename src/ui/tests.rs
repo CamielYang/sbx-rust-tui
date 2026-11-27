@@ -336,21 +336,23 @@ fn set_custom_secret_dialog_grows_one_host_at_a_time() {
 }
 
 #[test]
-fn set_custom_secret_dialog_shows_a_remove_button_for_every_host() {
+fn set_custom_secret_dialog_hides_remove_for_the_first_host() {
     let mut app = App::new();
     app.set_custom_secret();
-    app.add_custom_host();
-    app.add_custom_host();
+    assert!(!render(&app).contains("Remove"));
 
+    app.add_custom_host();
+    app.add_custom_host();
     let screen = render(&app);
-    assert_eq!(screen.matches("Remove").count(), 3);
+    // Only the two added rows can be removed.
+    assert_eq!(screen.matches("Remove").count(), 2);
     assert!(screen.contains("Host 1"));
     assert!(screen.contains("Host 2"));
     assert!(screen.contains("Host 3"));
 
     app.remove_custom_host(2);
     let screen = render(&app);
-    assert_eq!(screen.matches("Remove").count(), 2);
+    assert_eq!(screen.matches("Remove").count(), 1);
     assert!(!screen.contains("Host 3"));
 }
 
