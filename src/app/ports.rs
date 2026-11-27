@@ -20,6 +20,10 @@ pub struct PortsView {
     pub name: String,
     pub ports: Vec<PortMapping>,
     pub error: Option<String>,
+    /// True while a listing job is in flight, so the dialog can say so.
+    pub loading: bool,
+    /// Identifies the current listing; late results with an older token are dropped.
+    pub token: u64,
 }
 
 /// Which end of a `host:sandbox` mapping is being edited.

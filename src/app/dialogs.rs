@@ -1,6 +1,6 @@
-//! Modal dialog lifecycle: the create wizard and the sandbox Info dialog.
+//! Modal dialog lifecycle: the create wizard and the sandbox/secret Info dialog.
 
-use super::{App, CREATE_DIALOG, Form, INFO_DIALOG, SandboxDetails};
+use super::{App, CREATE_DIALOG, Form, INFO_DIALOG, SandboxDetails, SecretId};
 
 impl App {
     /// Close a modal only when it is the topmost layer. Each dialog also clears
@@ -47,6 +47,7 @@ impl App {
         self.select_named(name);
         // Show the known values immediately; the guest-side metrics arrive on
         // a worker so the one-second CPU sample never freezes the TUI.
+        self.secret_info = None;
         self.info = Some(SandboxDetails {
             name: sandbox.name.clone(),
             status: sandbox.status.clone(),
@@ -57,11 +58,33 @@ impl App {
         let _ = self.modals.open(INFO_DIALOG, &mut self.focus);
     }
 
+    /// A clicked secret row opens the same Info dialog with its own details.
+    /// The lookup uses the current table so a stale row cannot show old data.
+    /// Custom rows are keyed by `(scope, env_key)`; their `(custom)` display
+    /// name is shared by every custom row and cannot identify one.
+    pub fn open_secret_info(&mut self, id: &SecretId, scope: &str) {
+        let Some(secret) = self
+            .secrets
+            .iter()
+            .find(|secret| secret.scope == scope && secret.matches_id(id))
+            .cloned()
+        else {
+            return;
+        };
+        // Secret details are static: no sandbox metrics worker should touch
+        // this dialog or replace its content.
+        self.info = None;
+        self.info_refresh = None;
+        self.secret_info = Some(secret);
+        let _ = self.modals.open(INFO_DIALOG, &mut self.focus);
+    }
+
     pub fn close_info(&mut self) {
         self.close_modal(INFO_DIALOG);
         // Invalidate any worker still running: its result must not land in a
         // dialog opened later for a different sandbox.
         self.info = None;
+        self.secret_info = None;
         self.info_refresh = None;
     }
 

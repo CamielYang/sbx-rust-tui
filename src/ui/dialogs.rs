@@ -1,21 +1,23 @@
-//! Modal dialog builders: create wizard, confirmation, details, and ports.
+//! Modal dialog builders: create wizard, confirmation, details, ports, and the
+//! Set secret form.
 
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratcn::color::{away_from, dim};
 use ratcn::{
     Button, ButtonStyle, ButtonVariant, Checkbox, Cycle, Dialog, InputState, List, ListItem,
-    Select, Theme,
+    ListItemState, Select, Theme,
 };
 
 use super::dashboard::{REMOVE_RED, START_GREEN, STOP_ORANGE, action_style};
 use super::widgets::{detail_line, field_row, input, join_usage};
 use super::*;
 use crate::app::{
-    AGENTS, FormField, HostMount, MountMode, PendingAction, PortField, PortMapping, SandboxDetails,
-    WORKSPACE_PARENT, WorkspaceMode, WorkspacePicker,
+    AGENTS, FormField, HostMount, MountMode, NetworkPolicy, PendingAction, PortField, PortMapping,
+    SERVICES, SandboxDetails, Secret, SecretForm, WORKSPACE_PARENT, WorkspaceMode, WorkspacePicker,
+    is_global_scope,
 };
 
 /// The confirmation dialog's focused Cancel sets the look for every dismiss
@@ -36,6 +38,93 @@ pub(super) fn cancel_style(theme: &Theme) -> ButtonStyle {
 /// cannot drift between dialogs.
 fn cancel_button<M>(label: impl Into<String>, on_press: impl Fn() -> M + 'static) -> Button<M> {
     Button::new(label).style(cancel_style).on_press(on_press)
+}
+
+// --- first-run network policy dialog ---------------------------------------
+
+/// Shown only when `sbx policy ls --json` did not return JSON. Choosing a row
+/// runs `sbx policy init` immediately; the list disables itself while the CLI
+/// job is in flight and reopens for a retry if the command fails.
+pub(super) fn policy_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
+    let theme = *theme;
+    let options: Vec<ListItem<usize>> = NetworkPolicy::ALL
+        .iter()
+        .enumerate()
+        .map(|(index, policy)| ListItem::new(index, policy.label()))
+        .collect();
+    let policies = List::new(options)
+        .item_focus(
+            |state: &App| Some(state.policy_focus()),
+            |index, _scroll| Msg::PolicyFocused(index),
+        )
+        .selection(|state: &App| state.policy_selection(), Msg::PolicySelected)
+        .row_height(2)
+        .paint_item(move |_: &App, row: ListItemState<'_, usize>| {
+            let policy = NetworkPolicy::from_index(*row.value).expect("policy option");
+            let name_style = if row.focused {
+                Style::default()
+                    .fg(theme.foreground)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.foreground)
+            };
+            let marker = if row.selected { "●" } else { "○" };
+            Text::from(vec![
+                Line::from(vec![
+                    Span::styled(format!(" {marker} "), name_style),
+                    Span::styled(policy.label(), name_style),
+                ]),
+                Line::from(Span::styled(
+                    format!("     {}", policy.description()),
+                    Style::default().fg(theme.muted_foreground),
+                )),
+            ])
+        })
+        .disabled(app.policy_pending());
+
+    let (status, status_color) = if app.policy_pending() {
+        (" Initializing network policy…", theme.primary)
+    } else {
+        (
+            " ↑↓ / click to choose · Enter applies",
+            theme.muted_foreground,
+        )
+    };
+
+    // No on_dismiss: `sbx` is unusable until a policy is chosen, so Esc is
+    // absorbed by the modal rather than closing it.
+    Dialog::new()
+        .title("Network policy")
+        .outer_width(72)
+        .content(10, move |ctx| {
+            let rows = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(6),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(ctx.area());
+            ctx.paint_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    " Choose the network policy for sandboxes",
+                    Style::default().fg(theme.muted_foreground),
+                ))),
+                rows[0],
+            );
+            // Blank rows[1] and rows[3] separate the prompt, the options, and
+            // the hint from each other.
+            if rows[2].height > 0 && rows[2].width > 0 {
+                ctx.component("policy-options", policies, rows[2]);
+            }
+            ctx.paint_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    status,
+                    Style::default().fg(status_color),
+                ))),
+                rows[4],
+            );
+        })
 }
 
 // --- create dialog ----------------------------------------------------------
@@ -73,14 +162,14 @@ pub(super) fn create_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
     let cpus = text_input(
         FormField::Cpus,
         |state: &App| state.form().cpus(),
-        "2",
+        "2 (optional)",
         creating,
         form.invalid(FormField::Cpus),
     );
     let memory = text_input(
         FormField::Memory,
         |state: &App| state.form().memory(),
-        "4g",
+        "4g (optional)",
         creating,
         form.invalid(FormField::Memory),
     );
@@ -248,8 +337,19 @@ fn text_input(
 
 // --- confirmation dialog ----------------------------------------------------
 
-/// The last gate before Start/Stop/Remove reaches `sbx`. The action's hue is
-/// kept on the confirm button so the dialog reads like the action it replaces.
+/// Both service secrets and custom rows use the same wording; custom rows pass
+/// their env key instead of the `(custom)` table label.
+fn delete_secret_description(name: &str, scope: &str) -> String {
+    if is_global_scope(scope) {
+        format!("Delete global secret '{name}'?")
+    } else {
+        format!("Delete secret '{name}' from sandbox '{scope}'?")
+    }
+}
+
+/// The last gate before Start/Stop/Remove, a secret deletion, or a secret
+/// overwrite reaches `sbx`. The action's hue is kept on the confirm button so
+/// the dialog reads like the action it replaces.
 pub(super) fn confirm_dialog(app: &App) -> Dialog<App, Msg> {
     let Some(action) = app.pending_action() else {
         return Dialog::new()
@@ -278,6 +378,42 @@ pub(super) fn confirm_dialog(app: &App) -> Dialog<App, Msg> {
             "Remove sandbox",
             REMOVE_RED,
         ),
+        PendingAction::DeleteSecret(name, scope) => (
+            "Confirm delete",
+            delete_secret_description(name, scope),
+            "Delete secret",
+            REMOVE_RED,
+        ),
+        PendingAction::DeleteCustomSecret(env_key, scope, _) => (
+            "Confirm delete",
+            delete_secret_description(env_key, scope),
+            "Delete secret",
+            REMOVE_RED,
+        ),
+        PendingAction::OverwriteSecret(service, scope) => (
+            "Confirm overwrite",
+            if is_global_scope(scope) {
+                format!("A secret for '{service}' already exists globally. Overwrite it?")
+            } else {
+                format!(
+                    "A secret for '{service}' already exists in sandbox '{scope}'. Overwrite it?"
+                )
+            },
+            "Overwrite secret",
+            STOP_ORANGE,
+        ),
+        PendingAction::OverwriteCustomSecret(env_key, scope, _) => (
+            "Confirm overwrite",
+            if is_global_scope(scope) {
+                format!("A custom secret for '{env_key}' already exists globally. Overwrite it?")
+            } else {
+                format!(
+                    "A custom secret for '{env_key}' already exists in sandbox '{scope}'. Overwrite it?"
+                )
+            },
+            "Overwrite secret",
+            STOP_ORANGE,
+        ),
     };
 
     Dialog::new()
@@ -297,6 +433,9 @@ pub(super) fn confirm_dialog(app: &App) -> Dialog<App, Msg> {
 // --- info dialog ------------------------------------------------------------
 
 pub(super) fn info_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
+    if let Some(secret) = app.secret_info() {
+        return secret_info_dialog(secret);
+    }
     let Some(details) = app.info() else {
         return Dialog::new()
             .title("Sandbox details")
@@ -311,6 +450,35 @@ pub(super) fn info_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
     Dialog::new()
         .title(title)
         .description(text)
+        .outer_width(100)
+        .on_dismiss(|| Msg::CloseInfo)
+        .action("close", cancel_button("Close", || Msg::CloseInfo))
+}
+
+/// The same Info dialog, filled from a clicked Secrets row. Domain names are
+/// listed one per line so a service with six of them stays readable.
+fn secret_info_dialog(secret: &Secret) -> Dialog<App, Msg> {
+    let mut lines = vec![
+        detail_line("SCOPE", Some(&secret.scope)),
+        detail_line("NAME", Some(&secret.name)),
+        detail_line("ENV VAR", Some(&secret.env_vars_label())),
+        String::new(),
+        "API DOMAINS".to_owned(),
+    ];
+    if secret.api_domains.is_empty() {
+        lines.push("  —".to_owned());
+    } else {
+        lines.extend(
+            secret
+                .api_domains
+                .iter()
+                .map(|domain| format!("  - {domain}")),
+        );
+    }
+
+    Dialog::new()
+        .title(format!("Secret · {}", secret.name))
+        .description(lines.join("\n"))
         .outer_width(100)
         .on_dismiss(|| Msg::CloseInfo)
         .action("close", cancel_button("Close", || Msg::CloseInfo))
@@ -362,7 +530,7 @@ fn mount_line(mount: &HostMount) -> String {
         MountMode::Clone => "clone",
         MountMode::Direct => "direct",
     };
-    format!("  {mode:<6} {}", mount.host_path)
+    format!("  - {mode:<6} {}", mount.host_path)
 }
 
 /// Show core count alone until the guest reports a usage sample, then add the
@@ -393,6 +561,7 @@ pub(super) fn ports_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
     let name = view.name.clone();
     let ports = view.ports.clone();
     let error = view.error.clone();
+    let loading = view.loading;
     let host = input(
         |state| Msg::PortsChanged(PortField::Host, state),
         |state: &App| state.port_form().host(),
@@ -500,6 +669,10 @@ pub(super) fn ports_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
                 Some(error) => Some(Span::styled(
                     format!(" {error}"),
                     Style::default().fg(theme.destructive),
+                )),
+                None if loading => Some(Span::styled(
+                    " Loading published ports...",
+                    Style::default().fg(theme.muted_foreground),
                 )),
                 None if ports.len() > visible => Some(Span::styled(
                     format!("  Showing {visible} of {} published ports", ports.len()),
@@ -634,5 +807,297 @@ pub(super) fn workspace_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
         .action(
             "create-here",
             Button::new("Create here").on_press(|| Msg::CreateWorkspaceHere),
+        )
+}
+
+// --- set secret dialog ------------------------------------------------------
+
+/// Service and scope are index-backed `Select`s; the secret itself is an
+/// `Input`. Scope options are a snapshot taken when the dialog opened: the
+/// global store is always the first row, followed by every sandbox name.
+pub(super) fn set_secret_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
+    let theme = *theme;
+    let Some(form) = app.secret_form() else {
+        return Dialog::new()
+            .title("Set secret")
+            .description("The secret form is no longer available.")
+            .on_dismiss(|| Msg::CancelSetSecret)
+            .action("close", cancel_button("Close", || Msg::CancelSetSecret));
+    };
+
+    let service = Select::new(
+        SERVICES
+            .iter()
+            .enumerate()
+            .map(|(index, name)| ListItem::new(index, (*name).to_owned())),
+    )
+    .placeholder("Choose a service")
+    .open(
+        |state: &App| state.secret_form().is_some_and(SecretForm::service_open),
+        Msg::SecretServiceOpenChanged,
+    )
+    .item_focus(
+        |state: &App| state.secret_form().map(|form| form.service_focus()),
+        Msg::SecretServiceFocused,
+    )
+    .selection(
+        |state: &App| state.secret_form().map(SecretForm::service_index),
+        Msg::SecretServiceSelected,
+    )
+    .max_visible_items(SERVICES.len() as u16);
+
+    let scopes = Select::new(
+        form.scopes()
+            .iter()
+            .enumerate()
+            .map(|(index, scope)| ListItem::new(index, scope.clone())),
+    )
+    .open(
+        |state: &App| state.secret_form().is_some_and(SecretForm::scope_open),
+        Msg::SecretScopeOpenChanged,
+    )
+    .item_focus(
+        |state: &App| state.secret_form().map(|form| form.scope_focus()),
+        Msg::SecretScopeFocused,
+    )
+    .selection(
+        |state: &App| state.secret_form().map(SecretForm::scope_index),
+        Msg::SecretScopeSelected,
+    )
+    .max_visible_items(8);
+
+    let secret_input = input(
+        Msg::SecretValueChanged,
+        |state: &App| state.secret_form().expect("secret form").secret(),
+        "Secret value",
+        false,
+        form.attempted() && form.secret().value().trim().is_empty(),
+    )
+    // ratcn keeps the typed value in state; only the painted glyphs change.
+    .mask_char('*');
+
+    let (status, status_color) = if form.attempted() && form.secret().value().trim().is_empty() {
+        (" Enter a secret value before setting it.", theme.destructive)
+    } else {
+        (
+            " Tab or click between fields · Esc cancels",
+            theme.muted_foreground,
+        )
+    };
+
+    Dialog::new()
+        .title("Set secret")
+        .outer_width(70)
+        .on_dismiss(|| Msg::CancelSetSecret)
+        .content(7, move |ctx| {
+            let rows = Layout::vertical([Constraint::Length(1); 7]).split(ctx.area());
+            let row = |index: usize| rows[index * 2];
+            field_row(ctx, row(0), "Service", service, theme);
+            field_row(ctx, row(1), "Scope", scopes, theme);
+            field_row(ctx, row(2), "Secret", secret_input, theme);
+            ctx.paint_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    status,
+                    Style::default().fg(status_color),
+                ))),
+                row(3),
+            );
+        })
+        .action("cancel", cancel_button("Cancel", || Msg::CancelSetSecret))
+        .action(
+            "set-secret",
+            Button::new("Set secret").on_press(|| Msg::SubmitSecret),
+        )
+}
+
+// --- set custom secret dialog ----------------------------------------------
+
+/// The custom form keeps the feel of Set secret without a service to choose:
+/// the same scope picker, an env key, a masked value, and a growable list of
+/// hosts become one `sbx secret set-custom` command with a `--host` per row.
+pub(super) fn set_custom_secret_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
+    let theme = *theme;
+    let Some(form) = app.custom_secret_form() else {
+        return Dialog::new()
+            .title("Set custom secret")
+            .description("The custom secret form is no longer available.")
+            .on_dismiss(|| Msg::CancelSetCustomSecret)
+            .action(
+                "close",
+                cancel_button("Close", || Msg::CancelSetCustomSecret),
+            );
+    };
+
+    let invalid_env = form.attempted() && form.env_key().value().trim().is_empty();
+    let invalid_secret = form.attempted() && form.secret().value().trim().is_empty();
+    let invalid_hosts: Vec<bool> = form
+        .hosts()
+        .iter()
+        .map(|host| form.attempted() && host.value().trim().is_empty())
+        .collect();
+    let host_count = form.hosts().len();
+
+    let env_input = input(
+        Msg::CustomSecretEnvChanged,
+        |state: &App| {
+            state
+                .custom_secret_form()
+                .expect("custom secret form")
+                .env_key()
+        },
+        "API_KEY",
+        false,
+        invalid_env,
+    );
+    let scopes = Select::new(
+        form.scopes()
+            .iter()
+            .enumerate()
+            .map(|(index, scope)| ListItem::new(index, scope.clone())),
+    )
+    .placeholder("Choose a scope")
+    .open(
+        |state: &App| {
+            state
+                .custom_secret_form()
+                .is_some_and(|form| form.scope_open())
+        },
+        Msg::CustomSecretScopeOpenChanged,
+    )
+    .item_focus(
+        |state: &App| state.custom_secret_form().map(|form| form.scope_focus()),
+        Msg::CustomSecretScopeFocused,
+    )
+    .selection(
+        |state: &App| state.custom_secret_form().map(|form| form.scope_index()),
+        Msg::CustomSecretScopeSelected,
+    )
+    .max_visible_items(8);
+
+    let secret_input = input(
+        Msg::CustomSecretValueChanged,
+        |state: &App| {
+            state
+                .custom_secret_form()
+                .expect("custom secret form")
+                .secret()
+        },
+        "Secret value",
+        false,
+        invalid_secret,
+    )
+    .mask_char('*');
+
+    let (status, status_color) = if invalid_env {
+        (" Enter an env key before setting it.", theme.destructive)
+    } else if invalid_secret {
+        (
+            " Enter a secret value before setting it.",
+            theme.destructive,
+        )
+    } else if invalid_hosts.iter().any(|&invalid| invalid) {
+        let message = if invalid_hosts.iter().all(|&invalid| invalid) {
+            " Enter at least one host before setting it."
+        } else {
+            " Enter a value for every host before setting it."
+        };
+        (message, theme.destructive)
+    } else {
+        (
+            " Tab or click between fields · Esc cancels",
+            theme.muted_foreground,
+        )
+    };
+
+    // Two logical rows per control, with a blank row between them. Hosts add
+    // their own rows so each input stays in the same column as the other fields.
+    let total_rows = 6 + host_count;
+    Dialog::new()
+        .title("Set custom secret")
+        .outer_width(70)
+        .on_dismiss(|| Msg::CancelSetCustomSecret)
+        .content((total_rows * 2 - 1) as u16, move |ctx| {
+            let rows =
+                Layout::vertical(vec![Constraint::Length(1); total_rows * 2 - 1]).split(ctx.area());
+            let row = |index: usize| rows[index * 2];
+            field_row(ctx, row(0), "Env key", env_input, theme);
+            field_row(ctx, row(1), "Scope", scopes, theme);
+            field_row(ctx, row(2), "Secret", secret_input, theme);
+            let host_header =
+                Layout::horizontal([Constraint::Length(20), Constraint::Min(10)]).split(row(3));
+            ctx.paint_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    " Hosts",
+                    Style::default()
+                        .fg(theme.muted_foreground)
+                        .add_modifier(Modifier::BOLD),
+                ))),
+                host_header[0],
+            );
+            ctx.paint_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        "api.example.com",
+                        Style::default().fg(theme.muted_foreground),
+                    ),
+                    Span::styled(
+                        "  *.example.com",
+                        Style::default().fg(theme.muted_foreground),
+                    ),
+                ])),
+                host_header[1],
+            );
+
+            for (index, &invalid) in invalid_hosts.iter().enumerate() {
+                let host_input = input(
+                    move |state| Msg::CustomSecretHostChanged(index, state),
+                    move |state: &App| {
+                        &state
+                            .custom_secret_form()
+                            .expect("custom secret form")
+                            .hosts()[index]
+                    },
+                    "api.example.com",
+                    false,
+                    invalid,
+                );
+                let columns = Layout::horizontal([Constraint::Length(20), Constraint::Min(10)])
+                    .split(row(4 + index));
+                ctx.paint_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        format!(" Host {}", index + 1),
+                        Style::default().fg(theme.muted_foreground),
+                    ))),
+                    columns[0],
+                );
+                ctx.component(
+                    format!("custom-secret-host-{index}"),
+                    host_input,
+                    columns[1],
+                );
+            }
+
+            let add_columns = Layout::horizontal([Constraint::Length(20), Constraint::Min(10)])
+                .split(row(4 + host_count));
+            ctx.component(
+                "custom-secret-add-host",
+                Button::new("+ Add host").on_press(|| Msg::AddCustomHost),
+                add_columns[1],
+            );
+            ctx.paint_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    status,
+                    Style::default().fg(status_color),
+                ))),
+                row(5 + host_count),
+            );
+        })
+        .action(
+            "cancel",
+            cancel_button("Cancel", || Msg::CancelSetCustomSecret),
+        )
+        .action(
+            "set-custom-secret",
+            Button::new("Set custom secret").on_press(|| Msg::SubmitCustomSecret),
         )
 }

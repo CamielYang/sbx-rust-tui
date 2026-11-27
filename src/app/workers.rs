@@ -1,15 +1,126 @@
-//! Background work: sandbox creation and the Info dialog's guest-side metrics.
-//! Both run on worker threads so the event loop keeps rendering.
+//! Background work: sandbox creation, guest-side metrics, and every `sbx`
+//! command triggered by a button. All of them run off the event-loop thread so
+//! a slow CLI call never delays the next keypress or click.
 
 use std::io;
-use std::sync::mpsc::{self, Receiver};
+use std::process::Output;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 use ratcn::Toast;
 
-use super::{App, Sandbox, SandboxDetails, inspect_sandbox, sandbox::push_error};
+use super::commands::stderr_detail;
+use super::{
+    App, PortMapping, Sandbox, SandboxDetails, Secret, inspect_sandbox, sandbox::push_error,
+};
 
 pub(super) const CREATE_TOAST: &str = "create-sandbox";
+
+/// One completed CLI job. Carrying the typed result (and any metadata needed
+/// to place it) across the channel keeps all state changes on the event-loop
+/// thread, where ratcn's state and the modal stack can be updated safely.
+#[cfg_attr(test, allow(dead_code))] // production builds construct every variant
+pub(super) enum JobResult {
+    PolicyInit {
+        result: io::Result<Output>,
+    },
+    Sandboxes {
+        result: Result<Vec<Sandbox>, String>,
+        /// True for a button/shortcut refresh, false for the five-second tick.
+        announce: bool,
+        /// The first load also needs a secret inventory for the new list.
+        then_secrets: bool,
+    },
+    Secrets {
+        result: Result<Vec<Secret>, String>,
+        announce: bool,
+    },
+    Ports {
+        name: String,
+        /// Guards against a stale load landing in a reopened dialog.
+        token: u64,
+        result: Result<Vec<PortMapping>, String>,
+    },
+    PortCommand {
+        name: String,
+        success: String,
+        error_title: &'static str,
+        fallback: &'static str,
+        result: io::Result<Output>,
+    },
+    SbxCommand {
+        success: String,
+        result: io::Result<Output>,
+    },
+    SecretExists {
+        service: String,
+        scope: String,
+        result: Result<bool, String>,
+    },
+    CustomSecretExists {
+        env_key: String,
+        scope: String,
+        /// `Some(placeholder)` when the env key already has a custom secret.
+        result: Result<Option<String>, String>,
+    },
+    /// Removal of the old custom secret, after which the new value is set.
+    CustomSecretRemoved {
+        env_key: String,
+        scope: String,
+        result: io::Result<Output>,
+    },
+    SecretSet {
+        service: String,
+        scope: String,
+        success: String,
+        result: io::Result<Output>,
+    },
+    CustomSecretSet {
+        success: String,
+        result: io::Result<Output>,
+    },
+    SecretDelete {
+        name: String,
+        result: io::Result<Output>,
+    },
+}
+
+/// Sender/receiver pair for the small CLI jobs. Each job gets its own short
+/// thread and sends exactly one result; `poll_jobs` drains them without ever
+/// waiting on a process.
+pub(super) struct Jobs {
+    sender: Sender<JobResult>,
+    results: Receiver<JobResult>,
+}
+
+impl Jobs {
+    pub(super) fn new() -> Self {
+        let (sender, results) = mpsc::channel();
+        Self { sender, results }
+    }
+
+    pub(super) fn spawn<F>(&self, job: F)
+    where
+        F: FnOnce() -> JobResult + Send + 'static,
+    {
+        let sender = self.sender.clone();
+        thread::spawn(move || {
+            let _ = sender.send(job());
+        });
+    }
+
+    pub(super) fn try_recv(&self) -> Option<JobResult> {
+        match self.results.try_recv() {
+            Ok(result) => Some(result),
+            Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn queue_for_test(&self, result: JobResult) {
+        self.sender.send(result).expect("job channel");
+    }
+}
 
 /// Advanced once per event-loop frame while sandbox creation runs in the worker.
 pub(super) const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -96,6 +207,185 @@ impl App {
                     }
                 }
             }
+        }
+    }
+
+    /// Pick up finished CLI jobs. Called once per event-loop frame; every
+    /// result is applied synchronously so the UI never reads torn state.
+    pub fn poll_jobs(&mut self) {
+        while let Some(result) = self.jobs.try_recv() {
+            self.apply_job_result(result);
+        }
+    }
+
+    fn apply_job_result(&mut self, result: JobResult) {
+        match result {
+            JobResult::PolicyInit { result } => self.finish_policy_init(result),
+            JobResult::Sandboxes {
+                result,
+                announce,
+                then_secrets,
+            } => {
+                match result {
+                    Ok(sandboxes) => {
+                        self.apply_statuses(sandboxes);
+                        if announce {
+                            self.notify_success("Sandbox list refreshed", None);
+                        }
+                    }
+                    Err(error) => self.notify_error("Could not list sandboxes", error),
+                }
+                if then_secrets {
+                    self.refresh_secrets();
+                }
+            }
+            JobResult::Secrets { result, announce } => match result {
+                Ok(secrets) => {
+                    self.secrets = secrets;
+                    if announce {
+                        self.notify_success("Secret list refreshed", None);
+                    }
+                }
+                Err(error) => self.notify_error("Could not list secrets", error),
+            },
+            JobResult::Ports {
+                name,
+                token,
+                result,
+            } => {
+                // A dialog closed and reopened while the job was running must
+                // not receive its table.
+                let current = self
+                    .ports
+                    .as_ref()
+                    .is_some_and(|view| view.name == name && view.token == token && view.loading);
+                if !current {
+                    return;
+                }
+                let Some(view) = self.ports.as_mut() else {
+                    return;
+                };
+                view.loading = false;
+                match result {
+                    Ok(ports) => {
+                        view.ports = ports;
+                        view.error = None;
+                    }
+                    Err(error) => view.error = Some(error),
+                }
+            }
+            JobResult::PortCommand {
+                name,
+                success,
+                error_title,
+                fallback,
+                result,
+            } => match result {
+                Ok(output) if output.status.success() => {
+                    let still_open = self.ports.as_ref().is_some_and(|view| view.name == name);
+                    if still_open {
+                        self.refresh_ports();
+                    }
+                    self.notify_success(success, None);
+                }
+                Ok(output) => {
+                    let detail = stderr_detail(&output, fallback);
+                    self.set_ports_error(&name, detail.clone());
+                    self.notify_error(error_title, detail);
+                }
+                Err(error) => {
+                    self.set_ports_error(&name, error.to_string());
+                    self.notify_error(error_title, error.to_string());
+                }
+            },
+            JobResult::SbxCommand { success, result } => {
+                self.handle_sbx_result(result, success);
+            }
+            JobResult::SecretExists {
+                service,
+                scope,
+                result,
+            } => self.finish_secret_lookup(&service, &scope, result),
+            JobResult::CustomSecretExists {
+                env_key,
+                scope,
+                result,
+            } => self.finish_custom_secret_lookup(&env_key, &scope, result),
+            JobResult::CustomSecretRemoved {
+                env_key,
+                scope,
+                result,
+            } => match result {
+                Ok(output) if output.status.success() => {
+                    self.finish_set_custom_secret(&env_key, &scope);
+                }
+                Ok(output) => self.notify_error(
+                    "Could not overwrite custom secret",
+                    stderr_detail(&output, "sbx secret rm failed"),
+                ),
+                Err(error) => {
+                    self.notify_error("Could not overwrite custom secret", error.to_string())
+                }
+            },
+            JobResult::SecretSet {
+                service,
+                scope,
+                success,
+                result,
+            } => match result {
+                Ok(output) if output.status.success() => {
+                    let still_open = self.secret_form.as_ref().is_some_and(|form| {
+                        form.service() == Some(service.as_str())
+                            && form.scope() == Some(scope.as_str())
+                    });
+                    if still_open {
+                        self.close_modal(super::SET_SECRET_DIALOG);
+                        self.secret_form = None;
+                    }
+                    self.refresh_secrets();
+                    self.notify_success(success, None);
+                }
+                Ok(output) => self.notify_error(
+                    "Could not set secret",
+                    stderr_detail(&output, "sbx secret set failed"),
+                ),
+                Err(error) => self.notify_error("Could not set secret", error.to_string()),
+            },
+            JobResult::CustomSecretSet { success, result } => match result {
+                Ok(output) if output.status.success() => {
+                    if self
+                        .modals
+                        .top()
+                        .is_some_and(|top| top.as_str() == super::SET_CUSTOM_SECRET_DIALOG)
+                    {
+                        self.close_modal(super::SET_CUSTOM_SECRET_DIALOG);
+                        self.custom_secret_form = None;
+                    }
+                    // Custom rows come from the same `sbx secret ls` listing
+                    // as service rows, so the table must be re-read to show
+                    // the new entry (just like the Set secret path).
+                    self.refresh_secrets();
+                    self.notify_success(success, None);
+                }
+                Ok(output) => self.notify_error(
+                    "Could not set custom secret",
+                    stderr_detail(&output, "sbx secret set-custom failed"),
+                ),
+                Err(error) => {
+                    self.notify_error("Could not set custom secret", error.to_string());
+                }
+            },
+            JobResult::SecretDelete { name, result } => match result {
+                Ok(output) if output.status.success() => {
+                    self.refresh_secrets();
+                    self.notify_success(format!("Deleted secret '{name}'"), None);
+                }
+                Ok(output) => self.notify_error(
+                    "Could not delete secret",
+                    stderr_detail(&output, "sbx secrets rm failed"),
+                ),
+                Err(error) => self.notify_error("Could not delete secret", error.to_string()),
+            },
         }
     }
 

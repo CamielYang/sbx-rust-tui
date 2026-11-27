@@ -4,7 +4,7 @@ mod ui;
 use std::io::{self, Stdout};
 use std::time::{Duration, Instant};
 
-use app::{App, INFO_REFRESH_INTERVAL, Mode, STATUS_REFRESH_INTERVAL};
+use app::{App, INFO_REFRESH_INTERVAL, Mode, STATUS_REFRESH_INTERVAL, StartupCheck, check_startup};
 use crossterm::{
     cursor,
     event::{
@@ -23,11 +23,23 @@ use ui::Msg;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 type Tui = Terminal<CrosstermBackend<Stdout>>;
 
+/// Read input at roughly 60 Hz. A 100 ms poll made every click feel delayed;
+/// CLI work now runs on workers, so polling this often is cheap.
+const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(16);
+
 fn main() -> Result<()> {
     install_panic_hook();
 
+    // Probe `sbx` before taking over the terminal: an uninitialized policy
+    // prints a plain-text prompt, which would be unreadable on the alt screen.
+    let needs_policy_setup = check_startup() == StartupCheck::NeedsSetup;
+
     let mut terminal = init_terminal()?;
     let mut app = App::new();
+    if needs_policy_setup {
+        app.require_policy_setup();
+    }
+    app.start();
     let result = run(&mut terminal, &mut app);
 
     restore_terminal(&mut terminal)?;
@@ -90,7 +102,8 @@ fn run(terminal: &mut Tui, app: &mut App) -> Result<()> {
 
     while !app.should_quit() {
         // Collect finished worker results before drawing so the UI shows fresh
-        // data on the very next frame.
+        // data on the very next frame. None of these calls wait on a process.
+        app.poll_jobs();
         app.poll_creation();
         app.poll_info();
         app.tick();
@@ -113,8 +126,8 @@ fn run(terminal: &mut Tui, app: &mut App) -> Result<()> {
 
         let now = Instant::now();
         if now >= next_status_check {
-            // Skip the synchronous `sbx ls` while creating so the spinner
-            // keeps animating; the next tick after completion refreshes.
+            // Status listing is queued on a worker. Skip it while creating so
+            // the spinner keeps animating; the next tick refreshes instead.
             if !app.is_creating() {
                 app.refresh_statuses();
             }
@@ -130,7 +143,7 @@ fn run(terminal: &mut Tui, app: &mut App) -> Result<()> {
             next_info_check = now + INFO_REFRESH_INTERVAL;
         }
 
-        if event::poll(Duration::from_millis(100))? {
+        if event::poll(INPUT_POLL_INTERVAL)? {
             let event = event::read()?;
             if let Event::Key(key) = event {
                 if key.kind != KeyEventKind::Press {

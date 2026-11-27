@@ -76,8 +76,8 @@ impl Form {
             agent_open: false,
             root_size: InputState::new(""),
             docker_size: InputState::new(""),
-            cpus: InputState::new("2"),
-            memory: InputState::new(default_memory()),
+            cpus: InputState::new(""),
+            memory: InputState::new(""),
             add_workspace: false,
             workspace_path: default_workspace_path(),
             workspace_mode: WorkspaceMode::Direct,
@@ -251,6 +251,7 @@ impl Form {
             program: "sbx".to_owned(),
             args,
             env,
+            shell_preview: None,
         }
     }
 
@@ -315,6 +316,10 @@ pub(super) fn validate_gb_size(value: &str) -> Result<(), String> {
 }
 
 pub(super) fn validate_cpus(value: &str) -> Result<(), String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(());
+    }
     value
         .parse::<u32>()
         .map(|_| ())
@@ -336,6 +341,9 @@ pub(super) fn parse_memory_mib(value: &str) -> Option<u64> {
 }
 
 pub(super) fn validate_memory(value: &str) -> Result<(), String> {
+    if value.trim().is_empty() {
+        return Ok(());
+    }
     let Some(mib) = parse_memory_mib(value) else {
         return Err("Use binary units like 512m or 8g.".to_owned());
     };
@@ -406,16 +414,5 @@ pub(super) fn windows_home_from(
     match (non_empty(home_drive), non_empty(home_path)) {
         (Some(drive), Some(path)) => Some(PathBuf::from(drive).join(path)),
         _ => None,
-    }
-}
-
-fn default_memory() -> String {
-    match host_memory_mib() {
-        Some(total) => {
-            let half = total / 2;
-            let rounded = (half / 512) * 512;
-            format!("{}m", rounded.clamp(512, 32 * 1024))
-        }
-        None => "4g".to_owned(),
     }
 }

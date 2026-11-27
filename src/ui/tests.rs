@@ -1,12 +1,15 @@
 use super::*;
 use crate::app::test_support::TempWorkspaceDir;
-use crate::app::{HostMount, INFO_DIALOG, MountMode, PORTS_DIALOG, PortMapping, SandboxDetails};
+use crate::app::{
+    CONFIRM_DIALOG, HostMount, INFO_DIALOG, Mode, MountMode, POLICY_DIALOG, PORTS_DIALOG,
+    PortMapping, SERVICES, SET_CUSTOM_SECRET_DIALOG, SET_SECRET_DIALOG, SandboxDetails, Secret,
+};
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 use ratcn::runtime::Ratcn;
 
 fn draw(app: &App) -> Buffer {
     let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
-    let theme = Theme::tokyo_night();
+    let theme = Theme::default();
     let mut ratcn = Ratcn::new()
         .focus(|state: &App| state.focus_ref(), Msg::FocusChanged)
         .modals(|state: &App| state.modals_ref());
@@ -32,6 +35,42 @@ fn render(app: &App) -> String {
 }
 
 #[test]
+fn policy_dialog_lists_all_three_choices() {
+    let app = App::with_policy_setup(true);
+    assert!(app.modals_ref().is_open(POLICY_DIALOG));
+
+    let screen = render(&app);
+    assert!(screen.contains("Network policy"));
+    assert!(screen.contains("Choose the network policy for sandboxes"));
+    assert!(screen.contains("Open"));
+    assert!(screen.contains("all network traffic allowed, no restrictions"));
+    assert!(screen.contains("Balanced"));
+    assert!(screen.contains("default deny, with common dev sites allowed"));
+    assert!(screen.contains("Locked Down"));
+    assert!(screen.contains("all traffic blocked unless you allow it"));
+
+    let lines: Vec<&str> = screen.lines().collect();
+    let prompt = lines
+        .iter()
+        .position(|line| line.contains("Choose the network policy for sandboxes"))
+        .unwrap();
+    let first_option = lines
+        .iter()
+        .position(|line| line.contains("○ Open"))
+        .unwrap();
+    let last_description = lines
+        .iter()
+        .position(|line| line.contains("all traffic blocked unless you allow it"))
+        .unwrap();
+    let hint = lines
+        .iter()
+        .position(|line| line.contains("↑↓ / click to choose"))
+        .unwrap();
+    assert_eq!(first_option, prompt + 2);
+    assert_eq!(hint, last_description + 2);
+}
+
+#[test]
 fn renders_dashboard_with_themated_controls() {
     let app = App::with_sandbox_statuses(&[("alpha", "running"), ("beta", "stopped")]);
     let screen = render(&app);
@@ -40,6 +79,369 @@ fn renders_dashboard_with_themated_controls() {
     assert!(screen.contains("beta"));
     assert!(screen.contains("Exec shell"));
     assert!(screen.contains("Remove"));
+}
+
+#[test]
+fn renders_tabs_with_quit_on_the_title_row() {
+    let app = App::with_sandbox_statuses(&[("alpha", "running")]);
+    let screen = render(&app);
+    let rows: Vec<&str> = screen.lines().collect();
+
+    let title_row = rows[1];
+    let quit = title_row.find("Quit").expect("quit button on title row");
+    assert!(quit > title_row.find("DOCKER SANDBOXES RUST").unwrap());
+    assert!(rows[2].trim().is_empty(), "spacing below the title row");
+    assert!(rows[3].contains("Sandboxes"));
+    assert!(rows[3].contains("Secrets"));
+    assert!(
+        rows[4].trim().starts_with('┌') && rows[4].trim().ends_with('┐'),
+        "content wrapper border sits directly below the tabs"
+    );
+    assert!(rows[8].contains(" Sandboxes "));
+    assert!(rows[9].contains("alpha"));
+
+    let buffer = draw(&app);
+    assert_eq!(
+        buffer.cell((1, 4)).unwrap().fg,
+        Color::White,
+        "white content wrapper outline"
+    );
+    assert_eq!(
+        buffer.cell((3, 6)).unwrap().symbol(),
+        " ",
+        "padding inside the wrapper"
+    );
+}
+
+#[test]
+fn layout_is_padded_except_for_the_footer() {
+    let app = App::with_sandbox_statuses(&[("alpha", "running")]);
+    let screen = render(&app);
+    let rows: Vec<&str> = screen.lines().collect();
+
+    assert!(rows[0].trim().is_empty(), "blank row above the title");
+    assert!(
+        rows[..rows.len() - 1]
+            .iter()
+            .all(|row| row.starts_with(' ') && row.ends_with(' ')),
+        "dashboard rows are inset by one column on each side"
+    );
+
+    let footer = rows.last().expect("footer row");
+    assert_eq!(
+        footer.find("N new"),
+        Some(1),
+        "footer keeps its own single leading space, with no outer inset"
+    );
+}
+
+#[test]
+fn secrets_tab_shows_toolbar_and_secret_table() {
+    let mut app = App::with_secrets(&[("(global)", "github"), ("test", "nebius")]);
+    app.select_tab(DashboardTab::Secrets);
+
+    let screen = render(&app);
+    let rows: Vec<&str> = screen.lines().collect();
+    assert!(rows[3].contains("Sandboxes"));
+    assert!(rows[3].contains("Secrets"));
+    assert_eq!(draw(&app).cell((1, 5)).unwrap().fg, Color::White);
+    assert!(screen.contains(" Secrets "));
+    assert!(screen.contains("+ Set secret"));
+    assert!(screen.contains("+ Set custom secret"));
+    assert!(screen.contains("Refresh"));
+    assert!(screen.contains("SCOPE"));
+    assert!(screen.contains("NAME"));
+    assert!(screen.contains("DELETE"));
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("(global)") && row.contains("github"))
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("test") && row.contains("nebius"))
+    );
+    assert_eq!(screen.matches("Delete").count(), 2);
+    assert!(!screen.contains("alpha"));
+    assert!(!screen.contains("+ New sandbox"));
+    assert!(!screen.contains("Publish ports"));
+}
+
+#[test]
+fn secrets_tab_shows_the_global_scope_label() {
+    let mut app = App::with_secrets(&[("(global)", "github")]);
+    app.select_tab(DashboardTab::Secrets);
+
+    assert!(render(&app).contains("(global)"));
+}
+
+#[test]
+fn secrets_tab_has_an_empty_state() {
+    let mut app = App::with_secrets(&[]);
+    app.select_tab(DashboardTab::Secrets);
+
+    let screen = render(&app);
+    assert!(screen.contains("No secrets yet."));
+    assert!(!screen.contains("Delete"));
+}
+
+#[test]
+fn secrets_tab_shows_an_env_var_column() {
+    let mut app = App::with_secrets(&[("(global)", "github"), ("test", "nebius")]);
+    app.select_tab(DashboardTab::Secrets);
+
+    let screen = render(&app);
+    assert!(screen.contains("ENV VAR"));
+    assert!(screen.contains("GH_TOKEN, GITHUB_TOKEN"));
+    assert!(screen.contains("NEBIUS_API_KEY"));
+}
+
+#[test]
+fn secrets_tab_shows_an_env_var_for_custom_secrets() {
+    let mut app = App::with_secrets(&[]);
+    app.set_secrets_for_test(vec![Secret::custom(
+        "test",
+        "MY_TOKEN",
+        ["api.example.com".to_owned()],
+    )]);
+    app.select_tab(DashboardTab::Secrets);
+
+    let screen = render(&app);
+    assert!(screen.contains("(custom)"));
+    assert!(screen.contains("MY_TOKEN"));
+}
+
+#[test]
+fn secret_info_dialog_shows_scope_name_env_var_and_api_domains() {
+    let mut app = App::with_secrets(&[("test", "nebius")]);
+    let secret = app.secrets()[0].clone();
+    app.show_secret_info_for_test(secret);
+
+    assert!(app.modals_ref().is_open(INFO_DIALOG));
+    let screen = render(&app);
+    for expected in [
+        "Secret · nebius",
+        "SCOPE",
+        "test",
+        "NAME",
+        "nebius",
+        "ENV VAR",
+        "NEBIUS_API_KEY",
+        "API DOMAINS",
+        "api.studio.nebius.com",
+        "api.tokenfactory.nebius.com",
+    ] {
+        assert!(screen.contains(expected), "missing {expected}");
+    }
+
+    let mut github = App::with_secrets(&[("(global)", "github")]);
+    let secret = github.secrets()[0].clone();
+    github.show_secret_info_for_test(secret);
+    let screen = render(&github);
+    for domain in [
+        "api.github.com",
+        "github.com",
+        "raw.githubusercontent.com",
+        "gist.github.com",
+        "copilot.github.com",
+        "api.githubcopilot.com",
+    ] {
+        assert!(screen.contains(domain), "missing {domain}");
+    }
+}
+
+#[test]
+fn secret_info_dialog_shows_custom_secret_targets_as_api_domains() {
+    let mut app = App::with_secrets(&[]);
+    let custom = Secret::custom(
+        "(global)",
+        "API_KEY",
+        [
+            "api.example.com".to_owned(),
+            "uploads.example.com".to_owned(),
+        ],
+    );
+    app.show_secret_info_for_test(custom);
+
+    assert!(app.modals_ref().is_open(INFO_DIALOG));
+    let screen = render(&app);
+    for expected in [
+        "Secret · (custom)",
+        "NAME",
+        "(custom)",
+        "ENV VAR",
+        "API_KEY",
+        "API DOMAINS",
+        "api.example.com",
+        "uploads.example.com",
+    ] {
+        assert!(screen.contains(expected), "missing {expected}");
+    }
+}
+
+#[test]
+fn set_secret_dialog_shows_service_scope_and_secret_fields() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.select_tab(DashboardTab::Secrets);
+    app.set_secret();
+
+    assert!(app.modals_ref().is_open(SET_SECRET_DIALOG));
+    let screen = render(&app);
+    assert!(screen.contains("Set secret"));
+    assert!(screen.contains("Service"));
+    assert!(screen.contains("Scope"));
+    assert!(screen.contains("Secret value"));
+    assert!(screen.contains("anthropic"));
+    assert!(screen.contains("(global)"));
+    assert!(screen.contains("Cancel"));
+}
+
+#[test]
+fn set_custom_secret_dialog_shows_env_secret_and_hosts() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.select_tab(DashboardTab::Secrets);
+    app.set_custom_secret();
+
+    assert!(app.modals_ref().is_open(SET_CUSTOM_SECRET_DIALOG));
+    assert_eq!(app.mode(), Mode::SetCustomSecret);
+    let screen = render(&app);
+    assert!(screen.contains("Set custom secret"));
+    assert!(screen.contains("Env key"));
+    assert!(screen.contains("Scope"));
+    assert!(screen.contains("(global)"));
+    assert!(screen.contains("Secret value"));
+    assert!(screen.contains("Hosts"));
+    assert!(screen.contains("Host 1"));
+    assert!(screen.contains("api.example.com"));
+    assert!(screen.contains("*.example.com"));
+    assert!(screen.contains("+ Add host"));
+    assert!(screen.contains("Cancel"));
+    // The service dropdown is the only Set secret field left out.
+    assert!(!screen.contains("Choose a service"));
+}
+
+#[test]
+fn set_custom_secret_dialog_grows_one_host_at_a_time() {
+    let mut app = App::new();
+    app.set_custom_secret();
+    assert_eq!(app.custom_secret_form().unwrap().hosts().len(), 1);
+
+    app.add_custom_host();
+    app.add_custom_host();
+    assert_eq!(app.custom_secret_form().unwrap().hosts().len(), 3);
+
+    let screen = render(&app);
+    assert!(screen.contains("Host 1"));
+    assert!(screen.contains("Host 2"));
+    assert!(screen.contains("Host 3"));
+}
+
+#[test]
+fn set_custom_secret_dialog_masks_the_typed_value() {
+    let mut app = App::new();
+    app.set_custom_secret();
+    app.set_custom_secret_value(InputState::new("sk-super-secret"));
+
+    let screen = render(&app);
+    assert!(!screen.contains("sk-super-secret"));
+    assert!(screen.contains(&"*".repeat("sk-super-secret".len())));
+}
+
+#[test]
+fn set_secret_dialog_masks_the_typed_value() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_secret();
+    app.set_secret_state(InputState::new("sk-super-secret"));
+
+    let screen = render(&app);
+    assert!(!screen.contains("sk-super-secret"));
+    assert!(screen.contains(&"*".repeat("sk-super-secret".len())));
+}
+
+#[test]
+fn overwrite_confirmation_renders_above_the_set_secret_dialog() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_secret();
+    app.set_secret_scope(1);
+    app.set_secret_state(InputState::new("sk-test"));
+    app.set_secret_exists_for_test(true);
+    app.submit_secret();
+
+    let screen = render(&app);
+    assert!(screen.contains("Confirm overwrite"));
+    assert!(screen.contains("A secret for 'anthropic' already exists in sandbox"));
+    assert!(screen.contains("'alpha'. Overwrite it?"));
+    assert!(screen.contains("Overwrite secret"));
+}
+
+#[test]
+fn custom_overwrite_confirmation_renders_above_the_custom_form() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_custom_secret();
+    app.set_custom_scope(1);
+    app.set_custom_env_key(InputState::new("TEST_KEY"));
+    app.set_custom_secret_value(InputState::new("sk-test"));
+    app.set_custom_host(0, InputState::new("api.example.com"));
+    app.set_secret_exists_for_test(true);
+    app.submit_custom_secret();
+
+    let screen = render(&app);
+    assert!(screen.contains("Confirm overwrite"));
+    assert!(screen.contains("A custom secret for 'TEST_KEY' already exists in sandbox"));
+    assert!(screen.contains("'alpha'. Overwrite it?"));
+    assert!(screen.contains("Overwrite secret"));
+}
+
+#[test]
+fn set_secret_dialog_lists_every_builtin_service() {
+    let mut app = App::with_sandboxes(&[]);
+    app.set_secret();
+    // Opening a Select is app state, so the panel can be rendered deterministically.
+    app.set_secret_service_open(true);
+
+    let screen = render(&app);
+    for service in SERVICES {
+        assert!(screen.contains(service), "service {service} is offered");
+    }
+}
+
+#[test]
+fn secret_delete_confirmation_names_the_scope() {
+    let mut app = App::with_secrets(&[("test", "nebius")]);
+    app.select_tab(DashboardTab::Secrets);
+    app.delete_secret("nebius", "test");
+
+    assert!(app.modals_ref().is_open(CONFIRM_DIALOG));
+    let screen = render(&app);
+    assert!(screen.contains("Confirm delete"));
+    assert!(screen.contains("Delete secret 'nebius' from sandbox 'test'?"));
+    assert!(screen.contains("Delete secret"));
+    assert!(screen.contains("Cancel"));
+
+    let mut global = App::with_secrets(&[("(global)", "github")]);
+    global.select_tab(DashboardTab::Secrets);
+    global.delete_secret("github", "(global)");
+    assert!(render(&global).contains("Delete global secret 'github'?"));
+
+    let mut named_global = App::with_secrets(&[("global", "github")]);
+    named_global.select_tab(DashboardTab::Secrets);
+    named_global.delete_secret("github", "global");
+    assert!(render(&named_global).contains("Delete secret 'github' from sandbox 'global'?"));
+}
+
+#[test]
+fn custom_secret_delete_confirmation_names_the_env_key() {
+    let mut app = App::with_secrets(&[]);
+    app.delete_custom_secret("API_KEY", "test", "sbx-cs-123");
+    assert!(app.modals_ref().is_open(CONFIRM_DIALOG));
+    let screen = render(&app);
+    assert!(screen.contains("Confirm delete"));
+    assert!(screen.contains("Delete secret 'API_KEY' from sandbox 'test'?"));
+    assert!(screen.contains("Delete secret"));
+    assert!(!screen.contains("(custom)"));
+
+    let mut global = App::with_secrets(&[]);
+    global.delete_custom_secret("TOKEN", "(global)", "sbx-cs-global");
+    assert!(render(&global).contains("Delete global secret 'TOKEN'?"));
 }
 
 #[test]
@@ -91,7 +493,9 @@ fn running_status_is_green_in_list_and_actions() {
         .lines()
         .position(|line| line.contains("status: running"))
         .unwrap();
-    let column = screen.lines().nth(row).unwrap().find("running").unwrap();
+    let line = screen.lines().nth(row).unwrap();
+    let byte = line.find("running").unwrap();
+    let column = line[..byte].chars().count();
     assert_eq!(
         buffer.content()[row * width + column].fg,
         RUNNING_GREEN,
@@ -116,7 +520,7 @@ fn label_style(buffer: &Buffer, label: &str) -> ratatui::style::Style {
 
 #[test]
 fn dialog_cancel_buttons_share_one_visible_fill() {
-    let theme = Theme::tokyo_night();
+    let theme = Theme::default();
     let style = cancel_style(&theme);
     let fills = [
         style.background,
@@ -210,7 +614,7 @@ fn stopped_actions_show_only_stopped_commands() {
 
 #[test]
 fn action_styles_keep_their_hue_and_change_on_focus_and_hover() {
-    let theme = Theme::tokyo_night();
+    let theme = Theme::default();
     for fill in [START_GREEN, STOP_ORANGE, EXEC_GRAY, REMOVE_RED, INFO_BLUE] {
         let style = action_style(fill)(&theme);
         assert_eq!(style.background, fill);
@@ -229,6 +633,8 @@ fn renders_create_dialog() {
     assert!(screen.contains("New sandbox"));
     assert!(screen.contains("Create sandbox"));
     assert!(screen.contains("sandbox-name"));
+    assert!(screen.contains("2 (optional)"));
+    assert!(screen.contains("4g (optional)"));
     assert!(screen.contains("opencode"));
     assert!(!screen.contains("Ready to create"));
 

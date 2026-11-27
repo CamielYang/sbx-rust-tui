@@ -12,21 +12,37 @@ mod actions;
 mod commands;
 mod dialogs;
 mod form;
+mod policy;
 mod ports;
 mod ports_flow;
 mod sandbox;
+mod secret_form;
+mod secrets;
+mod service_catalog;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod workers;
 mod workspace;
 
+use self::policy::Setup as PolicySetup;
+
 pub use self::actions::PendingAction;
 pub use self::commands::PendingCommand;
 pub use self::form::{Form, FormField, WorkspaceMode};
+pub use self::policy::{NetworkPolicy, POLICY_DIALOG, StartupCheck, check_startup};
 pub use self::ports::{PortField, PortForm, PortMapping, PortsView};
 pub use self::sandbox::{
     HostMount, MountMode, Sandbox, SandboxDetails, fetch_sandboxes, inspect_sandbox,
 };
+// `GLOBAL_SCOPE` and `fetch_secrets` are public entry points for callers that
+// don't cache sandboxes; the dashboard itself uses the cached variant.
+#[allow(unused_imports)]
+pub use self::secret_form::{
+    CustomSecretForm, GLOBAL_SCOPE, SERVICES, SecretForm, is_global_scope,
+};
+#[allow(unused_imports)]
+pub use self::secrets::{Secret, SecretId, fetch_secrets, fetch_secrets_for};
+pub use self::service_catalog::service_info;
 pub use self::workspace::{WORKSPACE_PARENT, WorkspacePicker};
 
 pub const AGENTS: &[&str] = &[
@@ -48,6 +64,20 @@ pub const INFO_DIALOG: &str = "info-dialog";
 pub const CONFIRM_DIALOG: &str = "confirm-dialog";
 pub const PORTS_DIALOG: &str = "ports-dialog";
 pub const WORKSPACE_DIALOG: &str = "workspace-dialog";
+pub const SET_SECRET_DIALOG: &str = "set-secret-dialog";
+pub const SET_CUSTOM_SECRET_DIALOG: &str = "set-custom-secret-dialog";
+
+/// Stable id for the tab row, used as a focus target when the visible tab changes.
+pub const TAB_ROW: &str = "tab-row";
+
+/// The dashboard's top-level tabs. The tab row owns the choice; each tab
+/// decides which body section is visible below it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum DashboardTab {
+    #[default]
+    Sandboxes,
+    Secrets,
+}
 
 /// How often the dashboard re-reads `sbx ls` to keep running-state dots fresh.
 pub const STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
@@ -59,6 +89,8 @@ pub const INFO_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
 /// kept as a convenience for status text and tests.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
+    /// First-run network policy choice, before the dashboard is usable.
+    PolicySetup,
     Normal,
     Wizard,
     Info,
@@ -66,10 +98,16 @@ pub enum Mode {
     Ports,
     /// The folder picker sits above the create wizard.
     Workspace,
+    SetSecret,
+    SetCustomSecret,
 }
 
 pub struct App {
+    /// Present only while the first-run policy dialog is open.
+    policy_setup: Option<PolicySetup>,
+    tab: DashboardTab,
     sandboxes: Vec<Sandbox>,
+    secrets: Vec<Secret>,
     /// The row the list cursor is on. Hover and arrow keys move it; the
     /// Actions pane follows `selected`, which a click commits.
     cursor: usize,
@@ -79,10 +117,18 @@ pub struct App {
     modals: ModalState,
     form: Form,
     info: Option<SandboxDetails>,
+    /// A secret row shown in the same Info dialog as sandbox details.
+    secret_info: Option<Secret>,
     info_refresh: Option<workers::InfoRefresh>,
+    /// Short-lived CLI jobs whose results are picked up in the event loop.
+    jobs: workers::Jobs,
     ports: Option<PortsView>,
+    /// Bumped on every port load so a late result cannot fill a reopened dialog.
+    ports_token: u64,
     port_form: PortForm,
     workspace_picker: Option<WorkspacePicker>,
+    secret_form: Option<SecretForm>,
+    custom_secret_form: Option<CustomSecretForm>,
     pending_action: Option<PendingAction>,
     pending_external: Option<PendingCommand>,
     creation: Option<workers::Creation>,
@@ -99,12 +145,33 @@ pub struct App {
     /// In tests, unpublishing records the command instead of running `sbx`.
     #[cfg(test)]
     unpublished_for_test: Option<String>,
+    /// In tests, deleting a secret records the command instead of running `sbx`.
+    #[cfg(test)]
+    deleted_for_test: Option<String>,
+    /// In tests, setting a secret records the command instead of running `sbx`.
+    #[cfg(test)]
+    set_for_test: Option<String>,
+    /// In tests, the `sbx policy init` command the setup dialog selected.
+    #[cfg(test)]
+    policy_command_for_test: Option<String>,
+    /// In tests, the answer to the "secret already exists" lookup. `None` means
+    /// no existing secret, so the usual set flow keeps working unchanged.
+    #[cfg(test)]
+    secret_exists_for_test: Option<bool>,
+    /// In tests, how many secret-list refreshes have been queued.
+    #[cfg(test)]
+    secret_refreshes_for_test: usize,
 }
 
 impl App {
+    /// Construct the app without starting any CLI work. The host calls
+    /// `require_policy_setup` when needed, then `start` to begin loading.
     pub fn new() -> Self {
-        let mut app = Self {
+        Self {
+            policy_setup: None,
+            tab: DashboardTab::default(),
             sandboxes: Vec::new(),
+            secrets: Vec::new(),
             cursor: 0,
             selected: 0,
             list_offset: 0,
@@ -112,10 +179,15 @@ impl App {
             modals: ModalState::default(),
             form: Form::new(),
             info: None,
+            secret_info: None,
             info_refresh: None,
+            jobs: workers::Jobs::new(),
             ports: None,
+            ports_token: 0,
             port_form: PortForm::new(),
             workspace_picker: None,
+            secret_form: None,
+            custom_secret_form: None,
             pending_action: None,
             pending_external: None,
             creation: None,
@@ -129,9 +201,38 @@ impl App {
             published_for_test: None,
             #[cfg(test)]
             unpublished_for_test: None,
-        };
-        app.refresh_sandboxes();
-        app
+            #[cfg(test)]
+            deleted_for_test: None,
+            #[cfg(test)]
+            set_for_test: None,
+            #[cfg(test)]
+            policy_command_for_test: None,
+            #[cfg(test)]
+            secret_exists_for_test: None,
+            #[cfg(test)]
+            secret_refreshes_for_test: 0,
+        }
+    }
+
+    /// Begin the dashboard loads. Held until the first-run policy dialog has
+    /// been satisfied so `sbx` commands are not issued before setup.
+    pub fn start(&mut self) {
+        if !self.needs_policy_setup() {
+            #[cfg(not(test))]
+            self.start_initial_load();
+        }
+    }
+
+    #[cfg(not(test))]
+    fn start_initial_load(&mut self) {
+        // The first frame shows an empty dashboard immediately. When the
+        // sandbox list lands, it queues the secret inventory for that list so
+        // startup never waits on a chain of `sbx` processes.
+        self.jobs.spawn(|| workers::JobResult::Sandboxes {
+            result: fetch_sandboxes(),
+            announce: false,
+            then_secrets: true,
+        });
     }
 
     pub fn should_quit(&self) -> bool {
@@ -145,7 +246,9 @@ impl App {
     /// Logical screen, derived from the modal stack so the two can never
     /// disagree about which layer is active.
     pub fn mode(&self) -> Mode {
-        if self.modals.is_open(WORKSPACE_DIALOG) {
+        if self.modals.is_open(POLICY_DIALOG) {
+            Mode::PolicySetup
+        } else if self.modals.is_open(WORKSPACE_DIALOG) {
             Mode::Workspace
         } else if self.modals.is_open(CREATE_DIALOG) {
             Mode::Wizard
@@ -155,9 +258,24 @@ impl App {
             Mode::Confirm
         } else if self.modals.is_open(PORTS_DIALOG) {
             Mode::Ports
+        } else if self.modals.is_open(SET_SECRET_DIALOG) {
+            Mode::SetSecret
+        } else if self.modals.is_open(SET_CUSTOM_SECRET_DIALOG) {
+            Mode::SetCustomSecret
         } else {
             Mode::Normal
         }
+    }
+
+    pub fn active_tab(&self) -> DashboardTab {
+        self.tab
+    }
+
+    /// Switch tabs and park focus on the row, since controls belonging to the
+    /// previous tab are no longer declared in the frame.
+    pub fn select_tab(&mut self, tab: DashboardTab) {
+        self.tab = tab;
+        *self.focus_mut() = FocusState::intent([TAB_ROW]);
     }
 
     /// The action the confirmation dialog is asking about, if one is open.
@@ -215,6 +333,11 @@ impl App {
         self.info.as_ref()
     }
 
+    /// The secret row the Info dialog is showing, if any.
+    pub fn secret_info(&self) -> Option<&Secret> {
+        self.secret_info.as_ref()
+    }
+
     pub fn ports(&self) -> Option<&PortsView> {
         self.ports.as_ref()
     }
@@ -225,6 +348,14 @@ impl App {
 
     pub fn workspace_picker(&self) -> Option<&WorkspacePicker> {
         self.workspace_picker.as_ref()
+    }
+
+    pub fn secret_form(&self) -> Option<&SecretForm> {
+        self.secret_form.as_ref()
+    }
+
+    pub fn custom_secret_form(&self) -> Option<&CustomSecretForm> {
+        self.custom_secret_form.as_ref()
     }
 
     pub fn port_invalid(&self, field: PortField) -> bool {
@@ -301,6 +432,10 @@ impl App {
         &self.sandboxes
     }
 
+    pub fn secrets(&self) -> &[Secret] {
+        &self.secrets
+    }
+
     /// The row the list cursor is on. Kept apart from the selected sandbox so
     /// hovering a row does not silently retarget the Actions pane.
     pub fn focused_name(&self) -> Option<String> {
@@ -356,13 +491,15 @@ impl App {
         if self.is_creating() || self.mode() != Mode::Normal {
             return;
         }
+        // These shortcuts belong to the sandbox tab; the Secrets tab uses its
+        // own buttons instead.
+        if self.active_tab() != DashboardTab::Sandboxes {
+            return;
+        }
 
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => self.quit(),
-            KeyCode::Char('r') | KeyCode::Char('R') => {
-                self.refresh_sandboxes();
-                self.notify_success("Sandbox list refreshed", None);
-            }
+            KeyCode::Esc => self.quit(),
+            KeyCode::Char('r') | KeyCode::Char('R') => self.request_sandbox_refresh(),
             KeyCode::Char('n') | KeyCode::Char('N') => self.open_wizard(),
             KeyCode::Char('s') | KeyCode::Char('S') => self.toggle_selected(),
             KeyCode::Char('x') | KeyCode::Char('X') => self.exec_selected(),
@@ -373,19 +510,104 @@ impl App {
         }
     }
 
+    /// A button/shortcut refresh gives immediate feedback; the success (or
+    /// failure) toast comes from the worker result, not from this call.
+    pub fn request_sandbox_refresh(&mut self) {
+        self.refresh_sandboxes_announced();
+        self.notify_info("Refreshing sandboxes...", None);
+    }
+
+    pub fn request_secret_refresh(&mut self) {
+        self.refresh_secrets_announced();
+        self.notify_info("Refreshing secrets...", None);
+    }
+
+    /// Queue a sandbox listing. The CLI runs on a worker thread; the event
+    /// loop keeps handling input while it is in flight.
     pub fn refresh_sandboxes(&mut self) {
-        match fetch_sandboxes() {
-            Ok(sandboxes) => self.apply_statuses(sandboxes),
-            Err(error) => self.notify_error("Could not list sandboxes", error),
+        self.refresh_sandboxes_inner(false);
+    }
+
+    pub(super) fn refresh_sandboxes_announced(&mut self) {
+        self.refresh_sandboxes_inner(true);
+    }
+
+    fn refresh_sandboxes_inner(&mut self, announce: bool) {
+        self.jobs.spawn(move || workers::JobResult::Sandboxes {
+            result: fetch_sandboxes(),
+            announce,
+            then_secrets: false,
+        });
+    }
+
+    pub fn refresh_secrets(&mut self) {
+        self.refresh_secrets_announced_inner(false);
+    }
+
+    pub(super) fn refresh_secrets_announced(&mut self) {
+        self.refresh_secrets_announced_inner(true);
+    }
+
+    fn refresh_secrets_announced_inner(&mut self, announce: bool) {
+        #[cfg(test)]
+        {
+            self.secret_refreshes_for_test += 1;
+        }
+        let sandboxes = self.sandboxes.clone();
+        self.jobs.spawn(move || workers::JobResult::Secrets {
+            result: fetch_secrets_for(&sandboxes),
+            announce,
+        });
+    }
+
+    /// A row's Delete button only asks for confirmation; the CLI runs once the
+    /// dialog is confirmed.
+    pub fn delete_secret(&mut self, name: &str, scope: &str) {
+        self.request_action(PendingAction::DeleteSecret(
+            name.to_owned(),
+            scope.to_owned(),
+        ));
+    }
+
+    /// The row's scope is the sandbox name; `(global)` secrets omit `--sandbox`.
+    /// `-f` skips the CLI's own prompt, which cannot be answered while the TUI
+    /// owns the terminal.
+    fn delete_secret_command(name: &str, scope: &str) -> PendingCommand {
+        let mut args = vec!["secrets", "rm", name];
+        let scoped = (!is_global_scope(scope)).then_some(["--sandbox", scope]);
+        if let Some([flag, value]) = scoped.as_ref() {
+            args.push(flag);
+            args.push(value);
+        }
+        args.push("-f");
+        PendingCommand::new("sbx", &args)
+    }
+
+    /// Run a confirmed deletion, then refresh the table the row came from.
+    #[cfg_attr(test, allow(dead_code))]
+    fn delete_secret_now(&mut self, name: &str, scope: &str) {
+        let pending = Self::delete_secret_command(name, scope);
+
+        #[cfg(test)]
+        {
+            self.deleted_for_test = Some(pending.preview());
+        }
+
+        #[cfg(not(test))]
+        {
+            let deleted = name.to_owned();
+            self.notify_info(format!("Deleting secret '{name}'..."), None);
+            self.jobs.spawn(move || workers::JobResult::SecretDelete {
+                name: deleted,
+                result: pending.run(),
+            });
         }
     }
 
     /// Periodic tick: keep running-state dots (and an open Info modal's status
     /// line) current without re-running the in-guest metrics commands.
     pub fn refresh_statuses(&mut self) {
-        if let Ok(sandboxes) = fetch_sandboxes() {
-            self.apply_statuses(sandboxes);
-        }
+        self.refresh_sandboxes();
     }
 
     pub(super) fn apply_statuses(&mut self, sandboxes: Vec<Sandbox>) {

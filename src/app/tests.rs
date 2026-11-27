@@ -1,13 +1,16 @@
 use std::ffi::OsStr;
 use std::io;
 use std::path::PathBuf;
+use std::process::{Command, ExitStatus, Output};
 
 use super::form::{
     parse_memory_mib, validate_cpus, validate_gb_size, validate_memory, validate_name,
 };
+use super::policy::{NetworkPolicy, listing_is_json};
 use super::ports::parse_ports;
 use super::sandbox::{VmMetrics, format_size, json_text, parse_host_mounts, parse_vm_metrics};
 use super::test_support::TempWorkspaceDir;
+use super::workers::JobResult;
 use super::*;
 use serde_json::Value;
 
@@ -27,6 +30,7 @@ fn size_and_cpu_validation() {
     assert!(validate_gb_size("20").is_ok());
     assert!(validate_gb_size("40g").is_err());
     assert!(validate_gb_size("40x").is_err());
+    assert!(validate_cpus("").is_ok());
     assert!(validate_cpus("2").is_ok());
     assert!(validate_cpus("0").is_ok());
     assert!(validate_cpus("abc").is_err());
@@ -36,8 +40,128 @@ fn size_and_cpu_validation() {
 fn memory_validation() {
     assert_eq!(parse_memory_mib("512m"), Some(512));
     assert_eq!(parse_memory_mib("8g"), Some(8192));
+    assert!(validate_memory("").is_ok());
     assert!(validate_memory("256m").is_err());
     assert!(validate_memory("nonsense").is_err());
+}
+
+fn exit_status(success: bool) -> ExitStatus {
+    if cfg!(windows) {
+        Command::new("cmd")
+            .args(["/C", if success { "exit 0" } else { "exit 1" }])
+            .status()
+            .unwrap()
+    } else {
+        Command::new(if success { "true" } else { "false" })
+            .status()
+            .unwrap()
+    }
+}
+
+fn cli_output(success: bool, stdout: &[u8], stderr: &[u8]) -> Output {
+    Output {
+        status: exit_status(success),
+        stdout: stdout.to_vec(),
+        stderr: stderr.to_vec(),
+    }
+}
+
+#[test]
+fn policy_listing_is_ready_only_with_json_on_stdout() {
+    let json = br#"{"policies":[{"name":"balanced"}]}"#;
+    let prompt = b"Choose the network policy for sandboxes\n1. Open\n2. Balanced\n3. Locked Down";
+
+    assert!(listing_is_json(&Ok(cli_output(true, json, b""))));
+    assert!(!listing_is_json(&Ok(cli_output(
+        true,
+        b"",
+        b"error: global network policy has not been initialized"
+    ))));
+    assert!(!listing_is_json(&Ok(cli_output(true, prompt, b""))));
+    assert!(!listing_is_json(&Err(io::Error::other("sbx is missing"))));
+}
+
+#[test]
+fn policy_options_map_to_the_cli_arguments() {
+    assert_eq!(
+        NetworkPolicy::OpenAll.init_command().preview(),
+        "sbx policy init allow-all"
+    );
+    assert_eq!(
+        NetworkPolicy::Balanced.init_command().preview(),
+        "sbx policy init balanced"
+    );
+    assert_eq!(
+        NetworkPolicy::LockedDown.init_command().preview(),
+        "sbx policy init deny-all"
+    );
+    assert_eq!(NetworkPolicy::from_index(3), None);
+}
+
+#[test]
+fn policy_setup_runs_the_selected_command_and_closes_on_success() {
+    let mut app = App::with_policy_setup(true);
+    assert!(matches!(app.mode(), Mode::PolicySetup));
+    assert!(app.modals_ref().is_open(POLICY_DIALOG));
+
+    app.set_policy_focus(2);
+    assert_eq!(app.policy_focus(), 2);
+    app.select_network_policy(2);
+    assert_eq!(
+        app.take_policy_command_for_test().as_deref(),
+        Some("sbx policy init deny-all")
+    );
+    assert!(app.policy_pending());
+    assert_eq!(app.policy_selection(), Some(2));
+
+    app.queue_job_result_for_test(super::workers::JobResult::PolicyInit {
+        result: Ok(cli_output(true, b"", b"")),
+    });
+    app.poll_jobs();
+
+    assert!(!app.needs_policy_setup());
+    assert!(matches!(app.mode(), Mode::Normal));
+    assert!(!app.modals_ref().is_open(POLICY_DIALOG));
+    assert!(
+        app.message()
+            .contains("Locked Down network policy initialized")
+    );
+}
+
+#[test]
+fn failed_policy_init_keeps_the_dialog_open_for_a_retry() {
+    let mut app = App::with_policy_setup(true);
+    app.select_network_policy(1);
+    assert!(app.policy_pending());
+
+    app.queue_job_result_for_test(super::workers::JobResult::PolicyInit {
+        result: Ok(cli_output(
+            false,
+            b"",
+            b"error: could not initialize policy\n  try: sbx policy init balanced\n",
+        )),
+    });
+    app.poll_jobs();
+
+    assert!(app.needs_policy_setup());
+    assert!(app.modals_ref().is_open(POLICY_DIALOG));
+    assert!(!app.policy_pending());
+    assert_eq!(app.policy_selection(), None);
+    assert!(app.message().contains("error: could not initialize policy"));
+}
+
+#[test]
+fn form_starts_with_empty_optional_resource_fields() {
+    let mut form = Form::new();
+    assert!(form.cpus().value().is_empty());
+    assert!(form.memory().value().is_empty());
+
+    form.name = InputState::new("sandbox-name");
+    assert!(form.first_error().is_none());
+    assert_eq!(
+        form.create_command().preview(),
+        "sbx create --name sandbox-name opencode"
+    );
 }
 
 #[test]
@@ -513,6 +637,18 @@ fn confirmation_cancels_when_status_changed_or_sandbox_vanished() {
 }
 
 #[test]
+fn q_does_not_quit_from_the_sandboxes_tab() {
+    let mut app = App::with_sandbox_statuses(&[("alpha", "running")]);
+
+    app.handle_global_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+    assert!(!app.should_quit());
+
+    // Esc stays as the keyboard equivalent of the Quit button.
+    app.handle_global_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.should_quit());
+}
+
+#[test]
 fn global_shortcuts_are_inert_while_confirming() {
     let mut app = App::with_sandbox_statuses(&[("alpha", "stopped")]);
     app.remove_selected();
@@ -583,6 +719,82 @@ fn status_tick_updates_modal_without_clearing_toast() {
     assert!(app.sandboxes()[0].is_running());
     assert_eq!(app.info().unwrap().status, "running");
     assert_eq!(app.message(), "keep me");
+}
+
+#[test]
+fn polling_jobs_installs_tables_and_announces_manual_refreshes() {
+    let mut app = App::with_sandboxes(&[]);
+    app.queue_job_result_for_test(JobResult::Sandboxes {
+        result: Ok(vec![Sandbox::new("alpha".to_owned(), "running".to_owned())]),
+        announce: true,
+        then_secrets: false,
+    });
+    app.queue_job_result_for_test(JobResult::Secrets {
+        result: Ok(vec![Secret::new("(global)", "github")]),
+        announce: true,
+    });
+
+    app.poll_jobs();
+
+    assert_eq!(app.sandboxes()[0].name, "alpha");
+    assert_eq!(app.secrets()[0].name, "github");
+    assert_eq!(app.message(), "Secret list refreshed");
+}
+
+#[test]
+fn stale_port_listing_does_not_fill_a_reopened_dialog() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.show_ports_for_test("alpha", Vec::new());
+    let token = app.ports_token_for_test();
+    app.ports.as_mut().unwrap().loading = true;
+    let mapping = PortMapping {
+        host_port: 60002,
+        sandbox_port: 3000,
+        protocol: "tcp4".to_owned(),
+        host_ip: None,
+    };
+
+    app.queue_job_result_for_test(JobResult::Ports {
+        name: "alpha".to_owned(),
+        token: token.wrapping_sub(1),
+        result: Ok(vec![mapping.clone()]),
+    });
+    app.poll_jobs();
+    assert!(app.ports().unwrap().ports.is_empty());
+    assert!(app.ports().unwrap().loading);
+
+    app.queue_job_result_for_test(JobResult::Ports {
+        name: "alpha".to_owned(),
+        token,
+        result: Ok(vec![mapping.clone()]),
+    });
+    app.poll_jobs();
+    assert_eq!(app.ports().unwrap().ports, vec![mapping]);
+    assert!(!app.ports().unwrap().loading);
+}
+
+#[test]
+fn failed_port_command_reports_in_the_dialog() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.show_ports_for_test("alpha", Vec::new());
+    app.queue_job_result_for_test(JobResult::PortCommand {
+        name: "alpha".to_owned(),
+        success: "Published 8080:3000 for 'alpha'.".to_owned(),
+        error_title: "Could not publish port",
+        fallback: "sbx port publish failed",
+        result: Ok(fake_output(false, "error: port already in use")),
+    });
+
+    app.poll_jobs();
+
+    assert!(
+        app.ports()
+            .unwrap()
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("port already in use"))
+    );
+    assert!(app.message().contains("Could not publish port"));
 }
 
 #[test]
@@ -824,4 +1036,633 @@ fn workspace_picker_starts_at_the_nearest_existing_directory() {
     app.open_workspace_picker();
 
     assert_eq!(app.workspace_picker().unwrap().dir(), temp.path());
+}
+
+#[test]
+fn secrets_start_empty_until_the_cli_is_read() {
+    let app = App::with_secrets(&[("(global)", "github")]);
+    assert_eq!(app.secrets(), &[Secret::new("(global)", "github")]);
+}
+
+#[test]
+fn clicking_a_secret_row_opens_info_and_close_clears_it() {
+    let mut app = App::with_secrets(&[("(global)", "github"), ("test", "nebius")]);
+    app.open_secret_info(&SecretId::Service("github".to_owned()), "(global)");
+
+    assert!(matches!(app.mode(), Mode::Info));
+    assert!(app.modals_ref().is_open(INFO_DIALOG));
+    let secret = app.secret_info().expect("secret details");
+    assert_eq!(secret.scope, "(global)");
+    assert_eq!(secret.env_vars, ["GH_TOKEN", "GITHUB_TOKEN"]);
+    assert_eq!(secret.api_domains[0], "api.github.com");
+
+    app.close_info();
+    assert!(app.secret_info().is_none());
+    assert!(!app.modals_ref().is_open(INFO_DIALOG));
+}
+
+#[test]
+fn custom_secret_info_is_keyed_by_scope_and_env_key() {
+    let mut app = App::with_secrets(&[]);
+    app.set_secrets_for_test(vec![
+        Secret::custom("test", "TEST", ["first.example.com".to_owned()]),
+        Secret::custom("test", "TEST2", ["second.example.com".to_owned()]),
+        Secret::custom("other", "TEST2", ["third.example.com".to_owned()]),
+    ]);
+
+    app.open_secret_info(&SecretId::Custom("TEST2".to_owned()), "test");
+    let secret = app.secret_info().expect("secret details");
+    assert_eq!(secret.env_vars, ["TEST2"]);
+    assert_eq!(secret.api_domains, ["second.example.com"]);
+
+    app.open_secret_info(&SecretId::Custom("TEST2".to_owned()), "other");
+    let secret = app.secret_info().expect("secret details");
+    assert_eq!(secret.env_vars, ["TEST2"]);
+    assert_eq!(secret.api_domains, ["third.example.com"]);
+}
+
+#[test]
+fn opening_sandbox_info_replaces_secret_info() {
+    let mut app = App::with_sandbox_statuses(&[("alpha", "running")]);
+    app.set_secrets_for_test(vec![Secret::new("(global)", "github")]);
+    app.open_secret_info(&SecretId::Service("github".to_owned()), "(global)");
+    app.open_info("alpha");
+
+    assert!(app.secret_info().is_none());
+    assert_eq!(app.info().unwrap().name, "alpha");
+}
+
+#[test]
+fn set_secret_opens_a_dialog_with_global_and_sandbox_scopes() {
+    let mut app = App::with_sandboxes(&["alpha", "beta"]);
+    app.set_secret();
+
+    assert!(matches!(app.mode(), Mode::SetSecret));
+    assert!(app.modals_ref().is_open(SET_SECRET_DIALOG));
+    let form = app.secret_form().unwrap();
+    assert_eq!(form.scopes(), &["(global)", "alpha", "beta"]);
+    assert_eq!(form.service(), Some("anthropic"));
+    assert_eq!(form.scope(), Some("(global)"));
+    assert!(form.secret().value().is_empty());
+}
+
+#[test]
+fn setting_a_global_secret_omits_the_sandbox_flag() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_secret();
+    app.set_secret_service(3); // github
+    app.set_secret_state(InputState::new("sk-test"));
+    app.submit_secret();
+
+    assert_eq!(
+        app.take_set_for_test().as_deref(),
+        Some("echo \"sk-test\" | sbx secret set github -f")
+    );
+    assert!(!app.modals_ref().is_open(SET_SECRET_DIALOG));
+    assert!(app.secret_form().is_none());
+    assert!(app.message().contains("Set secret 'github' for global"));
+}
+
+#[test]
+fn setting_a_scoped_secret_targets_the_sandbox() {
+    let mut app = App::with_sandboxes(&["alpha", "beta"]);
+    app.set_secret();
+    app.set_secret_scope(2); // beta
+    app.set_secret_state(InputState::new("token with spaces"));
+    app.submit_secret();
+
+    assert_eq!(
+        app.take_set_for_test().as_deref(),
+        Some("echo \"token with spaces\" | sbx secret set anthropic --sandbox beta -f")
+    );
+    assert!(app.message().contains("for beta"));
+}
+
+#[test]
+fn a_sandbox_named_global_is_not_the_global_scope() {
+    let mut app = App::with_sandboxes(&["global"]);
+    app.set_secret();
+    app.set_secret_scope(1); // the sandbox called "global"
+    app.set_secret_state(InputState::new("sk-test"));
+    app.submit_secret();
+
+    assert_eq!(
+        app.take_set_for_test().as_deref(),
+        Some("echo \"sk-test\" | sbx secret set anthropic --sandbox global -f")
+    );
+    assert!(app.message().contains("for global"));
+}
+
+#[test]
+fn set_custom_secret_opens_with_the_same_scope_snapshot() {
+    let mut app = App::with_sandboxes(&["alpha", "beta"]);
+    app.set_custom_secret();
+
+    assert!(matches!(app.mode(), Mode::SetCustomSecret));
+    assert!(app.modals_ref().is_open(SET_CUSTOM_SECRET_DIALOG));
+    let form = app.custom_secret_form().unwrap();
+    assert_eq!(form.scopes(), &["(global)", "alpha", "beta"]);
+    assert_eq!(form.scope(), Some("(global)"));
+    assert_eq!(form.hosts().len(), 1);
+}
+
+#[test]
+fn setting_a_global_custom_secret_matches_the_documented_command() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_custom_secret();
+    app.set_custom_env_key(InputState::new("API_KEY"));
+    app.set_custom_secret_value(InputState::new("test"));
+    app.set_custom_host(0, InputState::new("api.example.com"));
+    app.add_custom_host();
+    app.set_custom_host(1, InputState::new("uploads.example.com"));
+    app.submit_custom_secret();
+
+    assert_eq!(
+        app.take_set_for_test().as_deref(),
+        Some(
+            "sbx secret set-custom --host api.example.com --host uploads.example.com --env API_KEY --value test"
+        )
+    );
+    assert!(!app.modals_ref().is_open(SET_CUSTOM_SECRET_DIALOG));
+}
+
+#[test]
+fn setting_a_scoped_custom_secret_passes_the_sandbox_flag() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_custom_secret();
+    app.set_custom_scope(1); // alpha
+    app.set_custom_env_key(InputState::new("API_KEY"));
+    app.set_custom_secret_value(InputState::new("test"));
+    app.set_custom_host(0, InputState::new("*.example.com"));
+    app.submit_custom_secret();
+
+    assert_eq!(
+        app.take_set_for_test().as_deref(),
+        Some("sbx secret set-custom --sandbox alpha --host *.example.com --env API_KEY --value test")
+    );
+    assert!(app.message().contains("API_KEY"));
+}
+
+#[test]
+fn shell_quoting_keeps_the_pipeline_intact() {
+    let mut app = App::with_sandboxes(&["my sandbox"]);
+    app.set_secret();
+    app.set_secret_scope(1);
+    app.set_secret_state(InputState::new("say \"hi\" $HOME"));
+    app.submit_secret();
+
+    assert_eq!(
+        app.take_set_for_test().as_deref(),
+        Some(
+            "echo \"say \\\"hi\\\" \\$HOME\" | sbx secret set anthropic --sandbox \"my sandbox\" -f"
+        )
+    );
+}
+
+#[test]
+fn setting_a_secret_requires_a_value() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_secret();
+    app.submit_secret();
+
+    assert!(app.take_set_for_test().is_none());
+    assert!(app.modals_ref().is_open(SET_SECRET_DIALOG));
+    assert!(app.secret_form().unwrap().attempted());
+    assert!(app.message().contains("Enter a secret value"));
+}
+
+#[test]
+fn existing_secret_waits_for_overwrite_confirmation() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_secret();
+    app.set_secret_service(3); // github
+    app.set_secret_scope(1); // alpha
+    app.set_secret_state(InputState::new("sk-test"));
+    app.set_secret_exists_for_test(true);
+    app.submit_secret();
+
+    assert_eq!(
+        app.pending_action(),
+        Some(&PendingAction::OverwriteSecret(
+            "github".to_owned(),
+            "alpha".to_owned()
+        ))
+    );
+    assert!(matches!(app.mode(), Mode::Confirm));
+    assert!(app.modals_ref().is_open(CONFIRM_DIALOG));
+    assert!(app.modals_ref().is_open(SET_SECRET_DIALOG));
+    assert_eq!(app.secret_form().unwrap().secret().value(), "sk-test");
+    assert!(app.take_set_for_test().is_none());
+}
+
+#[test]
+fn cancelling_an_overwrite_keeps_the_secret_form() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_secret();
+    app.set_secret_state(InputState::new("sk-test"));
+    app.set_secret_exists_for_test(true);
+    app.submit_secret();
+    app.cancel_action();
+
+    assert!(app.pending_action().is_none());
+    assert!(!app.modals_ref().is_open(CONFIRM_DIALOG));
+    assert!(app.modals_ref().is_open(SET_SECRET_DIALOG));
+    assert_eq!(app.secret_form().unwrap().secret().value(), "sk-test");
+    assert!(app.take_set_for_test().is_none());
+    assert_eq!(app.message(), "Overwrite secret cancelled.");
+}
+
+#[test]
+fn confirming_an_overwrite_sets_the_secret() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_secret();
+    app.set_secret_service(3); // github
+    app.set_secret_scope(1); // alpha
+    app.set_secret_state(InputState::new("sk-test"));
+    app.set_secret_exists_for_test(true);
+    app.submit_secret();
+    app.confirm_action();
+
+    assert_eq!(
+        app.take_set_for_test().as_deref(),
+        Some("echo \"sk-test\" | sbx secret set github --sandbox alpha -f")
+    );
+    assert_eq!(
+        app.take_confirmed_for_test(),
+        Some(PendingAction::OverwriteSecret(
+            "github".to_owned(),
+            "alpha".to_owned()
+        ))
+    );
+    assert!(!app.modals_ref().is_open(CONFIRM_DIALOG));
+    assert!(!app.modals_ref().is_open(SET_SECRET_DIALOG));
+    assert!(app.secret_form().is_none());
+    assert!(app.message().contains("Set secret 'github' for alpha."));
+}
+
+#[test]
+fn existing_custom_secret_waits_for_overwrite_confirmation() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_custom_secret();
+    app.set_custom_scope(1); // alpha
+    app.set_custom_env_key(InputState::new("TEST_KEY"));
+    app.set_custom_secret_value(InputState::new("sk-test"));
+    app.set_custom_host(0, InputState::new("api.example.com"));
+    app.set_secret_exists_for_test(true);
+    app.submit_custom_secret();
+
+    assert_eq!(
+        app.pending_action(),
+        Some(&PendingAction::OverwriteCustomSecret(
+            "TEST_KEY".to_owned(),
+            "alpha".to_owned(),
+            "docker-placeholder-value".to_owned()
+        ))
+    );
+    assert!(matches!(app.mode(), Mode::Confirm));
+    assert!(app.modals_ref().is_open(CONFIRM_DIALOG));
+    assert!(app.modals_ref().is_open(SET_CUSTOM_SECRET_DIALOG));
+    assert!(app.take_deleted_for_test().is_none());
+    assert_eq!(
+        app.custom_secret_form().unwrap().secret().value(),
+        "sk-test"
+    );
+    assert!(app.take_set_for_test().is_none());
+}
+
+#[test]
+fn cancelling_a_custom_overwrite_keeps_the_custom_form() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_custom_secret();
+    app.set_custom_env_key(InputState::new("TEST_KEY"));
+    app.set_custom_secret_value(InputState::new("sk-test"));
+    app.set_custom_host(0, InputState::new("api.example.com"));
+    app.set_secret_exists_for_test(true);
+    app.submit_custom_secret();
+    app.cancel_action();
+
+    assert!(app.pending_action().is_none());
+    assert!(!app.modals_ref().is_open(CONFIRM_DIALOG));
+    assert!(app.modals_ref().is_open(SET_CUSTOM_SECRET_DIALOG));
+    assert_eq!(
+        app.custom_secret_form().unwrap().secret().value(),
+        "sk-test"
+    );
+    assert!(app.take_set_for_test().is_none());
+    assert!(app.take_deleted_for_test().is_none());
+    assert_eq!(app.message(), "Overwrite secret cancelled.");
+}
+
+#[test]
+fn confirming_a_custom_overwrite_sets_the_custom_secret() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_custom_secret();
+    app.set_custom_scope(1); // alpha
+    app.set_custom_env_key(InputState::new("TEST_KEY"));
+    app.set_custom_secret_value(InputState::new("sk-test"));
+    app.set_custom_host(0, InputState::new("api.example.com"));
+    app.set_secret_exists_for_test(true);
+    app.submit_custom_secret();
+    app.confirm_action();
+
+    assert_eq!(
+        app.take_deleted_for_test().as_deref(),
+        Some("sbx secret rm --placeholder docker-placeholder-value --sandbox alpha -f")
+    );
+    assert_eq!(
+        app.take_set_for_test().as_deref(),
+        Some(
+            "sbx secret set-custom --sandbox alpha --host api.example.com --env TEST_KEY --value sk-test"
+        )
+    );
+    assert_eq!(
+        app.take_confirmed_for_test(),
+        Some(PendingAction::OverwriteCustomSecret(
+            "TEST_KEY".to_owned(),
+            "alpha".to_owned(),
+            "docker-placeholder-value".to_owned()
+        ))
+    );
+    assert!(!app.modals_ref().is_open(CONFIRM_DIALOG));
+    assert!(!app.modals_ref().is_open(SET_CUSTOM_SECRET_DIALOG));
+    assert!(app.custom_secret_form().is_none());
+    assert!(app.message().contains("Set custom secret 'TEST_KEY'."));
+}
+
+#[test]
+fn a_queued_custom_secret_lookup_opens_the_overwrite_confirmation() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_custom_secret();
+    app.set_custom_scope(1);
+    app.set_custom_env_key(InputState::new("TEST_KEY"));
+    app.queue_job_result_for_test(JobResult::CustomSecretExists {
+        env_key: "TEST_KEY".to_owned(),
+        scope: "alpha".to_owned(),
+        result: Ok(Some("docker-placeholder-value".to_owned())),
+    });
+    app.poll_jobs();
+
+    assert_eq!(
+        app.pending_action(),
+        Some(&PendingAction::OverwriteCustomSecret(
+            "TEST_KEY".to_owned(),
+            "alpha".to_owned(),
+            "docker-placeholder-value".to_owned()
+        ))
+    );
+    assert!(matches!(app.mode(), Mode::Confirm));
+}
+
+#[test]
+fn a_removed_custom_secret_is_then_set_with_the_new_value() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_custom_secret();
+    app.set_custom_scope(1);
+    app.set_custom_env_key(InputState::new("TEST_KEY"));
+    app.set_custom_secret_value(InputState::new("sk-test"));
+    app.set_custom_host(0, InputState::new("api.example.com"));
+    app.queue_job_result_for_test(JobResult::CustomSecretRemoved {
+        env_key: "TEST_KEY".to_owned(),
+        scope: "alpha".to_owned(),
+        result: Ok(fake_output(true, "")),
+    });
+    app.poll_jobs();
+
+    assert_eq!(
+        app.take_set_for_test().as_deref(),
+        Some(
+            "sbx secret set-custom --sandbox alpha --host api.example.com --env TEST_KEY --value sk-test"
+        )
+    );
+    assert!(app.message().contains("Set custom secret 'TEST_KEY'."));
+}
+
+#[test]
+fn a_successful_custom_secret_set_refreshes_the_secrets_table() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_custom_secret();
+    let before = app.secret_refreshes_for_test();
+    app.queue_job_result_for_test(JobResult::CustomSecretSet {
+        success: "Set custom secret 'TEST_KEY'.".to_owned(),
+        result: Ok(fake_output(true, "")),
+    });
+
+    app.poll_jobs();
+
+    assert_eq!(app.secret_refreshes_for_test(), before + 1);
+    assert!(app.custom_secret_form().is_none());
+    assert!(app.message().contains("Set custom secret 'TEST_KEY'."));
+}
+
+#[test]
+fn a_failed_custom_secret_removal_does_not_set_the_new_value() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_custom_secret();
+    app.set_custom_env_key(InputState::new("TEST_KEY"));
+    app.set_custom_secret_value(InputState::new("sk-test"));
+    app.set_custom_host(0, InputState::new("api.example.com"));
+    app.queue_job_result_for_test(JobResult::CustomSecretRemoved {
+        env_key: "TEST_KEY".to_owned(),
+        scope: GLOBAL_SCOPE.to_owned(),
+        result: Ok(fake_output(false, "placeholder not found")),
+    });
+    app.poll_jobs();
+
+    assert!(app.take_set_for_test().is_none());
+    assert!(app.message().contains("Could not overwrite custom secret"));
+    assert!(app.message().contains("placeholder not found"));
+}
+
+#[test]
+fn a_custom_overwrite_is_cancelled_when_the_env_key_changes() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_custom_secret();
+    app.set_custom_env_key(InputState::new("TEST_KEY"));
+    app.set_custom_secret_value(InputState::new("sk-test"));
+    app.set_custom_host(0, InputState::new("api.example.com"));
+    app.set_secret_exists_for_test(true);
+    app.submit_custom_secret();
+    app.set_custom_env_key(InputState::new("OTHER_KEY"));
+    app.confirm_action();
+
+    assert!(app.take_set_for_test().is_none());
+    assert!(app.message().contains("Secret form is no longer available"));
+}
+
+#[test]
+fn existing_secret_lookup_targets_the_service_and_scope() {
+    assert_eq!(
+        App::secret_lookup_command("github", "alpha").preview(),
+        "sbx secret ls --sandbox alpha --service github --format json"
+    );
+    assert_eq!(
+        App::secret_lookup_command("github", "(global)").preview(),
+        "sbx secret ls --global --service github --format json"
+    );
+    assert_eq!(
+        App::secret_lookup_command("github", "global").preview(),
+        "sbx secret ls --sandbox global --service github --format json"
+    );
+}
+
+#[test]
+fn cancelling_set_secret_runs_nothing() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_secret();
+    app.cancel_set_secret();
+
+    assert!(app.secret_form().is_none());
+    assert!(matches!(app.mode(), Mode::Normal));
+    assert_eq!(app.message(), "Set secret cancelled.");
+    assert!(app.take_set_for_test().is_none());
+}
+
+#[test]
+fn shell_preview_shows_the_pipeline_not_the_wrapper() {
+    let command = PendingCommand::shell("echo \"x\" | sbx secret set github -f");
+    assert_eq!(command.preview(), "echo \"x\" | sbx secret set github -f");
+}
+
+#[test]
+fn deleting_a_global_secret_waits_for_confirmation() {
+    let mut app = App::with_secrets(&[("(global)", "github")]);
+    app.delete_secret("github", "(global)");
+    assert_eq!(
+        app.pending_action(),
+        Some(&PendingAction::DeleteSecret(
+            "github".to_owned(),
+            "(global)".to_owned()
+        ))
+    );
+    assert!(matches!(app.mode(), Mode::Confirm));
+    assert!(app.modals_ref().is_open(CONFIRM_DIALOG));
+    assert!(app.take_deleted_for_test().is_none());
+
+    app.confirm_action();
+    assert_eq!(
+        app.take_confirmed_for_test(),
+        Some(PendingAction::DeleteSecret(
+            "github".to_owned(),
+            "(global)".to_owned()
+        ))
+    );
+    assert_eq!(
+        app.take_deleted_for_test().as_deref(),
+        Some("sbx secrets rm github -f")
+    );
+}
+
+#[test]
+fn deleting_a_secret_from_a_sandbox_named_global_keeps_the_flag() {
+    let mut app = App::with_secrets(&[("global", "github")]);
+    app.delete_secret("github", "global");
+    app.confirm_action();
+
+    assert_eq!(
+        app.take_deleted_for_test().as_deref(),
+        Some("sbx secrets rm github --sandbox global -f")
+    );
+}
+
+#[test]
+fn deleting_a_scoped_secret_targets_its_sandbox() {
+    let mut app = App::with_secrets(&[("test", "nebius")]);
+    app.delete_secret("nebius", "test");
+    assert_eq!(
+        app.pending_action(),
+        Some(&PendingAction::DeleteSecret(
+            "nebius".to_owned(),
+            "test".to_owned()
+        ))
+    );
+    app.confirm_action();
+    assert_eq!(
+        app.take_deleted_for_test().as_deref(),
+        Some("sbx secrets rm nebius --sandbox test -f")
+    );
+}
+
+#[test]
+fn deleting_a_custom_secret_removes_it_by_placeholder_and_scope() {
+    let mut app = App::with_secrets(&[]);
+    app.set_secrets_for_test(vec![
+        Secret::custom("test", "API_KEY", Vec::<String>::new()).with_placeholder("sbx-cs-123"),
+    ]);
+    app.delete_custom_secret("API_KEY", "test", "sbx-cs-123");
+    assert_eq!(
+        app.pending_action(),
+        Some(&PendingAction::DeleteCustomSecret(
+            "API_KEY".to_owned(),
+            "test".to_owned(),
+            "sbx-cs-123".to_owned()
+        ))
+    );
+    assert!(app.modals_ref().is_open(CONFIRM_DIALOG));
+    assert!(app.take_deleted_for_test().is_none());
+
+    app.confirm_action();
+    assert_eq!(
+        app.take_deleted_for_test().as_deref(),
+        Some("sbx secret rm --placeholder sbx-cs-123 --sandbox test -f")
+    );
+}
+
+#[test]
+fn deleting_a_global_custom_secret_omits_the_sandbox_flag() {
+    let mut app = App::with_secrets(&[]);
+    app.set_secrets_for_test(vec![
+        Secret::custom("(global)", "TOKEN", Vec::<String>::new()).with_placeholder("sbx-cs-global"),
+    ]);
+    app.delete_custom_secret("TOKEN", "(global)", "sbx-cs-global");
+    app.confirm_action();
+
+    assert_eq!(
+        app.take_deleted_for_test().as_deref(),
+        Some("sbx secret rm --placeholder sbx-cs-global -f")
+    );
+}
+
+#[test]
+fn custom_secret_delete_is_skipped_when_the_row_is_gone() {
+    let mut app = App::with_secrets(&[]);
+    app.set_secrets_for_test(vec![
+        Secret::custom("test", "API_KEY", Vec::<String>::new()).with_placeholder("sbx-cs-123"),
+    ]);
+    app.delete_custom_secret("API_KEY", "test", "sbx-cs-123");
+    app.set_secrets_for_test(Vec::new());
+    app.confirm_action();
+
+    assert!(app.take_deleted_for_test().is_none());
+    assert_eq!(
+        app.message(),
+        "Secret is no longer listed; action cancelled."
+    );
+}
+
+#[test]
+fn cancelling_a_secret_delete_runs_nothing() {
+    let mut app = App::with_secrets(&[("(global)", "github")]);
+    app.delete_secret("github", "(global)");
+    app.cancel_action();
+
+    assert!(app.pending_action().is_none());
+    assert!(matches!(app.mode(), Mode::Normal));
+    assert_eq!(app.message(), "Delete secret cancelled.");
+    assert!(app.take_deleted_for_test().is_none());
+    assert!(app.take_confirmed_for_test().is_none());
+}
+
+#[test]
+fn secret_delete_is_skipped_when_the_row_is_gone() {
+    let mut app = App::with_secrets(&[("test", "nebius")]);
+    app.delete_secret("nebius", "test");
+    app.set_secrets_for_test(Vec::new());
+    app.confirm_action();
+
+    assert!(app.take_deleted_for_test().is_none());
+    assert!(app.take_confirmed_for_test().is_none());
+    assert_eq!(
+        app.message(),
+        "Secret is no longer listed; action cancelled."
+    );
 }

@@ -8,14 +8,24 @@ use std::sync::mpsc;
 
 use ratcn::Toast;
 
-use super::workers::{CREATE_TOAST, Creation, InfoRefresh};
+use super::workers::{CREATE_TOAST, Creation, InfoRefresh, JobResult};
 use super::{
     App, CREATE_DIALOG, INFO_DIALOG, PORTS_DIALOG, PendingAction, PortMapping, PortsView, Sandbox,
-    SandboxDetails,
+    SandboxDetails, Secret,
 };
 
 #[cfg(test)]
 impl App {
+    /// Build an app as the host does, optionally with the first-run dialog.
+    pub fn with_policy_setup(needs_setup: bool) -> Self {
+        let mut app = Self::new();
+        if needs_setup {
+            app.require_policy_setup();
+        }
+        app.start();
+        app
+    }
+
     /// Put the app into the same state `start_creation` does, without spawning
     /// a real `sbx` process. The sender is dropped, so `poll_creation` observes
     /// a disconnected worker.
@@ -63,20 +73,65 @@ impl App {
         app
     }
 
+    /// Populate the Secrets table without calling `sbx secret ls`.
+    pub fn with_secrets(entries: &[(&str, &str)]) -> Self {
+        let mut app = Self::new();
+        app.set_secrets_for_test(
+            entries
+                .iter()
+                .map(|(scope, name)| Secret::new(*scope, *name))
+                .collect(),
+        );
+        app
+    }
+
+    /// Replace the Secrets table without calling `sbx secret ls`.
+    pub fn set_secrets_for_test(&mut self, secrets: Vec<Secret>) {
+        self.secrets = secrets;
+    }
+
     pub fn show_info_for_test(&mut self, details: SandboxDetails) {
+        self.secret_info = None;
         self.info = Some(details);
+        let _ = self.modals.open(INFO_DIALOG, &mut self.focus);
+    }
+
+    /// Open the Info dialog on a secret row without a click, for render tests.
+    pub fn show_secret_info_for_test(&mut self, secret: Secret) {
+        self.info = None;
+        self.info_refresh = None;
+        self.secret_info = Some(secret);
         let _ = self.modals.open(INFO_DIALOG, &mut self.focus);
     }
 
     /// Open the ports dialog with a known table, without calling `sbx`.
     pub fn show_ports_for_test(&mut self, name: &str, ports: Vec<PortMapping>) {
         self.select_named(name);
+        self.ports_token = self.ports_token.wrapping_add(1);
         self.ports = Some(PortsView {
             name: name.to_owned(),
             ports,
             error: None,
+            loading: false,
+            token: self.ports_token,
         });
         let _ = self.modals.open(PORTS_DIALOG, &mut self.focus);
+    }
+
+    /// Put a fake CLI result on the same channel real workers use, so `poll_jobs`
+    /// can be exercised without shelling out.
+    pub(super) fn queue_job_result_for_test(&self, result: JobResult) {
+        self.jobs.queue_for_test(result);
+    }
+
+    /// How many secret-list refreshes have been queued, for table-update tests.
+    pub(super) fn secret_refreshes_for_test(&self) -> usize {
+        self.secret_refreshes_for_test
+    }
+
+    /// The token of the dialog's current port listing, for stale-result tests.
+    pub(super) fn ports_token_for_test(&self) -> u64 {
+        self.ports_token
     }
 
     /// Point the form at a test directory so the folder picker has real
@@ -95,6 +150,22 @@ impl App {
         self.unpublished_for_test.take()
     }
 
+    /// The command a secret's Delete button handed to the test hook.
+    pub fn take_deleted_for_test(&mut self) -> Option<String> {
+        self.deleted_for_test.take()
+    }
+
+    /// The command a Set secret or Set custom secret dialog handed to the hook.
+    pub fn take_set_for_test(&mut self) -> Option<String> {
+        self.set_for_test.take()
+    }
+
+    /// Make the pre-set `sbx secret ls` lookup report an existing secret, so
+    /// the overwrite confirmation can be exercised without shelling out.
+    pub fn set_secret_exists_for_test(&mut self, exists: bool) {
+        self.secret_exists_for_test = Some(exists);
+    }
+
     /// Queue a fake metrics result so `poll_info` can be tested without
     /// running `sbx exec` inside the guest.
     pub fn queue_info_result_for_test(&mut self, name: &str, details: SandboxDetails) {
@@ -110,6 +181,11 @@ impl App {
     /// this instead of letting the app shell out to `sbx`.
     pub fn take_confirmed_for_test(&mut self) -> Option<PendingAction> {
         self.confirmed_for_test.take()
+    }
+
+    /// The `sbx policy init` command chosen by the first-run dialog.
+    pub fn take_policy_command_for_test(&mut self) -> Option<String> {
+        self.policy_command_for_test.take()
     }
 }
 

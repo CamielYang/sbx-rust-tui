@@ -7,6 +7,9 @@ pub struct PendingCommand {
     pub(super) program: String,
     pub(super) args: Vec<String>,
     pub(super) env: Vec<(String, String)>,
+    /// Shell spelling of a pipeline, kept so `preview` shows the command the
+    /// user typed rather than the `sh -c` / `cmd /C` wrapper that runs it.
+    pub(super) shell_preview: Option<String>,
 }
 
 impl PendingCommand {
@@ -15,12 +18,33 @@ impl PendingCommand {
             program: program.to_owned(),
             args: args.iter().map(|arg| (*arg).to_owned()).collect(),
             env: Vec::new(),
+            shell_preview: None,
+        }
+    }
+
+    /// A command that needs a shell pipeline, such as piping a secret into
+    /// `sbx secret set`. Program arguments carry the script; `preview` reports
+    /// the script itself.
+    pub fn shell(command: impl Into<String>) -> Self {
+        let command = command.into();
+        #[cfg(windows)]
+        let (program, switch) = ("cmd", "/C");
+        #[cfg(not(windows))]
+        let (program, switch) = ("sh", "-c");
+        Self {
+            program: program.to_owned(),
+            args: vec![switch.to_owned(), command.clone()],
+            env: Vec::new(),
+            shell_preview: Some(command),
         }
     }
 
     /// The exact shell spelling of this command, used for the external
     /// terminal and for tests.
     pub fn preview(&self) -> String {
+        if let Some(command) = &self.shell_preview {
+            return command.clone();
+        }
         let mut parts = self
             .env
             .iter()

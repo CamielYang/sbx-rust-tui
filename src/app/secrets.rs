@@ -1,0 +1,1094 @@
+//! Reading the secret inventory shown in the Secrets tab.
+
+use serde_json::Value;
+
+use super::sandbox::{Sandbox, fetch_sandboxes, json_text};
+use super::secret_form::{CustomSecretForm, GLOBAL_SCOPE, SecretForm, is_global_scope};
+use super::{
+    App, CONFIRM_DIALOG, Mode, PendingAction, PendingCommand, SET_CUSTOM_SECRET_DIALOG,
+    SET_SECRET_DIALOG, service_info,
+};
+
+/// The name shown for custom secrets, which have no service name in the CLI.
+const CUSTOM_SECRET_NAME: &str = "(custom)";
+
+/// One row of a scoped `sbx secret ls --json`, reduced to the fields the
+/// dashboard table shows. Service metadata is resolved from the name so a row
+/// carries everything its info dialog needs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Secret {
+    pub scope: String,
+    pub name: String,
+    pub env_vars: Vec<String>,
+    pub api_domains: Vec<String>,
+    /// Custom secrets have no service name and can only be removed by the
+    /// placeholder printed in the CLI listing. Service secrets have none.
+    pub placeholder: Option<String>,
+}
+
+/// Stable identity for a clicked row. Service rows are keyed by their name;
+/// custom rows all display `(custom)`, so they are keyed by the env name that
+/// makes them unique within a scope — the same `(scope, env_name)` pair used by
+/// `sbx secret ls --env-name <key>`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SecretId {
+    Service(String),
+    Custom(String),
+}
+
+impl Secret {
+    pub fn new(scope: impl Into<String>, name: impl Into<String>) -> Self {
+        let name = name.into();
+        let info = service_info(&name);
+        Self {
+            scope: scope.into(),
+            name: name.clone(),
+            // An unknown service is treated as a custom key: the name itself is
+            // the variable it sets. Known services use their catalog metadata.
+            env_vars: info.map_or_else(
+                || vec![name.clone()],
+                |info| info.env_vars.iter().map(|env| (*env).to_owned()).collect(),
+            ),
+            api_domains: info.map_or_else(Vec::new, |info| {
+                info.api_domains
+                    .iter()
+                    .map(|domain| (*domain).to_owned())
+                    .collect()
+            }),
+            placeholder: None,
+        }
+    }
+
+    /// A row from `custom_secrets`. The CLI has no service name for it, so the
+    /// table shows `(custom)` while the env key and target hosts come from the
+    /// row itself.
+    pub fn custom(
+        scope: impl Into<String>,
+        env: impl Into<String>,
+        targets: impl Into<Vec<String>>,
+    ) -> Self {
+        Self {
+            scope: scope.into(),
+            name: CUSTOM_SECRET_NAME.to_owned(),
+            env_vars: vec![env.into()],
+            api_domains: targets.into(),
+            placeholder: None,
+        }
+    }
+
+    /// Keep the placeholder the CLI needs for `sbx secret rm --placeholder`.
+    pub fn with_placeholder(mut self, placeholder: impl Into<String>) -> Self {
+        self.placeholder = Some(placeholder.into());
+        self
+    }
+
+    /// A custom row has no service name; its env key stands in for one.
+    pub fn is_custom(&self) -> bool {
+        self.name == CUSTOM_SECRET_NAME
+    }
+
+    /// The env key of a custom row, used in place of `(custom)` in prompts.
+    pub fn env_key(&self) -> Option<&str> {
+        if self.is_custom() {
+            self.env_vars.first().map(String::as_str)
+        } else {
+            None
+        }
+    }
+
+    /// The ENV VAR cell and the info dialog's value for one row.
+    pub fn env_vars_label(&self) -> String {
+        self.env_vars.join(", ")
+    }
+
+    /// The identity a row click carries. Custom rows use their env key, not the
+    /// shared `(custom)` display name, so two custom rows stay distinguishable.
+    pub fn id(&self) -> SecretId {
+        match self.env_key() {
+            Some(env_key) => SecretId::Custom(env_key.to_owned()),
+            None => SecretId::Service(self.name.clone()),
+        }
+    }
+
+    /// Match a clicked identity against this row. The scope is checked by the
+    /// caller, so only the row-specific half lives here.
+    pub fn matches_id(&self, id: &SecretId) -> bool {
+        match id {
+            SecretId::Service(name) => !self.is_custom() && self.name.as_str() == name.as_str(),
+            SecretId::Custom(env_key) => self.env_key() == Some(env_key.as_str()),
+        }
+    }
+}
+
+/// `sbx secret ls -g --json` for the global store, or
+/// `sbx secret ls --sandbox <name> --json` for one sandbox.
+fn secret_list_command(scope: Option<&str>) -> PendingCommand {
+    let mut args = vec!["secret", "ls"];
+    match scope {
+        None => args.extend(["-g", "--json"]),
+        Some(sandbox) => args.extend(["--sandbox", sandbox, "--json"]),
+    }
+    PendingCommand::new("sbx", &args)
+}
+
+/// Run one scope's listing and label every row with that scope. The CLI calls
+/// global secrets "global", while the table and the Set dialog use
+/// `"(global)"`, so the requested label wins over the JSON field.
+fn fetch_secret_scope(scope: Option<&str>, label: &str) -> Result<Vec<Secret>, String> {
+    let command = secret_list_command(scope);
+    let output = command.run().map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let detail = if stderr.is_empty() {
+            format!("exited with {}", output.status)
+        } else {
+            stderr
+        };
+        return Err(format!("{}: {detail}", command.preview()));
+    }
+    parse_secrets(&output.stdout, label)
+}
+
+/// List stored secrets across the global store and every sandbox. The CLI
+/// reports actual values as `(stored)`, so nothing sensitive is kept in state.
+#[allow(dead_code)] // Public entry point; the dashboard uses `fetch_secrets_for`.
+pub fn fetch_secrets() -> Result<Vec<Secret>, String> {
+    let sandboxes = fetch_sandboxes().unwrap_or_default();
+    fetch_secrets_for(&sandboxes)
+}
+
+/// The same listing for callers that already know their sandboxes.
+pub fn fetch_secrets_for(sandboxes: &[Sandbox]) -> Result<Vec<Secret>, String> {
+    let mut secrets = fetch_secret_scope(None, GLOBAL_SCOPE)?;
+    for sandbox in sandboxes {
+        secrets.extend(fetch_secret_scope(Some(&sandbox.name), &sandbox.name)?);
+    }
+    Ok(secrets)
+}
+
+/// Both `secrets` and `custom_secrets` from one scoped listing. The latter has
+/// no service of its own, but it still belongs to the scope being queried.
+fn parse_secrets(bytes: &[u8], scope: &str) -> Result<Vec<Secret>, String> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+    let mut secrets = Vec::new();
+
+    let Some(rows) = value.get("secrets").and_then(Value::as_array) else {
+        return Err("sbx secret ls did not include a secret list".to_owned());
+    };
+    for row in rows {
+        if let Some(name) = json_text(row, &["name", "service"]) {
+            secrets.push(Secret::new(scope, name));
+        }
+    }
+
+    if let Some(rows) = value.get("custom_secrets").and_then(Value::as_array) {
+        for row in rows {
+            // Current listings use `env`; older ones keyed the row by `env_name`.
+            let Some(env) = json_text(row, &["env", "env_name"]) else {
+                continue;
+            };
+            let mut targets = json_strings(row.get("targets"));
+            if targets.is_empty()
+                && let Some(host) = json_text(row, &["host"])
+            {
+                targets.push(host);
+            }
+            let mut secret = Secret::custom(scope, env, targets);
+            if let Some(placeholder) = json_text(row, &["placeholder"]) {
+                secret = secret.with_placeholder(placeholder);
+            }
+            secrets.push(secret);
+        }
+    }
+
+    Ok(secrets)
+}
+
+/// Read an array of strings, e.g. a custom secret's `targets` hosts.
+fn json_strings(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether a scoped `sbx secret ls --format json` reports a stored secret.
+/// Custom secrets are keyed by env name rather than service, so only the
+/// `secrets` array answers the overwrite question.
+fn parse_secret_exists(bytes: &[u8]) -> Result<bool, String> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+    let secrets = value
+        .get("secrets")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "sbx secret ls did not include a secret list".to_owned())?;
+    Ok(!secrets.is_empty())
+}
+
+/// Whether `--env-name` filtered out every stored custom secret. Filtered
+/// listings contain only `custom_secrets`, so that is the array to inspect.
+fn parse_custom_secret_exists(bytes: &[u8]) -> Result<bool, String> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+    let custom_secrets = value
+        .get("custom_secrets")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "sbx secret ls did not include a custom secret list".to_owned())?;
+    Ok(!custom_secrets.is_empty())
+}
+
+/// The placeholder `sbx secret rm --placeholder` needs to remove the existing
+/// custom secret. The filtered listing carries it on each returned row.
+fn parse_custom_secret_placeholder(bytes: &[u8]) -> Result<String, String> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+    let custom_secrets = value
+        .get("custom_secrets")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "sbx secret ls did not include a custom secret list".to_owned())?;
+    let placeholder = custom_secrets
+        .first()
+        .and_then(|row| json_text(row, &["placeholder"]))
+        .ok_or_else(|| {
+            "sbx secret ls did not include a placeholder for the custom secret".to_owned()
+        })?;
+    Ok(placeholder)
+}
+
+impl App {
+    /// A queued deletion is skipped if the row is no longer in the table when
+    /// the dialog is confirmed (e.g. after a manual Refresh).
+    pub(super) fn has_secret(&self, name: &str, scope: &str) -> bool {
+        self.secrets
+            .iter()
+            .any(|secret| secret.name == name && secret.scope == scope)
+    }
+
+    /// Custom rows are keyed by env name, not by their `(custom)` display name.
+    pub(super) fn has_custom_secret(&self, env_key: &str, scope: &str) -> bool {
+        self.secrets.iter().any(|secret| {
+            secret.is_custom() && secret.env_key() == Some(env_key) && secret.scope == scope
+        })
+    }
+
+    /// Open the Set secret dialog. Scope options are snapshot from the current
+    /// sandbox list, with `"(global)"` first.
+    pub fn set_secret(&mut self) {
+        if self.mode() != Mode::Normal {
+            return;
+        }
+        self.secret_form = Some(SecretForm::new(&self.sandboxes));
+        let _ = self.modals.open(SET_SECRET_DIALOG, &mut self.focus);
+    }
+
+    pub fn cancel_set_secret(&mut self) {
+        self.close_modal(SET_SECRET_DIALOG);
+        self.secret_form = None;
+        self.notify_info("Set secret cancelled.", None);
+    }
+
+    pub fn set_secret_service_open(&mut self, open: bool) {
+        if let Some(form) = self.secret_form.as_mut() {
+            form.set_service_open(open);
+        }
+    }
+
+    pub fn set_secret_service_focus(&mut self, index: usize) {
+        if let Some(form) = self.secret_form.as_mut() {
+            form.set_service_focus(index);
+        }
+    }
+
+    pub fn set_secret_service(&mut self, index: usize) {
+        if let Some(form) = self.secret_form.as_mut() {
+            form.set_service_index(index);
+        }
+    }
+
+    pub fn set_secret_scope_open(&mut self, open: bool) {
+        if let Some(form) = self.secret_form.as_mut() {
+            form.set_scope_open(open);
+        }
+    }
+
+    pub fn set_secret_scope_focus(&mut self, index: usize) {
+        if let Some(form) = self.secret_form.as_mut() {
+            form.set_scope_focus(index);
+        }
+    }
+
+    pub fn set_secret_scope(&mut self, index: usize) {
+        if let Some(form) = self.secret_form.as_mut() {
+            form.set_scope_index(index);
+        }
+    }
+
+    pub fn set_secret_state(&mut self, state: ratcn::InputState) {
+        if let Some(form) = self.secret_form.as_mut() {
+            form.set_secret(state);
+        }
+    }
+
+    /// Open the Set custom secret dialog with one empty host row. Its scope
+    /// options are the same snapshot as Set secret: `(global)`, then every
+    /// sandbox, with a sandbox scope becoming `--sandbox` on the CLI.
+    pub fn set_custom_secret(&mut self) {
+        if self.mode() != Mode::Normal {
+            return;
+        }
+        self.custom_secret_form = Some(CustomSecretForm::new(&self.sandboxes));
+        let _ = self.modals.open(SET_CUSTOM_SECRET_DIALOG, &mut self.focus);
+    }
+
+    pub fn cancel_custom_secret(&mut self) {
+        self.close_modal(SET_CUSTOM_SECRET_DIALOG);
+        self.custom_secret_form = None;
+        self.notify_info("Set custom secret cancelled.", None);
+    }
+
+    pub fn set_custom_env_key(&mut self, state: ratcn::InputState) {
+        if let Some(form) = self.custom_secret_form.as_mut() {
+            form.set_env_key(state);
+        }
+    }
+
+    pub fn set_custom_secret_value(&mut self, state: ratcn::InputState) {
+        if let Some(form) = self.custom_secret_form.as_mut() {
+            form.set_secret(state);
+        }
+    }
+
+    pub fn set_custom_scope_open(&mut self, open: bool) {
+        if let Some(form) = self.custom_secret_form.as_mut() {
+            form.set_scope_open(open);
+        }
+    }
+
+    pub fn set_custom_scope_focus(&mut self, index: usize) {
+        if let Some(form) = self.custom_secret_form.as_mut() {
+            form.set_scope_focus(index);
+        }
+    }
+
+    pub fn set_custom_scope(&mut self, index: usize) {
+        if let Some(form) = self.custom_secret_form.as_mut() {
+            form.set_scope_index(index);
+        }
+    }
+
+    pub fn set_custom_host(&mut self, index: usize, state: ratcn::InputState) {
+        if let Some(form) = self.custom_secret_form.as_mut() {
+            form.set_host(index, state);
+        }
+    }
+
+    pub fn add_custom_host(&mut self) {
+        if let Some(form) = self.custom_secret_form.as_mut() {
+            form.add_host();
+        }
+    }
+
+    /// Validate and submit the custom form. As with a service secret, look for
+    /// an existing entry first: overwriting one goes through the shared
+    /// confirmation dialog, stacked above the form so a cancel returns with the
+    /// typed values intact. The value travels as a plain CLI argument, so no
+    /// shell quoting is needed around the secret.
+    pub fn submit_custom_secret(&mut self) {
+        if self.mode() != Mode::SetCustomSecret {
+            return;
+        }
+        let Some(form) = self.custom_secret_form.as_mut() else {
+            return;
+        };
+        form.mark_attempted();
+        let env_key = form.env_key().value().trim().to_owned();
+        let scope = form.scope().map(str::to_owned);
+        let secret = form.secret().value().trim().to_owned();
+        let hosts: Vec<String> = form
+            .hosts()
+            .iter()
+            .map(|host| host.value().trim().to_owned())
+            .collect();
+
+        if scope.is_none() {
+            self.notify_error("Invalid custom secret", "Choose a scope.");
+            return;
+        }
+        if env_key.is_empty() {
+            self.notify_error("Invalid custom secret", "Enter an env key.");
+            return;
+        }
+        if secret.is_empty() {
+            self.notify_error("Invalid custom secret", "Enter a secret value.");
+            return;
+        }
+        if hosts.iter().any(String::is_empty) {
+            self.notify_error("Invalid custom secret", "Enter a value for every host.");
+            return;
+        }
+
+        let scope = scope.as_deref().unwrap_or(GLOBAL_SCOPE);
+
+        #[cfg(test)]
+        {
+            let existing = self
+                .stored_custom_secret_exists(&env_key, scope)
+                .unwrap_or(None);
+            self.finish_custom_secret_lookup(&env_key, scope, Ok(existing));
+        }
+
+        #[cfg(not(test))]
+        {
+            // The overwrite lookup also shells out, so it runs on a worker and
+            // the dialog stays usable while `sbx secret ls` is in flight.
+            let lookup_env_key = env_key.clone();
+            let lookup_scope = scope.to_owned();
+            let check_env_key = lookup_env_key.clone();
+            let check_scope = lookup_scope.clone();
+            self.notify_info("Checking stored custom secret...", None);
+            self.jobs
+                .spawn(move || super::workers::JobResult::CustomSecretExists {
+                    env_key: lookup_env_key,
+                    scope: lookup_scope,
+                    result: Self::stored_custom_secret_exists(&check_env_key, &check_scope),
+                });
+        }
+    }
+
+    /// Apply the custom overwrite lookup on the UI thread. A late answer is
+    /// ignored if the dialog was closed or the env key/scope changed meanwhile.
+    /// An existing secret carries its placeholder so the confirmed overwrite
+    /// can remove it with `sbx secret rm --placeholder` before setting a new one.
+    pub(super) fn finish_custom_secret_lookup(
+        &mut self,
+        env_key: &str,
+        scope: &str,
+        result: Result<Option<String>, String>,
+    ) {
+        let still_open = self.custom_secret_form.as_ref().is_some_and(|form| {
+            form.env_key().value().trim() == env_key && form.scope() == Some(scope)
+        });
+        if !still_open {
+            return;
+        }
+        match result {
+            Ok(Some(placeholder)) => {
+                self.pending_action = Some(PendingAction::OverwriteCustomSecret(
+                    env_key.to_owned(),
+                    scope.to_owned(),
+                    placeholder,
+                ));
+                let _ = self.modals.open(CONFIRM_DIALOG, &mut self.focus);
+            }
+            Ok(None) => self.finish_set_custom_secret(env_key, scope),
+            Err(error) => self.notify_error("Could not check custom secret", error),
+        }
+    }
+
+    /// `sbx secret ls --sandbox <scope> --env-name <key> --format json`.
+    /// The global store uses `--global` instead of a sandbox, as in Set secret.
+    pub(super) fn custom_secret_lookup_command(env_key: &str, scope: &str) -> PendingCommand {
+        let mut args = vec!["secret", "ls"];
+        if is_global_scope(scope) {
+            args.push("--global");
+        } else {
+            args.extend(["--sandbox", scope]);
+        }
+        args.extend(["--env-name", env_key, "--format", "json"]);
+        PendingCommand::new("sbx", &args)
+    }
+
+    /// Ask `sbx` whether this env key already has a custom secret in the scope.
+    /// `Some(placeholder)` means one exists and can be removed by placeholder;
+    /// `None` means the set can go ahead directly. Tests supply the answer
+    /// instead of shelling out, using the same lookup flag as the service check.
+    #[cfg(test)]
+    fn stored_custom_secret_exists(
+        &self,
+        _env_key: &str,
+        _scope: &str,
+    ) -> Result<Option<String>, String> {
+        Ok(self
+            .secret_exists_for_test
+            .unwrap_or(false)
+            .then(|| "docker-placeholder-value".to_owned()))
+    }
+
+    #[cfg(not(test))]
+    fn stored_custom_secret_exists(env_key: &str, scope: &str) -> Result<Option<String>, String> {
+        let output = Self::custom_secret_lookup_command(env_key, scope)
+            .run()
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            return Err(if stderr.is_empty() {
+                format!("sbx secret ls exited with {}.", output.status)
+            } else {
+                stderr
+            });
+        }
+        if !parse_custom_secret_exists(&output.stdout)? {
+            return Ok(None);
+        }
+        parse_custom_secret_placeholder(&output.stdout).map(Some)
+    }
+
+    /// `sbx secret rm --placeholder <placeholder> [--sandbox <scope>] -f`.
+    /// The placeholder comes from the pre-set lookup or the table listing; `-f`
+    /// skips the CLI prompt, which cannot be answered from a worker while the
+    /// TUI owns the terminal.
+    pub(super) fn remove_custom_secret_command(placeholder: &str, scope: &str) -> PendingCommand {
+        let mut args = vec!["secret".to_owned(), "rm".to_owned()];
+        args.extend(["--placeholder".to_owned(), placeholder.to_owned()]);
+        if !is_global_scope(scope) {
+            args.extend(["--sandbox".to_owned(), scope.to_owned()]);
+        }
+        args.push("-f".to_owned());
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        PendingCommand::new("sbx", &borrowed)
+    }
+
+    /// Remove the secret found by the pre-set lookup. The set itself follows in
+    /// `CustomSecretRemoved`, so a failed removal never leaves a half-overwrite.
+    #[cfg_attr(test, allow(dead_code))]
+    pub(super) fn overwrite_custom_secret(
+        &mut self,
+        env_key: &str,
+        scope: &str,
+        placeholder: &str,
+    ) {
+        let pending = Self::remove_custom_secret_command(placeholder, scope);
+        let env_key = env_key.to_owned();
+        let scope = scope.to_owned();
+        self.notify_info("Removing existing custom secret...", None);
+        self.jobs
+            .spawn(move || super::workers::JobResult::CustomSecretRemoved {
+                env_key,
+                scope,
+                result: pending.run(),
+            });
+    }
+
+    /// A custom row's Delete button asks for confirmation with its env key and
+    /// placeholder, since `(custom)` is only a table label.
+    pub fn delete_custom_secret(&mut self, env_key: &str, scope: &str, placeholder: &str) {
+        self.request_action(PendingAction::DeleteCustomSecret(
+            env_key.to_owned(),
+            scope.to_owned(),
+            placeholder.to_owned(),
+        ));
+    }
+
+    /// Remove a confirmed custom row with the same placeholder command the
+    /// overwrite flow uses. `SecretDelete` then refreshes the table and names
+    /// the env key in the result toast.
+    #[cfg_attr(test, allow(dead_code))]
+    pub(super) fn delete_custom_secret_now(
+        &mut self,
+        env_key: &str,
+        scope: &str,
+        placeholder: &str,
+    ) {
+        let pending = Self::remove_custom_secret_command(placeholder, scope);
+
+        #[cfg(test)]
+        {
+            // The test hook records the command; the env key only names the toast.
+            let _ = env_key;
+            self.deleted_for_test = Some(pending.preview());
+        }
+
+        #[cfg(not(test))]
+        {
+            let deleted = env_key.to_owned();
+            self.notify_info(format!("Deleting custom secret '{env_key}'..."), None);
+            self.jobs
+                .spawn(move || super::workers::JobResult::SecretDelete {
+                    name: deleted,
+                    result: pending.run(),
+                });
+        }
+    }
+
+    /// The dialog's **Set secret** button. Look for an existing secret first:
+    /// overwriting one goes through the shared confirmation dialog, stacked
+    /// above the form so a cancel returns with the typed value intact.
+    pub fn submit_secret(&mut self) {
+        if self.mode() != Mode::SetSecret {
+            return;
+        }
+        let Some(form) = self.secret_form.as_mut() else {
+            return;
+        };
+        form.mark_attempted();
+        let service = form.service().map(str::to_owned);
+        let scope = form.scope().map(str::to_owned);
+        let secret = form.secret().value().trim().to_owned();
+
+        let (Some(service), Some(scope)) = (service, scope) else {
+            self.notify_error("Invalid secret", "Choose a service and a scope.");
+            return;
+        };
+        if secret.is_empty() {
+            self.notify_error("Invalid secret", "Enter a secret value.");
+            return;
+        }
+
+        #[cfg(test)]
+        {
+            let exists = self.stored_secret_exists(&service, &scope).unwrap_or(false);
+            self.finish_secret_lookup(&service, &scope, Ok(exists));
+        }
+
+        #[cfg(not(test))]
+        {
+            // The overwrite lookup also shells out, so it runs on a worker and
+            // the dialog stays usable while `sbx secret ls` is in flight.
+            let lookup_service = service.clone();
+            let lookup_scope = scope.clone();
+            let check_service = lookup_service.clone();
+            let check_scope = lookup_scope.clone();
+            self.notify_info("Checking stored secret...", None);
+            self.jobs
+                .spawn(move || super::workers::JobResult::SecretExists {
+                    service: lookup_service,
+                    scope: lookup_scope,
+                    result: Self::stored_secret_exists(&check_service, &check_scope),
+                });
+        }
+    }
+
+    /// Apply the overwrite lookup on the UI thread. A late answer is ignored
+    /// if the dialog was closed or the user changed the form in the meantime.
+    pub(super) fn finish_secret_lookup(
+        &mut self,
+        service: &str,
+        scope: &str,
+        result: Result<bool, String>,
+    ) {
+        let still_open = self
+            .secret_form
+            .as_ref()
+            .is_some_and(|form| form.service() == Some(service) && form.scope() == Some(scope));
+        if !still_open {
+            return;
+        }
+        match result {
+            Ok(true) => {
+                self.pending_action = Some(PendingAction::OverwriteSecret(
+                    service.to_owned(),
+                    scope.to_owned(),
+                ));
+                let _ = self.modals.open(CONFIRM_DIALOG, &mut self.focus);
+            }
+            Ok(false) => self.finish_set_secret(service, scope),
+            Err(error) => self.notify_error("Could not check secret", error),
+        }
+    }
+
+    /// `sbx secret ls --sandbox <scope> --service <service> --format json`.
+    /// The global store has no sandbox, so it uses `--global` instead.
+    pub(super) fn secret_lookup_command(service: &str, scope: &str) -> PendingCommand {
+        let mut args = vec!["secret", "ls"];
+        if is_global_scope(scope) {
+            args.push("--global");
+        } else {
+            args.extend(["--sandbox", scope]);
+        }
+        args.extend(["--service", service, "--format", "json"]);
+        PendingCommand::new("sbx", &args)
+    }
+
+    /// Ask `sbx` whether this service already has a secret in the scope. Tests
+    /// supply the answer instead of shelling out.
+    #[cfg(test)]
+    fn stored_secret_exists(&self, _service: &str, _scope: &str) -> Result<bool, String> {
+        Ok(self.secret_exists_for_test.unwrap_or(false))
+    }
+
+    #[cfg(not(test))]
+    fn stored_secret_exists(service: &str, scope: &str) -> Result<bool, String> {
+        let output = Self::secret_lookup_command(service, scope)
+            .run()
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            return Err(if stderr.is_empty() {
+                format!("sbx secret ls exited with {}.", output.status)
+            } else {
+                stderr
+            });
+        }
+        parse_secret_exists(&output.stdout)
+    }
+
+    /// Run the set command for the value still held by the form, then close the
+    /// dialog and refresh the table. Shared by the direct and confirmed paths.
+    pub(super) fn finish_set_secret(&mut self, service: &str, scope: &str) {
+        let Some(secret) = self
+            .secret_form
+            .as_ref()
+            .map(|form| form.secret().value().trim().to_owned())
+        else {
+            return;
+        };
+        let pending = Self::set_secret_command(service, scope, &secret);
+        let target = if is_global_scope(scope) {
+            "global".to_owned()
+        } else {
+            scope.to_owned()
+        };
+        let success = format!("Set secret '{service}' for {target}.");
+
+        #[cfg(test)]
+        {
+            self.set_for_test = Some(pending.preview());
+            self.close_modal(SET_SECRET_DIALOG);
+            self.secret_form = None;
+            self.notify_success(success, None);
+        }
+
+        #[cfg(not(test))]
+        {
+            let set_service = service.to_owned();
+            let set_scope = scope.to_owned();
+            self.notify_info("Setting secret...", None);
+            self.jobs
+                .spawn(move || super::workers::JobResult::SecretSet {
+                    service: set_service,
+                    scope: set_scope,
+                    success,
+                    result: pending.run(),
+                });
+        }
+    }
+
+    /// `echo "<value>" | sbx secret set <service> [--sandbox <scope>] -f`
+    /// Global secrets omit the sandbox flag entirely.
+    fn set_secret_command(service: &str, scope: &str, secret: &str) -> PendingCommand {
+        let mut command = format!(
+            "echo \"{}\" | sbx secret set {}",
+            shell_double_quoted(secret),
+            service
+        );
+        if scope != GLOBAL_SCOPE {
+            command.push_str(" --sandbox ");
+            command.push_str(&shell_word(scope));
+        }
+        command.push_str(" -f");
+        PendingCommand::shell(command)
+    }
+
+    /// Run the custom set command for the values still held by the form, then
+    /// close the dialog and refresh the table. Shared by the direct and
+    /// confirmed paths.
+    pub(super) fn finish_set_custom_secret(&mut self, env_key: &str, scope: &str) {
+        let Some(form) = self.custom_secret_form.as_ref() else {
+            return;
+        };
+        let secret = form.secret().value().trim().to_owned();
+        let hosts: Vec<String> = form
+            .hosts()
+            .iter()
+            .map(|host| host.value().trim().to_owned())
+            .collect();
+        let pending = Self::set_custom_secret_command(env_key, scope, &hosts, &secret);
+        let success = format!("Set custom secret '{env_key}'.");
+
+        #[cfg(test)]
+        {
+            self.set_for_test = Some(pending.preview());
+            self.close_modal(SET_CUSTOM_SECRET_DIALOG);
+            self.custom_secret_form = None;
+            self.notify_success(success, None);
+        }
+
+        #[cfg(not(test))]
+        {
+            self.notify_info("Setting custom secret...", None);
+            self.jobs
+                .spawn(move || super::workers::JobResult::CustomSecretSet {
+                    success,
+                    result: pending.run(),
+                });
+        }
+    }
+
+    /// `sbx secret set-custom [--sandbox <scope>] --host <host>... --env <key> --value <secret>`.
+    /// The `(global)` scope omits `--sandbox`, as in Set secret. Arguments are
+    /// passed directly, so values with spaces or shell metachars stay a single
+    /// argument instead of being reinterpreted by a shell.
+    fn set_custom_secret_command(
+        env_key: &str,
+        scope: &str,
+        hosts: &[String],
+        secret: &str,
+    ) -> PendingCommand {
+        let mut args = vec!["secret".to_owned(), "set-custom".to_owned()];
+        if !is_global_scope(scope) {
+            args.extend(["--sandbox".to_owned(), scope.to_owned()]);
+        }
+        for host in hosts {
+            args.push("--host".to_owned());
+            args.push(host.clone());
+        }
+        args.extend([
+            "--env".to_owned(),
+            env_key.to_owned(),
+            "--value".to_owned(),
+            secret.to_owned(),
+        ]);
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        PendingCommand::new("sbx", &borrowed)
+    }
+}
+
+/// Escape the characters that would end or expand a double-quoted shell word.
+fn shell_double_quoted(value: &str) -> String {
+    let mut escaped = String::new();
+    for character in value.chars() {
+        if matches!(character, '\\' | '"' | '$' | '`') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
+/// Simple sandbox names are safe as written; anything else gets quoted so a
+/// name with spaces cannot split into two arguments.
+fn shell_word(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
+    {
+        value.to_owned()
+    } else {
+        format!("\"{}\"", shell_double_quoted(value))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_the_global_secret_list_from_the_cli() {
+        let json = br#"{
+          "secrets": [
+            { "scope": "global", "type": "service", "name": "github", "secret": "(stored)" },
+            { "scope": "global", "type": "service", "name": "nebius", "secret": "(stored)" }
+          ],
+          "custom_secrets": [],
+          "shadowed_services": [],
+          "env_only_count": 0
+        }"#;
+
+        assert_eq!(
+            parse_secrets(json, GLOBAL_SCOPE).unwrap(),
+            vec![
+                Secret::new(GLOBAL_SCOPE, "github"),
+                Secret::new(GLOBAL_SCOPE, "nebius"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_scoped_listing_labels_every_row_with_the_sandbox_name() {
+        let json = br#"{
+          "secrets": [
+            { "scope": "global", "name": "github" },
+            { "scope": "test", "name": "nebius" }
+          ],
+          "custom_secrets": [{ "env_name": "MY_TOKEN" }, {}]
+        }"#;
+
+        assert_eq!(
+            parse_secrets(json, "test").unwrap(),
+            vec![
+                Secret::new("test", "github"),
+                Secret::new("test", "nebius"),
+                Secret::custom("test", "MY_TOKEN", Vec::<String>::new()),
+            ]
+        );
+    }
+
+    #[test]
+    fn includes_custom_secrets_and_ignores_rows_without_an_env_key() {
+        let json = br#"{
+          "secrets": [{ "scope": "global", "name": "openai" }, {}],
+          "custom_secrets": [
+            { "env_name": "MY_TOKEN", "host": "example.com" },
+            {}
+          ]
+        }"#;
+
+        assert_eq!(
+            parse_secrets(json, GLOBAL_SCOPE).unwrap(),
+            vec![
+                Secret::new(GLOBAL_SCOPE, "openai"),
+                Secret::custom(GLOBAL_SCOPE, "MY_TOKEN", ["example.com".to_owned()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn custom_secrets_use_the_placeholder_name_and_target_hosts() {
+        let json = br#"{
+          "secrets": [
+            { "scope": "global", "type": "service", "name": "github", "secret": "(stored)" }
+          ],
+          "custom_secrets": [
+            {
+              "scope": "global",
+              "targets": ["api.example.com", "uploads.example.com"],
+              "env": "API_KEY",
+              "placeholder": "sbx-cs-LjhIY8B1ZcJbmPCP",
+              "secret": ""
+            },
+            {
+              "scope": "test",
+              "targets": ["api.example.com", "*.example.com"],
+              "env": "TEST_KEY",
+              "placeholder": "sbx-cs-LKW4RmtuW6zmpZ2V",
+              "secret": ""
+            }
+          ],
+          "shadowed_services": [],
+          "env_only_count": 0
+        }"#;
+
+        assert_eq!(
+            parse_secrets(json, GLOBAL_SCOPE).unwrap(),
+            vec![
+                Secret::new(GLOBAL_SCOPE, "github"),
+                Secret::custom(
+                    GLOBAL_SCOPE,
+                    "API_KEY",
+                    [
+                        "api.example.com".to_owned(),
+                        "uploads.example.com".to_owned()
+                    ],
+                )
+                .with_placeholder("sbx-cs-LjhIY8B1ZcJbmPCP"),
+                Secret::custom(
+                    GLOBAL_SCOPE,
+                    "TEST_KEY",
+                    ["api.example.com".to_owned(), "*.example.com".to_owned()],
+                )
+                .with_placeholder("sbx-cs-LKW4RmtuW6zmpZ2V"),
+            ]
+        );
+    }
+
+    #[test]
+    fn list_commands_target_one_scope_at_a_time() {
+        assert_eq!(
+            secret_list_command(None).preview(),
+            "sbx secret ls -g --json"
+        );
+        assert_eq!(
+            secret_list_command(Some("alpha")).preview(),
+            "sbx secret ls --sandbox alpha --json"
+        );
+        assert_eq!(
+            secret_list_command(Some("my sandbox")).preview(),
+            "sbx secret ls --sandbox 'my sandbox' --json"
+        );
+    }
+
+    #[test]
+    fn service_rows_carry_their_env_vars_and_api_domains() {
+        let github = Secret::new(GLOBAL_SCOPE, "github");
+        assert_eq!(github.env_vars_label(), "GH_TOKEN, GITHUB_TOKEN");
+        assert_eq!(
+            github.api_domains,
+            [
+                "api.github.com",
+                "github.com",
+                "raw.githubusercontent.com",
+                "gist.github.com",
+                "copilot.github.com",
+                "api.githubcopilot.com",
+            ]
+        );
+
+        let groq = Secret::new("test", "groq");
+        assert_eq!(groq.env_vars, ["GROQ_API_KEY"]);
+        assert_eq!(groq.api_domains, ["api.groq.com"]);
+    }
+
+    #[test]
+    fn a_custom_secret_uses_its_env_key_and_targets() {
+        let custom = Secret::custom(
+            "test",
+            "MY_TOKEN",
+            ["api.example.com".to_owned(), "*.example.com".to_owned()],
+        );
+        assert_eq!(custom.name, "(custom)");
+        assert_eq!(custom.env_key(), Some("MY_TOKEN"));
+        assert_eq!(custom.env_vars, ["MY_TOKEN"]);
+        assert_eq!(custom.api_domains, ["api.example.com", "*.example.com"]);
+        assert!(custom.placeholder.is_none());
+
+        let listed = custom.with_placeholder("sbx-cs-123");
+        assert_eq!(listed.placeholder.as_deref(), Some("sbx-cs-123"));
+        assert!(Secret::new("test", "github").placeholder.is_none());
+    }
+
+    #[test]
+    fn rejects_output_without_a_secret_list() {
+        assert!(parse_secrets(br#"{"env_only_count": 7}"#, GLOBAL_SCOPE).is_err());
+        assert!(parse_secrets(b"not json", GLOBAL_SCOPE).is_err());
+    }
+
+    #[test]
+    fn existing_secret_lookup_reads_the_secrets_array() {
+        assert!(parse_secret_exists(br#"{"secrets":[{"name":"github"}]}"#).unwrap());
+        assert!(!parse_secret_exists(br#"{"secrets":[]}"#).unwrap());
+        assert!(parse_secret_exists(br#"{"custom_secrets":[{"env_name":"TOKEN"}]}"#).is_err());
+    }
+
+    #[test]
+    fn existing_custom_secret_lookup_reads_the_filtered_custom_secrets() {
+        let found =
+            br#"{"custom_secrets":[{"env":"TEST_KEY","placeholder":"docker-placeholder-value"}]}"#;
+        assert!(parse_custom_secret_exists(found).unwrap());
+        assert_eq!(
+            parse_custom_secret_placeholder(found).unwrap(),
+            "docker-placeholder-value"
+        );
+        assert!(!parse_custom_secret_exists(br#"{"custom_secrets":[]}"#).unwrap());
+        assert!(parse_custom_secret_exists(br#"{"secrets":[{"name":"github"}]}"#).is_err());
+        assert!(
+            parse_custom_secret_placeholder(br#"{"custom_secrets":[{"env":"TEST_KEY"}]}"#).is_err()
+        );
+    }
+
+    #[test]
+    fn custom_secret_lookup_targets_the_env_name_and_scope() {
+        assert_eq!(
+            App::custom_secret_lookup_command("TEST_KEY", "test").preview(),
+            "sbx secret ls --sandbox test --env-name TEST_KEY --format json"
+        );
+        assert_eq!(
+            App::custom_secret_lookup_command("TEST_KEY", GLOBAL_SCOPE).preview(),
+            "sbx secret ls --global --env-name TEST_KEY --format json"
+        );
+    }
+
+    #[test]
+    fn overwrite_removes_the_custom_secret_by_placeholder() {
+        assert_eq!(
+            App::remove_custom_secret_command("docker-placeholder-value", GLOBAL_SCOPE).preview(),
+            "sbx secret rm --placeholder docker-placeholder-value -f"
+        );
+        assert_eq!(
+            App::remove_custom_secret_command("docker-placeholder-value", "test").preview(),
+            "sbx secret rm --placeholder docker-placeholder-value --sandbox test -f"
+        );
+    }
+}
