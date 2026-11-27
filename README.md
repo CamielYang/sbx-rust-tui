@@ -11,14 +11,22 @@ The built-in Docker Sandboxes TUI covers the basics, but leaves out finer config
 
 ## Features
 
+### Sandboxes
+
 - Browse sandboxes and see their current status
 - Create sandboxes with your choice of agent, CPUs, memory, and disk size
 - Pick a workspace folder with a built-in folder browser, then mount or clone it
 - Start, stop, and remove sandboxes with confirmation prompts
 - Open a shell inside a running sandbox
-- Publish and inspect ports with a simple dialog
-- View live sandbox details and resource usage
-- Navigate with the keyboard or mouse
+- Publish and inspect ports in a dialog, including publishing a host-to-sandbox port mapping and unpublishing existing mappings
+- View live sandbox details, including CPU, memory and disk usage, agent configuration, and mounted host paths
+
+### Secrets
+
+- Browse secrets from the global store and from every sandbox in a dedicated Secrets tab, with scope, service name, and environment variable details
+- Inspect a secret's details, including its environment variables and API domains
+- Set a secret for a supported service in either the global scope or a specific sandbox
+- Set custom secrets with an environment key, value, and one or more target hosts
 
 ## Installation
 
