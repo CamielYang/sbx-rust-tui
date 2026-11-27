@@ -130,6 +130,34 @@ fn parse_secret_exists(bytes: &[u8]) -> Result<bool, String> {
     Ok(!secrets.is_empty())
 }
 
+/// Whether `--env-name` filtered out every stored custom secret. Filtered
+/// listings contain only `custom_secrets`, so that is the array to inspect.
+fn parse_custom_secret_exists(bytes: &[u8]) -> Result<bool, String> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+    let custom_secrets = value
+        .get("custom_secrets")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "sbx secret ls did not include a custom secret list".to_owned())?;
+    Ok(!custom_secrets.is_empty())
+}
+
+/// The placeholder `sbx secret rm --placeholder` needs to remove the existing
+/// custom secret. The filtered listing carries it on each returned row.
+fn parse_custom_secret_placeholder(bytes: &[u8]) -> Result<String, String> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+    let custom_secrets = value
+        .get("custom_secrets")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "sbx secret ls did not include a custom secret list".to_owned())?;
+    let placeholder = custom_secrets
+        .first()
+        .and_then(|row| json_text(row, &["placeholder"]))
+        .ok_or_else(|| {
+            "sbx secret ls did not include a placeholder for the custom secret".to_owned()
+        })?;
+    Ok(placeholder)
+}
+
 impl App {
     /// A queued deletion is skipped if the row is no longer in the table when
     /// the dialog is confirmed (e.g. after a manual Refresh).
@@ -256,8 +284,11 @@ impl App {
         }
     }
 
-    /// Validate and submit the custom form. The value travels as a plain CLI
-    /// argument, so no shell quoting is needed around the secret.
+    /// Validate and submit the custom form. As with a service secret, look for
+    /// an existing entry first: overwriting one goes through the shared
+    /// confirmation dialog, stacked above the form so a cancel returns with the
+    /// typed values intact. The value travels as a plain CLI argument, so no
+    /// shell quoting is needed around the secret.
     pub fn submit_custom_secret(&mut self) {
         if self.mode() != Mode::SetCustomSecret {
             return;
@@ -293,26 +324,144 @@ impl App {
         }
 
         let scope = scope.as_deref().unwrap_or(GLOBAL_SCOPE);
-        let pending = Self::set_custom_secret_command(&env_key, scope, &hosts, &secret);
-        let success = format!("Set custom secret '{env_key}'.");
 
         #[cfg(test)]
         {
-            self.set_for_test = Some(pending.preview());
-            self.close_modal(SET_CUSTOM_SECRET_DIALOG);
-            self.custom_secret_form = None;
-            self.notify_success(success, None);
+            let existing = self
+                .stored_custom_secret_exists(&env_key, scope)
+                .unwrap_or(None);
+            self.finish_custom_secret_lookup(&env_key, scope, Ok(existing));
         }
 
         #[cfg(not(test))]
         {
-            self.notify_info("Setting custom secret...", None);
+            // The overwrite lookup also shells out, so it runs on a worker and
+            // the dialog stays usable while `sbx secret ls` is in flight.
+            let lookup_env_key = env_key.clone();
+            let lookup_scope = scope.to_owned();
+            let check_env_key = lookup_env_key.clone();
+            let check_scope = lookup_scope.clone();
+            self.notify_info("Checking stored custom secret...", None);
             self.jobs
-                .spawn(move || super::workers::JobResult::CustomSecretSet {
-                    success,
-                    result: pending.run(),
+                .spawn(move || super::workers::JobResult::CustomSecretExists {
+                    env_key: lookup_env_key,
+                    scope: lookup_scope,
+                    result: Self::stored_custom_secret_exists(&check_env_key, &check_scope),
                 });
         }
+    }
+
+    /// Apply the custom overwrite lookup on the UI thread. A late answer is
+    /// ignored if the dialog was closed or the env key/scope changed meanwhile.
+    /// An existing secret carries its placeholder so the confirmed overwrite
+    /// can remove it with `sbx secret rm --placeholder` before setting a new one.
+    pub(super) fn finish_custom_secret_lookup(
+        &mut self,
+        env_key: &str,
+        scope: &str,
+        result: Result<Option<String>, String>,
+    ) {
+        let still_open = self.custom_secret_form.as_ref().is_some_and(|form| {
+            form.env_key().value().trim() == env_key && form.scope() == Some(scope)
+        });
+        if !still_open {
+            return;
+        }
+        match result {
+            Ok(Some(placeholder)) => {
+                self.pending_action = Some(PendingAction::OverwriteCustomSecret(
+                    env_key.to_owned(),
+                    scope.to_owned(),
+                    placeholder,
+                ));
+                let _ = self.modals.open(CONFIRM_DIALOG, &mut self.focus);
+            }
+            Ok(None) => self.finish_set_custom_secret(env_key, scope),
+            Err(error) => self.notify_error("Could not check custom secret", error),
+        }
+    }
+
+    /// `sbx secret ls --sandbox <scope> --env-name <key> --format json`.
+    /// The global store uses `--global` instead of a sandbox, as in Set secret.
+    pub(super) fn custom_secret_lookup_command(env_key: &str, scope: &str) -> PendingCommand {
+        let mut args = vec!["secret", "ls"];
+        if is_global_scope(scope) {
+            args.push("--global");
+        } else {
+            args.extend(["--sandbox", scope]);
+        }
+        args.extend(["--env-name", env_key, "--format", "json"]);
+        PendingCommand::new("sbx", &args)
+    }
+
+    /// Ask `sbx` whether this env key already has a custom secret in the scope.
+    /// `Some(placeholder)` means one exists and can be removed by placeholder;
+    /// `None` means the set can go ahead directly. Tests supply the answer
+    /// instead of shelling out, using the same lookup flag as the service check.
+    #[cfg(test)]
+    fn stored_custom_secret_exists(
+        &self,
+        _env_key: &str,
+        _scope: &str,
+    ) -> Result<Option<String>, String> {
+        Ok(self
+            .secret_exists_for_test
+            .unwrap_or(false)
+            .then(|| "docker-placeholder-value".to_owned()))
+    }
+
+    #[cfg(not(test))]
+    fn stored_custom_secret_exists(env_key: &str, scope: &str) -> Result<Option<String>, String> {
+        let output = Self::custom_secret_lookup_command(env_key, scope)
+            .run()
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            return Err(if stderr.is_empty() {
+                format!("sbx secret ls exited with {}.", output.status)
+            } else {
+                stderr
+            });
+        }
+        if !parse_custom_secret_exists(&output.stdout)? {
+            return Ok(None);
+        }
+        parse_custom_secret_placeholder(&output.stdout).map(Some)
+    }
+
+    /// `sbx secret rm --placeholder <placeholder> [--sandbox <scope>] -f`.
+    /// The placeholder comes from the pre-set lookup; `-f` skips the CLI prompt,
+    /// which cannot be answered from a worker while the TUI owns the terminal.
+    pub(super) fn remove_custom_secret_command(placeholder: &str, scope: &str) -> PendingCommand {
+        let mut args = vec!["secret".to_owned(), "rm".to_owned()];
+        args.extend(["--placeholder".to_owned(), placeholder.to_owned()]);
+        if !is_global_scope(scope) {
+            args.extend(["--sandbox".to_owned(), scope.to_owned()]);
+        }
+        args.push("-f".to_owned());
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        PendingCommand::new("sbx", &borrowed)
+    }
+
+    /// Remove the secret found by the pre-set lookup. The set itself follows in
+    /// `CustomSecretRemoved`, so a failed removal never leaves a half-overwrite.
+    #[cfg_attr(test, allow(dead_code))]
+    pub(super) fn overwrite_custom_secret(
+        &mut self,
+        env_key: &str,
+        scope: &str,
+        placeholder: &str,
+    ) {
+        let pending = Self::remove_custom_secret_command(placeholder, scope);
+        let env_key = env_key.to_owned();
+        let scope = scope.to_owned();
+        self.notify_info("Removing existing custom secret...", None);
+        self.jobs
+            .spawn(move || super::workers::JobResult::CustomSecretRemoved {
+                env_key,
+                scope,
+                result: pending.run(),
+            });
     }
 
     /// The dialog's **Set secret** button. Look for an existing secret first:
@@ -482,6 +631,40 @@ impl App {
         }
         command.push_str(" -f");
         PendingCommand::shell(command)
+    }
+
+    /// Run the custom set command for the values still held by the form, then
+    /// close the dialog. Shared by the direct and confirmed paths.
+    pub(super) fn finish_set_custom_secret(&mut self, env_key: &str, scope: &str) {
+        let Some(form) = self.custom_secret_form.as_ref() else {
+            return;
+        };
+        let secret = form.secret().value().trim().to_owned();
+        let hosts: Vec<String> = form
+            .hosts()
+            .iter()
+            .map(|host| host.value().trim().to_owned())
+            .collect();
+        let pending = Self::set_custom_secret_command(env_key, scope, &hosts, &secret);
+        let success = format!("Set custom secret '{env_key}'.");
+
+        #[cfg(test)]
+        {
+            self.set_for_test = Some(pending.preview());
+            self.close_modal(SET_CUSTOM_SECRET_DIALOG);
+            self.custom_secret_form = None;
+            self.notify_success(success, None);
+        }
+
+        #[cfg(not(test))]
+        {
+            self.notify_info("Setting custom secret...", None);
+            self.jobs
+                .spawn(move || super::workers::JobResult::CustomSecretSet {
+                    success,
+                    result: pending.run(),
+                });
+        }
     }
 
     /// `sbx secret set-custom [--sandbox <scope>] --host <host>... --env <key> --value <secret>`.
@@ -655,5 +838,45 @@ mod tests {
         assert!(parse_secret_exists(br#"{"secrets":[{"name":"github"}]}"#).unwrap());
         assert!(!parse_secret_exists(br#"{"secrets":[]}"#).unwrap());
         assert!(parse_secret_exists(br#"{"custom_secrets":[{"env_name":"TOKEN"}]}"#).is_err());
+    }
+
+    #[test]
+    fn existing_custom_secret_lookup_reads_the_filtered_custom_secrets() {
+        let found =
+            br#"{"custom_secrets":[{"env":"TEST_KEY","placeholder":"docker-placeholder-value"}]}"#;
+        assert!(parse_custom_secret_exists(found).unwrap());
+        assert_eq!(
+            parse_custom_secret_placeholder(found).unwrap(),
+            "docker-placeholder-value"
+        );
+        assert!(!parse_custom_secret_exists(br#"{"custom_secrets":[]}"#).unwrap());
+        assert!(parse_custom_secret_exists(br#"{"secrets":[{"name":"github"}]}"#).is_err());
+        assert!(
+            parse_custom_secret_placeholder(br#"{"custom_secrets":[{"env":"TEST_KEY"}]}"#).is_err()
+        );
+    }
+
+    #[test]
+    fn custom_secret_lookup_targets_the_env_name_and_scope() {
+        assert_eq!(
+            App::custom_secret_lookup_command("TEST_KEY", "test").preview(),
+            "sbx secret ls --sandbox test --env-name TEST_KEY --format json"
+        );
+        assert_eq!(
+            App::custom_secret_lookup_command("TEST_KEY", GLOBAL_SCOPE).preview(),
+            "sbx secret ls --global --env-name TEST_KEY --format json"
+        );
+    }
+
+    #[test]
+    fn overwrite_removes_the_custom_secret_by_placeholder() {
+        assert_eq!(
+            App::remove_custom_secret_command("docker-placeholder-value", GLOBAL_SCOPE).preview(),
+            "sbx secret rm --placeholder docker-placeholder-value -f"
+        );
+        assert_eq!(
+            App::remove_custom_secret_command("docker-placeholder-value", "test").preview(),
+            "sbx secret rm --placeholder docker-placeholder-value --sandbox test -f"
+        );
     }
 }

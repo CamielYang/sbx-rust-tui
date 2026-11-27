@@ -1146,6 +1146,178 @@ fn confirming_an_overwrite_sets_the_secret() {
 }
 
 #[test]
+fn existing_custom_secret_waits_for_overwrite_confirmation() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_custom_secret();
+    app.set_custom_scope(1); // alpha
+    app.set_custom_env_key(InputState::new("TEST_KEY"));
+    app.set_custom_secret_value(InputState::new("sk-test"));
+    app.set_custom_host(0, InputState::new("api.example.com"));
+    app.set_secret_exists_for_test(true);
+    app.submit_custom_secret();
+
+    assert_eq!(
+        app.pending_action(),
+        Some(&PendingAction::OverwriteCustomSecret(
+            "TEST_KEY".to_owned(),
+            "alpha".to_owned(),
+            "docker-placeholder-value".to_owned()
+        ))
+    );
+    assert!(matches!(app.mode(), Mode::Confirm));
+    assert!(app.modals_ref().is_open(CONFIRM_DIALOG));
+    assert!(app.modals_ref().is_open(SET_CUSTOM_SECRET_DIALOG));
+    assert!(app.take_deleted_for_test().is_none());
+    assert_eq!(
+        app.custom_secret_form().unwrap().secret().value(),
+        "sk-test"
+    );
+    assert!(app.take_set_for_test().is_none());
+}
+
+#[test]
+fn cancelling_a_custom_overwrite_keeps_the_custom_form() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_custom_secret();
+    app.set_custom_env_key(InputState::new("TEST_KEY"));
+    app.set_custom_secret_value(InputState::new("sk-test"));
+    app.set_custom_host(0, InputState::new("api.example.com"));
+    app.set_secret_exists_for_test(true);
+    app.submit_custom_secret();
+    app.cancel_action();
+
+    assert!(app.pending_action().is_none());
+    assert!(!app.modals_ref().is_open(CONFIRM_DIALOG));
+    assert!(app.modals_ref().is_open(SET_CUSTOM_SECRET_DIALOG));
+    assert_eq!(
+        app.custom_secret_form().unwrap().secret().value(),
+        "sk-test"
+    );
+    assert!(app.take_set_for_test().is_none());
+    assert!(app.take_deleted_for_test().is_none());
+    assert_eq!(app.message(), "Overwrite secret cancelled.");
+}
+
+#[test]
+fn confirming_a_custom_overwrite_sets_the_custom_secret() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_custom_secret();
+    app.set_custom_scope(1); // alpha
+    app.set_custom_env_key(InputState::new("TEST_KEY"));
+    app.set_custom_secret_value(InputState::new("sk-test"));
+    app.set_custom_host(0, InputState::new("api.example.com"));
+    app.set_secret_exists_for_test(true);
+    app.submit_custom_secret();
+    app.confirm_action();
+
+    assert_eq!(
+        app.take_deleted_for_test().as_deref(),
+        Some("sbx secret rm --placeholder docker-placeholder-value --sandbox alpha -f")
+    );
+    assert_eq!(
+        app.take_set_for_test().as_deref(),
+        Some(
+            "sbx secret set-custom --sandbox alpha --host api.example.com --env TEST_KEY --value sk-test"
+        )
+    );
+    assert_eq!(
+        app.take_confirmed_for_test(),
+        Some(PendingAction::OverwriteCustomSecret(
+            "TEST_KEY".to_owned(),
+            "alpha".to_owned(),
+            "docker-placeholder-value".to_owned()
+        ))
+    );
+    assert!(!app.modals_ref().is_open(CONFIRM_DIALOG));
+    assert!(!app.modals_ref().is_open(SET_CUSTOM_SECRET_DIALOG));
+    assert!(app.custom_secret_form().is_none());
+    assert!(app.message().contains("Set custom secret 'TEST_KEY'."));
+}
+
+#[test]
+fn a_queued_custom_secret_lookup_opens_the_overwrite_confirmation() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_custom_secret();
+    app.set_custom_scope(1);
+    app.set_custom_env_key(InputState::new("TEST_KEY"));
+    app.queue_job_result_for_test(JobResult::CustomSecretExists {
+        env_key: "TEST_KEY".to_owned(),
+        scope: "alpha".to_owned(),
+        result: Ok(Some("docker-placeholder-value".to_owned())),
+    });
+    app.poll_jobs();
+
+    assert_eq!(
+        app.pending_action(),
+        Some(&PendingAction::OverwriteCustomSecret(
+            "TEST_KEY".to_owned(),
+            "alpha".to_owned(),
+            "docker-placeholder-value".to_owned()
+        ))
+    );
+    assert!(matches!(app.mode(), Mode::Confirm));
+}
+
+#[test]
+fn a_removed_custom_secret_is_then_set_with_the_new_value() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_custom_secret();
+    app.set_custom_scope(1);
+    app.set_custom_env_key(InputState::new("TEST_KEY"));
+    app.set_custom_secret_value(InputState::new("sk-test"));
+    app.set_custom_host(0, InputState::new("api.example.com"));
+    app.queue_job_result_for_test(JobResult::CustomSecretRemoved {
+        env_key: "TEST_KEY".to_owned(),
+        scope: "alpha".to_owned(),
+        result: Ok(fake_output(true, "")),
+    });
+    app.poll_jobs();
+
+    assert_eq!(
+        app.take_set_for_test().as_deref(),
+        Some(
+            "sbx secret set-custom --sandbox alpha --host api.example.com --env TEST_KEY --value sk-test"
+        )
+    );
+    assert!(app.message().contains("Set custom secret 'TEST_KEY'."));
+}
+
+#[test]
+fn a_failed_custom_secret_removal_does_not_set_the_new_value() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_custom_secret();
+    app.set_custom_env_key(InputState::new("TEST_KEY"));
+    app.set_custom_secret_value(InputState::new("sk-test"));
+    app.set_custom_host(0, InputState::new("api.example.com"));
+    app.queue_job_result_for_test(JobResult::CustomSecretRemoved {
+        env_key: "TEST_KEY".to_owned(),
+        scope: GLOBAL_SCOPE.to_owned(),
+        result: Ok(fake_output(false, "placeholder not found")),
+    });
+    app.poll_jobs();
+
+    assert!(app.take_set_for_test().is_none());
+    assert!(app.message().contains("Could not overwrite custom secret"));
+    assert!(app.message().contains("placeholder not found"));
+}
+
+#[test]
+fn a_custom_overwrite_is_cancelled_when_the_env_key_changes() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_custom_secret();
+    app.set_custom_env_key(InputState::new("TEST_KEY"));
+    app.set_custom_secret_value(InputState::new("sk-test"));
+    app.set_custom_host(0, InputState::new("api.example.com"));
+    app.set_secret_exists_for_test(true);
+    app.submit_custom_secret();
+    app.set_custom_env_key(InputState::new("OTHER_KEY"));
+    app.confirm_action();
+
+    assert!(app.take_set_for_test().is_none());
+    assert!(app.message().contains("Secret form is no longer available"));
+}
+
+#[test]
 fn existing_secret_lookup_targets_the_service_and_scope() {
     assert_eq!(
         App::secret_lookup_command("github", "alpha").preview(),

@@ -54,6 +54,18 @@ pub(super) enum JobResult {
         scope: String,
         result: Result<bool, String>,
     },
+    CustomSecretExists {
+        env_key: String,
+        scope: String,
+        /// `Some(placeholder)` when the env key already has a custom secret.
+        result: Result<Option<String>, String>,
+    },
+    /// Removal of the old custom secret, after which the new value is set.
+    CustomSecretRemoved {
+        env_key: String,
+        scope: String,
+        result: io::Result<Output>,
+    },
     SecretSet {
         service: String,
         scope: String,
@@ -290,6 +302,27 @@ impl App {
                 scope,
                 result,
             } => self.finish_secret_lookup(&service, &scope, result),
+            JobResult::CustomSecretExists {
+                env_key,
+                scope,
+                result,
+            } => self.finish_custom_secret_lookup(&env_key, &scope, result),
+            JobResult::CustomSecretRemoved {
+                env_key,
+                scope,
+                result,
+            } => match result {
+                Ok(output) if output.status.success() => {
+                    self.finish_set_custom_secret(&env_key, &scope);
+                }
+                Ok(output) => self.notify_error(
+                    "Could not overwrite custom secret",
+                    stderr_detail(&output, "sbx secret rm failed"),
+                ),
+                Err(error) => {
+                    self.notify_error("Could not overwrite custom secret", error.to_string())
+                }
+            },
             JobResult::SecretSet {
                 service,
                 scope,

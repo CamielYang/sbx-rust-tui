@@ -302,6 +302,18 @@ pub(super) fn confirm_dialog(app: &App) -> Dialog<App, Msg> {
             "Overwrite secret",
             STOP_ORANGE,
         ),
+        PendingAction::OverwriteCustomSecret(env_key, scope, _) => (
+            "Confirm overwrite",
+            if is_global_scope(scope) {
+                format!("A custom secret for '{env_key}' already exists globally. Overwrite it?")
+            } else {
+                format!(
+                    "A custom secret for '{env_key}' already exists in sandbox '{scope}'. Overwrite it?"
+                )
+            },
+            "Overwrite secret",
+            STOP_ORANGE,
+        ),
     };
 
     Dialog::new()

@@ -19,6 +19,10 @@ pub enum PendingAction {
     /// Service and scope of a secret that already exists. The new value stays
     /// in the secret form until the overwrite is confirmed.
     OverwriteSecret(String, String),
+    /// Env key, scope, and placeholder of a custom secret that already exists.
+    /// The typed value stays in the custom form until the overwrite is
+    /// confirmed; the placeholder lets `sbx secret rm` remove the old entry.
+    OverwriteCustomSecret(String, String, String),
 }
 
 impl PendingAction {
@@ -28,7 +32,7 @@ impl PendingAction {
             Self::Stop(_) => "Stop",
             Self::Remove(_) => "Remove",
             Self::DeleteSecret(..) => "Delete secret",
-            Self::OverwriteSecret(..) => "Overwrite secret",
+            Self::OverwriteSecret(..) | Self::OverwriteCustomSecret(..) => "Overwrite secret",
         }
     }
 }
@@ -92,7 +96,10 @@ impl App {
         self.close_modal(CONFIRM_DIALOG);
         let should_be_running = matches!(&action, PendingAction::Stop(_));
         let secret_action = matches!(&action, PendingAction::DeleteSecret(..));
-        let overwrite_action = matches!(&action, PendingAction::OverwriteSecret(..));
+        let overwrite_action = matches!(
+            &action,
+            PendingAction::OverwriteSecret(..) | PendingAction::OverwriteCustomSecret(..)
+        );
         let still_valid = match &action {
             PendingAction::Start(name) | PendingAction::Stop(name) => {
                 self.has_sandbox(name) && self.is_running(name) == should_be_running
@@ -102,6 +109,12 @@ impl App {
             PendingAction::OverwriteSecret(service, scope) => {
                 self.secret_form.as_ref().is_some_and(|form| {
                     form.service() == Some(service.as_str())
+                        && form.scope() == Some(scope.as_str())
+                })
+            }
+            PendingAction::OverwriteCustomSecret(env_key, scope, _) => {
+                self.custom_secret_form.as_ref().is_some_and(|form| {
+                    form.env_key().value().trim() == env_key.as_str()
                         && form.scope() == Some(scope.as_str())
                 })
             }
@@ -126,6 +139,11 @@ impl App {
             if let PendingAction::OverwriteSecret(service, scope) = &action {
                 self.finish_set_secret(service, scope);
             }
+            if let PendingAction::OverwriteCustomSecret(env_key, scope, placeholder) = &action {
+                self.deleted_for_test =
+                    Some(Self::remove_custom_secret_command(placeholder, scope).preview());
+                self.finish_set_custom_secret(env_key, scope);
+            }
             self.confirmed_for_test = Some(action);
         }
         #[cfg(not(test))]
@@ -136,6 +154,9 @@ impl App {
             PendingAction::DeleteSecret(name, scope) => self.delete_secret_now(&name, &scope),
             PendingAction::OverwriteSecret(service, scope) => {
                 self.finish_set_secret(&service, &scope)
+            }
+            PendingAction::OverwriteCustomSecret(env_key, scope, placeholder) => {
+                self.overwrite_custom_secret(&env_key, &scope, &placeholder)
             }
         }
     }

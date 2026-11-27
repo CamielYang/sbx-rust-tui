@@ -818,6 +818,40 @@ fn overwrite_confirmation_button_is_clickable_above_the_set_secret_dialog() {
 }
 
 #[test]
+fn custom_overwrite_confirmation_button_is_clickable_above_the_custom_form() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.select_tab(DashboardTab::Secrets);
+    app.set_custom_secret();
+    app.set_custom_env_key(InputState::new("TEST_KEY"));
+    app.set_custom_secret_value(InputState::new("sk-test"));
+    app.set_custom_host(0, InputState::new("api.example.com"));
+    app.set_secret_exists_for_test(true);
+    app.submit_custom_secret();
+
+    let mut ratcn = new_runtime();
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    draw(&mut terminal, &app, &mut ratcn);
+
+    let (x, y) = position_from_bottom(&screen(&terminal), "Overwrite secret")
+        .expect("overwrite button on the confirmation dialog");
+    let emitted = click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+    assert!(
+        emitted
+            .iter()
+            .any(|message| matches!(message, Msg::ConfirmAction))
+    );
+    assert_eq!(
+        app.take_deleted_for_test().as_deref(),
+        Some("sbx secret rm --placeholder docker-placeholder-value -f")
+    );
+    assert_eq!(
+        app.take_set_for_test().as_deref(),
+        Some("sbx secret set-custom --host api.example.com --env TEST_KEY --value sk-test")
+    );
+    assert!(!app.modals_ref().is_open(SET_CUSTOM_SECRET_DIALOG));
+}
+
+#[test]
 fn escape_dismisses_the_set_secret_dialog() {
     let mut app = App::with_sandboxes(&["alpha"]);
     app.select_tab(DashboardTab::Secrets);
