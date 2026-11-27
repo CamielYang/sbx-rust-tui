@@ -913,8 +913,9 @@ pub(super) fn set_secret_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
 // --- set custom secret dialog ----------------------------------------------
 
 /// The custom form keeps the feel of Set secret without a service to choose:
-/// the same scope picker, an env key, a masked value, and a growable list of
-/// hosts become one `sbx secret set-custom` command with a `--host` per row.
+/// the same scope picker, an env key, a masked value, and a list of hosts that
+/// can grow and shrink (the first host stays) become one `sbx secret set-custom`
+/// command with a `--host` per row.
 pub(super) fn set_custom_secret_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
     let theme = *theme;
     let Some(form) = app.custom_secret_form() else {
@@ -1061,8 +1062,18 @@ pub(super) fn set_custom_secret_dialog(app: &App, theme: &Theme) -> Dialog<App, 
                     false,
                     invalid,
                 );
-                let columns = Layout::horizontal([Constraint::Length(20), Constraint::Min(10)])
-                    .split(row(4 + index));
+                // The first host is required, so its Remove button is shown
+                // but disabled. Later rows can be dropped from the form.
+                let remove = Button::new("Remove")
+                    .secondary()
+                    .disabled(index == 0)
+                    .on_press(move || Msg::RemoveCustomHost(index));
+                let columns = Layout::horizontal([
+                    Constraint::Length(20),
+                    Constraint::Min(10),
+                    Constraint::Length(remove.width()),
+                ])
+                .split(row(4 + index));
                 ctx.paint_widget(
                     Paragraph::new(Line::from(Span::styled(
                         format!(" Host {}", index + 1),
@@ -1074,6 +1085,11 @@ pub(super) fn set_custom_secret_dialog(app: &App, theme: &Theme) -> Dialog<App, 
                     format!("custom-secret-host-{index}"),
                     host_input,
                     columns[1],
+                );
+                ctx.component(
+                    format!("custom-secret-remove-host-{index}"),
+                    remove,
+                    columns[2],
                 );
             }
 

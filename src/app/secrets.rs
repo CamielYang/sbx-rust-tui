@@ -390,6 +390,13 @@ impl App {
         }
     }
 
+    /// Drop a host row, leaving the first one in place.
+    pub fn remove_custom_host(&mut self, index: usize) {
+        if let Some(form) = self.custom_secret_form.as_mut() {
+            form.remove_host(index);
+        }
+    }
+
     /// Validate and submit the custom form. As with a service secret, look for
     /// an existing entry first: overwriting one goes through the shared
     /// confirmation dialog, stacked above the form so a cancel returns with the

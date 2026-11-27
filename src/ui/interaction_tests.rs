@@ -320,6 +320,21 @@ fn position_from_bottom(screen: &str, needle: &str) -> Option<(u16, u16)> {
     })
 }
 
+/// Find the Remove button on a specific custom-secret host row.
+fn host_remove_position(screen: &str, host: &str) -> (u16, u16) {
+    screen
+        .lines()
+        .enumerate()
+        .find_map(|(y, line)| {
+            if !line.contains(host) {
+                return None;
+            }
+            line.rfind("Remove")
+                .map(|byte| (line[..byte].chars().count() as u16, y as u16))
+        })
+        .expect("host Remove button")
+}
+
 #[test]
 fn secret_row_delete_and_toolbar_refresh_are_clickable() {
     let mut app = App::with_secrets(&[("(global)", "github"), ("test", "nebius")]);
@@ -889,6 +904,40 @@ fn set_custom_secret_button_adds_hosts_and_submits_their_command() {
     );
     assert!(!app.modals_ref().is_open(SET_CUSTOM_SECRET_DIALOG));
     assert!(app.custom_secret_form().is_none());
+}
+
+#[test]
+fn custom_secret_host_rows_can_be_removed_by_clicking_their_buttons() {
+    let mut app = App::new();
+    app.set_custom_secret();
+    app.set_custom_host(0, InputState::new("api.example.com"));
+    app.add_custom_host();
+    app.set_custom_host(1, InputState::new("uploads.example.com"));
+
+    let mut ratcn = new_runtime();
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    draw(&mut terminal, &app, &mut ratcn);
+
+    // Host 1 is mandatory, so its Remove button is disabled.
+    let (x, y) = host_remove_position(&screen(&terminal), "Host 1");
+    let emitted = click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+    assert!(
+        !emitted
+            .iter()
+            .any(|message| matches!(message, Msg::RemoveCustomHost(_)))
+    );
+    assert_eq!(app.custom_secret_form().unwrap().hosts().len(), 2);
+
+    let (x, y) = host_remove_position(&screen(&terminal), "Host 2");
+    let emitted = click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+    assert!(
+        emitted
+            .iter()
+            .any(|message| matches!(message, Msg::RemoveCustomHost(1)))
+    );
+    let form = app.custom_secret_form().unwrap();
+    assert_eq!(form.hosts().len(), 1);
+    assert_eq!(form.hosts()[0].value(), "api.example.com");
 }
 
 #[test]

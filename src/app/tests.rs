@@ -1167,6 +1167,29 @@ fn set_custom_secret_opens_with_the_same_scope_snapshot() {
 }
 
 #[test]
+fn custom_secret_host_rows_can_be_removed_but_the_first_stays() {
+    let mut app = App::new();
+    app.set_custom_secret();
+    app.set_custom_host(0, InputState::new("first.example.com"));
+    app.add_custom_host();
+    app.set_custom_host(1, InputState::new("second.example.com"));
+    app.add_custom_host();
+    app.set_custom_host(2, InputState::new("third.example.com"));
+
+    app.remove_custom_host(0);
+    app.remove_custom_host(99);
+    assert_eq!(app.custom_secret_form().unwrap().hosts().len(), 3);
+
+    app.remove_custom_host(1);
+    let form = app.custom_secret_form().unwrap();
+    let hosts: Vec<&str> = form.hosts().iter().map(|host| host.value()).collect();
+    assert_eq!(hosts, ["first.example.com", "third.example.com"]);
+
+    app.remove_custom_host(1);
+    assert_eq!(app.custom_secret_form().unwrap().hosts().len(), 1);
+}
+
+#[test]
 fn setting_a_global_custom_secret_matches_the_documented_command() {
     let mut app = App::with_sandboxes(&["alpha"]);
     app.set_custom_secret();

@@ -253,6 +253,16 @@ impl CustomSecretForm {
         self.hosts.push(InputState::new(""));
     }
 
+    /// Remove a host row. The first row is permanent: the form always opens
+    /// with it and a custom secret needs at least one host.
+    pub fn remove_host(&mut self, index: usize) -> bool {
+        if index == 0 || index >= self.hosts.len() {
+            return false;
+        }
+        self.hosts.remove(index);
+        true
+    }
+
     pub fn mark_attempted(&mut self) {
         self.attempted = true;
     }
