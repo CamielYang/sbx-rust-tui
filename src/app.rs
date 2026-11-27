@@ -12,6 +12,7 @@ mod actions;
 mod commands;
 mod dialogs;
 mod form;
+mod policy;
 mod ports;
 mod ports_flow;
 mod sandbox;
@@ -23,9 +24,12 @@ pub(crate) mod test_support;
 mod workers;
 mod workspace;
 
+use self::policy::Setup as PolicySetup;
+
 pub use self::actions::PendingAction;
 pub use self::commands::PendingCommand;
 pub use self::form::{Form, FormField, WorkspaceMode};
+pub use self::policy::{NetworkPolicy, POLICY_DIALOG, StartupCheck, check_startup};
 pub use self::ports::{PortField, PortForm, PortMapping, PortsView};
 pub use self::sandbox::{
     HostMount, MountMode, Sandbox, SandboxDetails, fetch_sandboxes, inspect_sandbox,
@@ -85,6 +89,8 @@ pub const INFO_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
 /// kept as a convenience for status text and tests.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
+    /// First-run network policy choice, before the dashboard is usable.
+    PolicySetup,
     Normal,
     Wizard,
     Info,
@@ -97,6 +103,8 @@ pub enum Mode {
 }
 
 pub struct App {
+    /// Present only while the first-run policy dialog is open.
+    policy_setup: Option<PolicySetup>,
     tab: DashboardTab,
     sandboxes: Vec<Sandbox>,
     secrets: Vec<Secret>,
@@ -143,6 +151,9 @@ pub struct App {
     /// In tests, setting a secret records the command instead of running `sbx`.
     #[cfg(test)]
     set_for_test: Option<String>,
+    /// In tests, the `sbx policy init` command the setup dialog selected.
+    #[cfg(test)]
+    policy_command_for_test: Option<String>,
     /// In tests, the answer to the "secret already exists" lookup. `None` means
     /// no existing secret, so the usual set flow keeps working unchanged.
     #[cfg(test)]
@@ -153,9 +164,11 @@ pub struct App {
 }
 
 impl App {
+    /// Construct the app without starting any CLI work. The host calls
+    /// `require_policy_setup` when needed, then `start` to begin loading.
     pub fn new() -> Self {
-        #[allow(unused_mut)] // only the non-test first load needs to mutate it
-        let mut app = Self {
+        Self {
+            policy_setup: None,
             tab: DashboardTab::default(),
             sandboxes: Vec::new(),
             secrets: Vec::new(),
@@ -193,22 +206,33 @@ impl App {
             #[cfg(test)]
             set_for_test: None,
             #[cfg(test)]
+            policy_command_for_test: None,
+            #[cfg(test)]
             secret_exists_for_test: None,
             #[cfg(test)]
             secret_refreshes_for_test: 0,
-        };
-        #[cfg(not(test))]
-        {
-            // The first frame shows an empty dashboard immediately. When the
-            // sandbox list lands, it queues the secret inventory for that list
-            // so startup never waits on a chain of `sbx` processes.
-            app.jobs.spawn(|| workers::JobResult::Sandboxes {
-                result: fetch_sandboxes(),
-                announce: false,
-                then_secrets: true,
-            });
         }
-        app
+    }
+
+    /// Begin the dashboard loads. Held until the first-run policy dialog has
+    /// been satisfied so `sbx` commands are not issued before setup.
+    pub fn start(&mut self) {
+        if !self.needs_policy_setup() {
+            #[cfg(not(test))]
+            self.start_initial_load();
+        }
+    }
+
+    #[cfg(not(test))]
+    fn start_initial_load(&mut self) {
+        // The first frame shows an empty dashboard immediately. When the
+        // sandbox list lands, it queues the secret inventory for that list so
+        // startup never waits on a chain of `sbx` processes.
+        self.jobs.spawn(|| workers::JobResult::Sandboxes {
+            result: fetch_sandboxes(),
+            announce: false,
+            then_secrets: true,
+        });
     }
 
     pub fn should_quit(&self) -> bool {
@@ -222,7 +246,9 @@ impl App {
     /// Logical screen, derived from the modal stack so the two can never
     /// disagree about which layer is active.
     pub fn mode(&self) -> Mode {
-        if self.modals.is_open(WORKSPACE_DIALOG) {
+        if self.modals.is_open(POLICY_DIALOG) {
+            Mode::PolicySetup
+        } else if self.modals.is_open(WORKSPACE_DIALOG) {
             Mode::Workspace
         } else if self.modals.is_open(CREATE_DIALOG) {
             Mode::Wizard

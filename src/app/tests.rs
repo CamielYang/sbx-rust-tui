@@ -1,10 +1,12 @@
 use std::ffi::OsStr;
 use std::io;
 use std::path::PathBuf;
+use std::process::{Command, ExitStatus, Output};
 
 use super::form::{
     parse_memory_mib, validate_cpus, validate_gb_size, validate_memory, validate_name,
 };
+use super::policy::{NetworkPolicy, listing_is_json};
 use super::ports::parse_ports;
 use super::sandbox::{VmMetrics, format_size, json_text, parse_host_mounts, parse_vm_metrics};
 use super::test_support::TempWorkspaceDir;
@@ -41,6 +43,111 @@ fn memory_validation() {
     assert!(validate_memory("").is_ok());
     assert!(validate_memory("256m").is_err());
     assert!(validate_memory("nonsense").is_err());
+}
+
+fn exit_status(success: bool) -> ExitStatus {
+    if cfg!(windows) {
+        Command::new("cmd")
+            .args(["/C", if success { "exit 0" } else { "exit 1" }])
+            .status()
+            .unwrap()
+    } else {
+        Command::new(if success { "true" } else { "false" })
+            .status()
+            .unwrap()
+    }
+}
+
+fn cli_output(success: bool, stdout: &[u8], stderr: &[u8]) -> Output {
+    Output {
+        status: exit_status(success),
+        stdout: stdout.to_vec(),
+        stderr: stderr.to_vec(),
+    }
+}
+
+#[test]
+fn policy_listing_is_ready_only_with_json_on_stdout() {
+    let json = br#"{"policies":[{"name":"balanced"}]}"#;
+    let prompt = b"Choose the network policy for sandboxes\n1. Open\n2. Balanced\n3. Locked Down";
+
+    assert!(listing_is_json(&Ok(cli_output(true, json, b""))));
+    assert!(!listing_is_json(&Ok(cli_output(
+        true,
+        b"",
+        b"error: global network policy has not been initialized"
+    ))));
+    assert!(!listing_is_json(&Ok(cli_output(true, prompt, b""))));
+    assert!(!listing_is_json(&Err(io::Error::other("sbx is missing"))));
+}
+
+#[test]
+fn policy_options_map_to_the_cli_arguments() {
+    assert_eq!(
+        NetworkPolicy::OpenAll.init_command().preview(),
+        "sbx policy init allow-all"
+    );
+    assert_eq!(
+        NetworkPolicy::Balanced.init_command().preview(),
+        "sbx policy init balanced"
+    );
+    assert_eq!(
+        NetworkPolicy::LockedDown.init_command().preview(),
+        "sbx policy init deny-all"
+    );
+    assert_eq!(NetworkPolicy::from_index(3), None);
+}
+
+#[test]
+fn policy_setup_runs_the_selected_command_and_closes_on_success() {
+    let mut app = App::with_policy_setup(true);
+    assert!(matches!(app.mode(), Mode::PolicySetup));
+    assert!(app.modals_ref().is_open(POLICY_DIALOG));
+
+    app.set_policy_focus(2);
+    assert_eq!(app.policy_focus(), 2);
+    app.select_network_policy(2);
+    assert_eq!(
+        app.take_policy_command_for_test().as_deref(),
+        Some("sbx policy init deny-all")
+    );
+    assert!(app.policy_pending());
+    assert_eq!(app.policy_selection(), Some(2));
+
+    app.queue_job_result_for_test(super::workers::JobResult::PolicyInit {
+        result: Ok(cli_output(true, b"", b"")),
+    });
+    app.poll_jobs();
+
+    assert!(!app.needs_policy_setup());
+    assert!(matches!(app.mode(), Mode::Normal));
+    assert!(!app.modals_ref().is_open(POLICY_DIALOG));
+    assert!(
+        app.message()
+            .contains("Locked Down network policy initialized")
+    );
+}
+
+#[test]
+fn failed_policy_init_keeps_the_dialog_open_for_a_retry() {
+    let mut app = App::with_policy_setup(true);
+    app.select_network_policy(1);
+    assert!(app.policy_pending());
+
+    app.queue_job_result_for_test(super::workers::JobResult::PolicyInit {
+        result: Ok(cli_output(
+            false,
+            b"",
+            b"error: could not initialize policy\n  try: sbx policy init balanced\n",
+        )),
+    });
+    app.poll_jobs();
+
+    assert!(app.needs_policy_setup());
+    assert!(app.modals_ref().is_open(POLICY_DIALOG));
+    assert!(!app.policy_pending());
+    assert_eq!(app.policy_selection(), None);
+    assert!(app.message().contains("error: could not initialize policy"));
 }
 
 #[test]

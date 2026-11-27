@@ -12,9 +12,9 @@ use ratcn::runtime::{ChildId, DeclareCtx, FocusState};
 use ratcn::{InputState, Theme};
 
 use crate::app::{
-    App, CONFIRM_DIALOG, CREATE_DIALOG, DashboardTab, FormField, INFO_DIALOG, PORTS_DIALOG,
-    PortField, SET_CUSTOM_SECRET_DIALOG, SET_SECRET_DIALOG, Sandbox, SecretId, TAB_ROW,
-    WORKSPACE_DIALOG,
+    App, CONFIRM_DIALOG, CREATE_DIALOG, DashboardTab, FormField, INFO_DIALOG, POLICY_DIALOG,
+    PORTS_DIALOG, PortField, SET_CUSTOM_SECRET_DIALOG, SET_SECRET_DIALOG, Sandbox, SecretId,
+    TAB_ROW, WORKSPACE_DIALOG,
 };
 
 mod dashboard;
@@ -26,8 +26,8 @@ use self::dashboard::{
     paint_secrets_toolbar, paint_tabs, paint_toolbar,
 };
 use self::dialogs::{
-    confirm_dialog, create_dialog, info_dialog, ports_dialog, set_custom_secret_dialog,
-    set_secret_dialog, workspace_dialog,
+    confirm_dialog, create_dialog, info_dialog, policy_dialog, ports_dialog,
+    set_custom_secret_dialog, set_secret_dialog, workspace_dialog,
 };
 
 // The UI tests reach these helpers through `use super::*`.
@@ -47,6 +47,8 @@ use ratatui::style::Color;
 #[derive(Clone, Debug)]
 pub enum Msg {
     FocusChanged(FocusState),
+    PolicyFocused(usize),
+    PolicySelected(usize),
     SandboxFocused(String, usize),
     SandboxSelected(String),
     SandboxScrolled(usize),
@@ -133,6 +135,8 @@ pub fn apply(app: &mut App, msg: Msg) {
     }
     match msg {
         Msg::FocusChanged(focus) => *app.focus_mut() = focus,
+        Msg::PolicyFocused(index) => app.set_policy_focus(index),
+        Msg::PolicySelected(index) => app.select_network_policy(index),
         // Moving the cursor (hover or arrow keys) only moves the highlight.
         // Clicking or Enter commits the row as the Actions pane's target.
         Msg::SandboxFocused(name, offset) => app.focus_list_item(&name, offset),
@@ -294,6 +298,11 @@ pub fn declare(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme) {
 
     // Modals are declared last so their layers cover the dashboard. Ids come
     // from App's ModalState, which Ratcn validates against this declaration.
+    // The first-run policy choice is alone on the stack, so it can be declared
+    // before the others without changing their layering.
+    if app.modals_ref().is_open(POLICY_DIALOG) {
+        ctx.modal(POLICY_DIALOG, policy_dialog(app, &theme), area);
+    }
     if app.modals_ref().is_open(CREATE_DIALOG) {
         ctx.modal(CREATE_DIALOG, create_dialog(app, &theme), area);
     }

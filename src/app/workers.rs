@@ -21,6 +21,9 @@ pub(super) const CREATE_TOAST: &str = "create-sandbox";
 /// thread, where ratcn's state and the modal stack can be updated safely.
 #[cfg_attr(test, allow(dead_code))] // production builds construct every variant
 pub(super) enum JobResult {
+    PolicyInit {
+        result: io::Result<Output>,
+    },
     Sandboxes {
         result: Result<Vec<Sandbox>, String>,
         /// True for a button/shortcut refresh, false for the five-second tick.
@@ -217,6 +220,7 @@ impl App {
 
     fn apply_job_result(&mut self, result: JobResult) {
         match result {
+            JobResult::PolicyInit { result } => self.finish_policy_init(result),
             JobResult::Sandboxes {
                 result,
                 announce,

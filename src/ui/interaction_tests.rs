@@ -89,6 +89,27 @@ fn type_text(
 }
 
 #[test]
+fn arrow_keys_and_enter_select_a_network_policy() {
+    let mut app = App::with_policy_setup(true);
+    let mut ratcn = new_runtime();
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    draw(&mut terminal, &app, &mut ratcn);
+
+    for code in [KeyCode::Down, KeyCode::Enter] {
+        let event = Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
+        if let EventResult::Emit(message) = ratcn.handle_event(event, &app) {
+            apply(&mut app, message);
+        }
+        draw(&mut terminal, &app, &mut ratcn);
+    }
+
+    assert_eq!(
+        app.take_policy_command_for_test().as_deref(),
+        Some("sbx policy init balanced")
+    );
+}
+
+#[test]
 fn clicking_a_sandbox_focuses_its_actions() {
     let mut app = App::with_sandbox_statuses(&[("alpha", "running"), ("beta", "stopped")]);
     let mut ratcn = new_runtime();

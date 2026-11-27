@@ -1,8 +1,8 @@
 use super::*;
 use crate::app::test_support::TempWorkspaceDir;
 use crate::app::{
-    CONFIRM_DIALOG, HostMount, INFO_DIALOG, Mode, MountMode, PORTS_DIALOG, PortMapping, SERVICES,
-    SET_CUSTOM_SECRET_DIALOG, SET_SECRET_DIALOG, SandboxDetails, Secret,
+    CONFIRM_DIALOG, HostMount, INFO_DIALOG, Mode, MountMode, POLICY_DIALOG, PORTS_DIALOG,
+    PortMapping, SERVICES, SET_CUSTOM_SECRET_DIALOG, SET_SECRET_DIALOG, SandboxDetails, Secret,
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 use ratcn::runtime::Ratcn;
@@ -32,6 +32,22 @@ fn render(app: &App) -> String {
         .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[test]
+fn policy_dialog_lists_all_three_choices() {
+    let app = App::with_policy_setup(true);
+    assert!(app.modals_ref().is_open(POLICY_DIALOG));
+
+    let screen = render(&app);
+    assert!(screen.contains("Network policy"));
+    assert!(screen.contains("Choose the network policy for sandboxes"));
+    assert!(screen.contains("Open"));
+    assert!(screen.contains("all network traffic allowed, no restrictions"));
+    assert!(screen.contains("Balanced"));
+    assert!(screen.contains("default deny, with common dev sites allowed"));
+    assert!(screen.contains("Locked Down"));
+    assert!(screen.contains("all traffic blocked unless you allow it"));
 }
 
 #[test]

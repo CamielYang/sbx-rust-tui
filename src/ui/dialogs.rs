@@ -3,20 +3,21 @@
 
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratcn::color::{away_from, dim};
 use ratcn::{
     Button, ButtonStyle, ButtonVariant, Checkbox, Cycle, Dialog, InputState, List, ListItem,
-    Select, Theme,
+    ListItemState, Select, Theme,
 };
 
 use super::dashboard::{REMOVE_RED, START_GREEN, STOP_ORANGE, action_style};
 use super::widgets::{detail_line, field_row, input, join_usage};
 use super::*;
 use crate::app::{
-    AGENTS, FormField, HostMount, MountMode, PendingAction, PortField, PortMapping, SandboxDetails,
-    SERVICES, Secret, SecretForm, WORKSPACE_PARENT, WorkspaceMode, WorkspacePicker, is_global_scope,
+    AGENTS, FormField, HostMount, MountMode, NetworkPolicy, PendingAction, PortField, PortMapping,
+    SERVICES, SandboxDetails, Secret, SecretForm, WORKSPACE_PARENT, WorkspaceMode, WorkspacePicker,
+    is_global_scope,
 };
 
 /// The confirmation dialog's focused Cancel sets the look for every dismiss
@@ -37,6 +38,89 @@ pub(super) fn cancel_style(theme: &Theme) -> ButtonStyle {
 /// cannot drift between dialogs.
 fn cancel_button<M>(label: impl Into<String>, on_press: impl Fn() -> M + 'static) -> Button<M> {
     Button::new(label).style(cancel_style).on_press(on_press)
+}
+
+// --- first-run network policy dialog ---------------------------------------
+
+/// Shown only when `sbx policy ls --json` did not return JSON. Choosing a row
+/// runs `sbx policy init` immediately; the list disables itself while the CLI
+/// job is in flight and reopens for a retry if the command fails.
+pub(super) fn policy_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
+    let theme = *theme;
+    let options: Vec<ListItem<usize>> = NetworkPolicy::ALL
+        .iter()
+        .enumerate()
+        .map(|(index, policy)| ListItem::new(index, policy.label()))
+        .collect();
+    let policies = List::new(options)
+        .item_focus(
+            |state: &App| Some(state.policy_focus()),
+            |index, _scroll| Msg::PolicyFocused(index),
+        )
+        .selection(|state: &App| state.policy_selection(), Msg::PolicySelected)
+        .row_height(2)
+        .paint_item(move |_: &App, row: ListItemState<'_, usize>| {
+            let policy = NetworkPolicy::from_index(*row.value).expect("policy option");
+            let name_style = if row.focused {
+                Style::default()
+                    .fg(theme.foreground)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.foreground)
+            };
+            let marker = if row.selected { "●" } else { "○" };
+            Text::from(vec![
+                Line::from(vec![
+                    Span::styled(format!(" {marker} "), name_style),
+                    Span::styled(policy.label(), name_style),
+                ]),
+                Line::from(Span::styled(
+                    format!("     {}", policy.description()),
+                    Style::default().fg(theme.muted_foreground),
+                )),
+            ])
+        })
+        .disabled(app.policy_pending());
+
+    let (status, status_color) = if app.policy_pending() {
+        (" Initializing network policy…", theme.primary)
+    } else {
+        (
+            " ↑↓ / click to choose · Enter applies",
+            theme.muted_foreground,
+        )
+    };
+
+    // No on_dismiss: `sbx` is unusable until a policy is chosen, so Esc is
+    // absorbed by the modal rather than closing it.
+    Dialog::new()
+        .title("Network policy")
+        .outer_width(72)
+        .content(8, move |ctx| {
+            let rows = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Min(6),
+                Constraint::Length(1),
+            ])
+            .split(ctx.area());
+            ctx.paint_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    " Choose the network policy for sandboxes",
+                    Style::default().fg(theme.muted_foreground),
+                ))),
+                rows[0],
+            );
+            if rows[1].height > 0 && rows[1].width > 0 {
+                ctx.component("policy-options", policies, rows[1]);
+            }
+            ctx.paint_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    status,
+                    Style::default().fg(status_color),
+                ))),
+                rows[2],
+            );
+        })
 }
 
 // --- create dialog ----------------------------------------------------------

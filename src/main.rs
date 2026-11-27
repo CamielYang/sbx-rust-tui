@@ -4,7 +4,7 @@ mod ui;
 use std::io::{self, Stdout};
 use std::time::{Duration, Instant};
 
-use app::{App, INFO_REFRESH_INTERVAL, Mode, STATUS_REFRESH_INTERVAL};
+use app::{App, INFO_REFRESH_INTERVAL, Mode, STATUS_REFRESH_INTERVAL, StartupCheck, check_startup};
 use crossterm::{
     cursor,
     event::{
@@ -30,8 +30,16 @@ const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(16);
 fn main() -> Result<()> {
     install_panic_hook();
 
+    // Probe `sbx` before taking over the terminal: an uninitialized policy
+    // prints a plain-text prompt, which would be unreadable on the alt screen.
+    let needs_policy_setup = check_startup() == StartupCheck::NeedsSetup;
+
     let mut terminal = init_terminal()?;
     let mut app = App::new();
+    if needs_policy_setup {
+        app.require_policy_setup();
+    }
+    app.start();
     let result = run(&mut terminal, &mut app);
 
     restore_terminal(&mut terminal)?;

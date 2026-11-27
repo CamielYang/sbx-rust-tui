@@ -16,6 +16,16 @@ use super::{
 
 #[cfg(test)]
 impl App {
+    /// Build an app as the host does, optionally with the first-run dialog.
+    pub fn with_policy_setup(needs_setup: bool) -> Self {
+        let mut app = Self::new();
+        if needs_setup {
+            app.require_policy_setup();
+        }
+        app.start();
+        app
+    }
+
     /// Put the app into the same state `start_creation` does, without spawning
     /// a real `sbx` process. The sender is dropped, so `poll_creation` observes
     /// a disconnected worker.
@@ -171,6 +181,11 @@ impl App {
     /// this instead of letting the app shell out to `sbx`.
     pub fn take_confirmed_for_test(&mut self) -> Option<PendingAction> {
         self.confirmed_for_test.take()
+    }
+
+    /// The `sbx policy init` command chosen by the first-run dialog.
+    pub fn take_policy_command_for_test(&mut self) -> Option<String> {
+        self.policy_command_for_test.take()
     }
 }
 
