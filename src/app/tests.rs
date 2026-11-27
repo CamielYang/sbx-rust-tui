@@ -940,7 +940,7 @@ fn secrets_start_empty_until_the_cli_is_read() {
 #[test]
 fn clicking_a_secret_row_opens_info_and_close_clears_it() {
     let mut app = App::with_secrets(&[("(global)", "github"), ("test", "nebius")]);
-    app.open_secret_info("github", "(global)");
+    app.open_secret_info(&SecretId::Service("github".to_owned()), "(global)");
 
     assert!(matches!(app.mode(), Mode::Info));
     assert!(app.modals_ref().is_open(INFO_DIALOG));
@@ -955,10 +955,30 @@ fn clicking_a_secret_row_opens_info_and_close_clears_it() {
 }
 
 #[test]
+fn custom_secret_info_is_keyed_by_scope_and_env_key() {
+    let mut app = App::with_secrets(&[]);
+    app.set_secrets_for_test(vec![
+        Secret::custom("test", "TEST", ["first.example.com".to_owned()]),
+        Secret::custom("test", "TEST2", ["second.example.com".to_owned()]),
+        Secret::custom("other", "TEST2", ["third.example.com".to_owned()]),
+    ]);
+
+    app.open_secret_info(&SecretId::Custom("TEST2".to_owned()), "test");
+    let secret = app.secret_info().expect("secret details");
+    assert_eq!(secret.env_vars, ["TEST2"]);
+    assert_eq!(secret.api_domains, ["second.example.com"]);
+
+    app.open_secret_info(&SecretId::Custom("TEST2".to_owned()), "other");
+    let secret = app.secret_info().expect("secret details");
+    assert_eq!(secret.env_vars, ["TEST2"]);
+    assert_eq!(secret.api_domains, ["third.example.com"]);
+}
+
+#[test]
 fn opening_sandbox_info_replaces_secret_info() {
     let mut app = App::with_sandbox_statuses(&[("alpha", "running")]);
     app.set_secrets_for_test(vec![Secret::new("(global)", "github")]);
-    app.open_secret_info("github", "(global)");
+    app.open_secret_info(&SecretId::Service("github".to_owned()), "(global)");
     app.open_info("alpha");
 
     assert!(app.secret_info().is_none());
@@ -1307,6 +1327,23 @@ fn a_removed_custom_secret_is_then_set_with_the_new_value() {
             "sbx secret set-custom --sandbox alpha --host api.example.com --env TEST_KEY --value sk-test"
         )
     );
+    assert!(app.message().contains("Set custom secret 'TEST_KEY'."));
+}
+
+#[test]
+fn a_successful_custom_secret_set_refreshes_the_secrets_table() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_custom_secret();
+    let before = app.secret_refreshes_for_test();
+    app.queue_job_result_for_test(JobResult::CustomSecretSet {
+        success: "Set custom secret 'TEST_KEY'.".to_owned(),
+        result: Ok(fake_output(true, "")),
+    });
+
+    app.poll_jobs();
+
+    assert_eq!(app.secret_refreshes_for_test(), before + 1);
+    assert!(app.custom_secret_form().is_none());
     assert!(app.message().contains("Set custom secret 'TEST_KEY'."));
 }
 

@@ -13,7 +13,8 @@ use ratcn::{InputState, Theme};
 
 use crate::app::{
     App, CONFIRM_DIALOG, CREATE_DIALOG, DashboardTab, FormField, INFO_DIALOG, PORTS_DIALOG,
-    PortField, SET_CUSTOM_SECRET_DIALOG, SET_SECRET_DIALOG, Sandbox, TAB_ROW, WORKSPACE_DIALOG,
+    PortField, SET_CUSTOM_SECRET_DIALOG, SET_SECRET_DIALOG, Sandbox, SecretId, TAB_ROW,
+    WORKSPACE_DIALOG,
 };
 
 mod dashboard;
@@ -77,8 +78,9 @@ pub enum Msg {
     DeleteSecret(String, String),
     /// Custom secret env key, scope, and CLI placeholder, in that order.
     DeleteCustomSecret(String, String, String),
-    /// A clicked secret row: name followed by scope, as in `DeleteSecret`.
-    OpenSecretInfo(String, String),
+    /// A clicked secret row: its stable id followed by scope. Custom rows carry
+    /// their env key, since their `(custom)` label is not unique.
+    OpenSecretInfo(SecretId, String),
     Quit,
     CancelWizard,
     CreateSandbox,
@@ -164,7 +166,7 @@ pub fn apply(app: &mut App, msg: Msg) {
         Msg::DeleteCustomSecret(env_key, scope, placeholder) => {
             app.delete_custom_secret(&env_key, &scope, &placeholder)
         }
-        Msg::OpenSecretInfo(name, scope) => app.open_secret_info(&name, &scope),
+        Msg::OpenSecretInfo(id, scope) => app.open_secret_info(&id, &scope),
         Msg::Quit => app.quit(),
         Msg::CancelWizard => app.cancel_wizard(),
         Msg::CreateSandbox => app.create_from_form(),

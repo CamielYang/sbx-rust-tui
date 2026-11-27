@@ -1,6 +1,6 @@
 //! Modal dialog lifecycle: the create wizard and the sandbox/secret Info dialog.
 
-use super::{App, CREATE_DIALOG, Form, INFO_DIALOG, SandboxDetails};
+use super::{App, CREATE_DIALOG, Form, INFO_DIALOG, SandboxDetails, SecretId};
 
 impl App {
     /// Close a modal only when it is the topmost layer. Each dialog also clears
@@ -60,11 +60,13 @@ impl App {
 
     /// A clicked secret row opens the same Info dialog with its own details.
     /// The lookup uses the current table so a stale row cannot show old data.
-    pub fn open_secret_info(&mut self, name: &str, scope: &str) {
+    /// Custom rows are keyed by `(scope, env_key)`; their `(custom)` display
+    /// name is shared by every custom row and cannot identify one.
+    pub fn open_secret_info(&mut self, id: &SecretId, scope: &str) {
         let Some(secret) = self
             .secrets
             .iter()
-            .find(|secret| secret.name == name && secret.scope == scope)
+            .find(|secret| secret.scope == scope && secret.matches_id(id))
             .cloned()
         else {
             return;

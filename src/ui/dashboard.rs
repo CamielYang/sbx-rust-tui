@@ -200,7 +200,7 @@ pub(super) fn paint_secrets_body(
 
     for (index, secret) in app.secrets().iter().take(visible).enumerate() {
         let row = Rect::new(inner.x, inner.y + 1 + index as u16, inner.width, 1);
-        let name = secret.name.clone();
+        let id = secret.id();
         let scope = secret.scope.clone();
         // An invisible ghost button covers the text columns. It is declared
         // first so the row's spans paint over it; at rest there is nothing to
@@ -209,7 +209,7 @@ pub(super) fn paint_secrets_body(
             format!("secrets-row-{index}"),
             Button::new("")
                 .ghost()
-                .on_press(move || Msg::OpenSecretInfo(name.clone(), scope.clone())),
+                .on_press(move || Msg::OpenSecretInfo(id.clone(), scope.clone())),
             Rect::new(
                 inner.x,
                 row.y,

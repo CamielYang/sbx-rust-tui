@@ -1,7 +1,7 @@
 use super::*;
 use crate::app::test_support::TempWorkspaceDir;
 use crate::app::{
-    INFO_DIALOG, Mode, SET_CUSTOM_SECRET_DIALOG, SET_SECRET_DIALOG, Secret, WorkspaceMode,
+    INFO_DIALOG, Mode, SET_CUSTOM_SECRET_DIALOG, SET_SECRET_DIALOG, Secret, SecretId, WorkspaceMode,
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{Terminal, backend::TestBackend};
@@ -416,7 +416,8 @@ fn clicking_a_secret_row_opens_its_info_dialog() {
     let emitted = click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
     assert!(emitted.iter().any(|message| matches!(
         message,
-        Msg::OpenSecretInfo(name, scope) if name == "github" && scope == "(global)"
+        Msg::OpenSecretInfo(id, scope)
+            if id == &SecretId::Service("github".to_owned()) && scope == "(global)"
     )));
     assert!(app.modals_ref().is_open(INFO_DIALOG));
 
@@ -424,6 +425,31 @@ fn clicking_a_secret_row_opens_its_info_dialog() {
     assert!(text.contains("ENV VAR"));
     assert!(text.contains("GH_TOKEN, GITHUB_TOKEN"));
     assert!(text.contains("api.githubcopilot.com"));
+}
+
+#[test]
+fn clicking_the_second_custom_secret_row_opens_its_own_info_dialog() {
+    let mut app = App::with_secrets(&[]);
+    app.set_secrets_for_test(vec![
+        Secret::custom("test", "TEST", ["first.example.com".to_owned()]),
+        Secret::custom("test", "TEST2", ["second.example.com".to_owned()]),
+    ]);
+    app.select_tab(DashboardTab::Secrets);
+    let mut ratcn = new_runtime();
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    draw(&mut terminal, &app, &mut ratcn);
+
+    let (x, y) = position_from_bottom(&screen(&terminal), "TEST2").expect("TEST2 row");
+    let emitted = click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+    assert!(emitted.iter().any(|message| matches!(
+        message,
+        Msg::OpenSecretInfo(id, scope)
+            if id == &SecretId::Custom("TEST2".to_owned()) && scope == "test"
+    )));
+
+    let secret = app.secret_info().expect("secret details");
+    assert_eq!(secret.env_vars, ["TEST2"]);
+    assert_eq!(secret.api_domains, ["second.example.com"]);
 }
 
 #[test]

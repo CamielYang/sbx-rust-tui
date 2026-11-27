@@ -114,6 +114,11 @@ impl App {
         self.jobs.queue_for_test(result);
     }
 
+    /// How many secret-list refreshes have been queued, for table-update tests.
+    pub(super) fn secret_refreshes_for_test(&self) -> usize {
+        self.secret_refreshes_for_test
+    }
+
     /// The token of the dialog's current port listing, for stale-result tests.
     pub(super) fn ports_token_for_test(&self) -> u64 {
         self.ports_token

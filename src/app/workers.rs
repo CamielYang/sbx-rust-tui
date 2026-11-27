@@ -357,8 +357,10 @@ impl App {
                         self.close_modal(super::SET_CUSTOM_SECRET_DIALOG);
                         self.custom_secret_form = None;
                     }
-                    // Table loading is deliberately out of scope here: the
-                    // custom command writes to hosts, not to the local inventory.
+                    // Custom rows come from the same `sbx secret ls` listing
+                    // as service rows, so the table must be re-read to show
+                    // the new entry (just like the Set secret path).
+                    self.refresh_secrets();
                     self.notify_success(success, None);
                 }
                 Ok(output) => self.notify_error(

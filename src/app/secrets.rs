@@ -26,6 +26,16 @@ pub struct Secret {
     pub placeholder: Option<String>,
 }
 
+/// Stable identity for a clicked row. Service rows are keyed by their name;
+/// custom rows all display `(custom)`, so they are keyed by the env name that
+/// makes them unique within a scope — the same `(scope, env_name)` pair used by
+/// `sbx secret ls --env-name <key>`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SecretId {
+    Service(String),
+    Custom(String),
+}
+
 impl Secret {
     pub fn new(scope: impl Into<String>, name: impl Into<String>) -> Self {
         let name = name.into();
@@ -89,6 +99,24 @@ impl Secret {
     /// The ENV VAR cell and the info dialog's value for one row.
     pub fn env_vars_label(&self) -> String {
         self.env_vars.join(", ")
+    }
+
+    /// The identity a row click carries. Custom rows use their env key, not the
+    /// shared `(custom)` display name, so two custom rows stay distinguishable.
+    pub fn id(&self) -> SecretId {
+        match self.env_key() {
+            Some(env_key) => SecretId::Custom(env_key.to_owned()),
+            None => SecretId::Service(self.name.clone()),
+        }
+    }
+
+    /// Match a clicked identity against this row. The scope is checked by the
+    /// caller, so only the row-specific half lives here.
+    pub fn matches_id(&self, id: &SecretId) -> bool {
+        match id {
+            SecretId::Service(name) => !self.is_custom() && self.name.as_str() == name.as_str(),
+            SecretId::Custom(env_key) => self.env_key() == Some(env_key.as_str()),
+        }
     }
 }
 
@@ -754,7 +782,8 @@ impl App {
     }
 
     /// Run the custom set command for the values still held by the form, then
-    /// close the dialog. Shared by the direct and confirmed paths.
+    /// close the dialog and refresh the table. Shared by the direct and
+    /// confirmed paths.
     pub(super) fn finish_set_custom_secret(&mut self, env_key: &str, scope: &str) {
         let Some(form) = self.custom_secret_form.as_ref() else {
             return;

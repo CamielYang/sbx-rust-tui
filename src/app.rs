@@ -37,7 +37,7 @@ pub use self::secret_form::{
     CustomSecretForm, GLOBAL_SCOPE, SERVICES, SecretForm, is_global_scope,
 };
 #[allow(unused_imports)]
-pub use self::secrets::{Secret, fetch_secrets, fetch_secrets_for};
+pub use self::secrets::{Secret, SecretId, fetch_secrets, fetch_secrets_for};
 pub use self::service_catalog::service_info;
 pub use self::workspace::{WORKSPACE_PARENT, WorkspacePicker};
 
@@ -147,6 +147,9 @@ pub struct App {
     /// no existing secret, so the usual set flow keeps working unchanged.
     #[cfg(test)]
     secret_exists_for_test: Option<bool>,
+    /// In tests, how many secret-list refreshes have been queued.
+    #[cfg(test)]
+    secret_refreshes_for_test: usize,
 }
 
 impl App {
@@ -191,6 +194,8 @@ impl App {
             set_for_test: None,
             #[cfg(test)]
             secret_exists_for_test: None,
+            #[cfg(test)]
+            secret_refreshes_for_test: 0,
         };
         #[cfg(not(test))]
         {
@@ -518,6 +523,10 @@ impl App {
     }
 
     fn refresh_secrets_announced_inner(&mut self, announce: bool) {
+        #[cfg(test)]
+        {
+            self.secret_refreshes_for_test += 1;
+        }
         let sandboxes = self.sandboxes.clone();
         self.jobs.spawn(move || workers::JobResult::Secrets {
             result: fetch_secrets_for(&sandboxes),
