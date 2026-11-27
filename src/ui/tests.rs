@@ -58,15 +58,15 @@ fn renders_tabs_with_quit_on_the_title_row() {
     assert!(rows[2].contains("Sandboxes"));
     assert!(rows[2].contains("Secrets"));
     assert!(
-        rows[3].trim().is_empty(),
-        "spacing between tabs and content"
+        rows[3].starts_with('┌') && rows[3].ends_with('┐'),
+        "content wrapper border sits directly below the tabs"
     );
-    assert!(rows[8].contains(" Sandboxes "));
-    assert!(rows[9].contains("alpha"));
+    assert!(rows[7].contains(" Sandboxes "));
+    assert!(rows[8].contains("alpha"));
 
     let buffer = draw(&app);
     assert_eq!(
-        buffer.cell((0, 4)).unwrap().fg,
+        buffer.cell((0, 3)).unwrap().fg,
         Color::White,
         "white content wrapper outline"
     );
