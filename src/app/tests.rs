@@ -28,6 +28,7 @@ fn size_and_cpu_validation() {
     assert!(validate_gb_size("20").is_ok());
     assert!(validate_gb_size("40g").is_err());
     assert!(validate_gb_size("40x").is_err());
+    assert!(validate_cpus("").is_ok());
     assert!(validate_cpus("2").is_ok());
     assert!(validate_cpus("0").is_ok());
     assert!(validate_cpus("abc").is_err());
@@ -37,8 +38,23 @@ fn size_and_cpu_validation() {
 fn memory_validation() {
     assert_eq!(parse_memory_mib("512m"), Some(512));
     assert_eq!(parse_memory_mib("8g"), Some(8192));
+    assert!(validate_memory("").is_ok());
     assert!(validate_memory("256m").is_err());
     assert!(validate_memory("nonsense").is_err());
+}
+
+#[test]
+fn form_starts_with_empty_optional_resource_fields() {
+    let mut form = Form::new();
+    assert!(form.cpus().value().is_empty());
+    assert!(form.memory().value().is_empty());
+
+    form.name = InputState::new("sandbox-name");
+    assert!(form.first_error().is_none());
+    assert_eq!(
+        form.create_command().preview(),
+        "sbx create --name sandbox-name opencode"
+    );
 }
 
 #[test]

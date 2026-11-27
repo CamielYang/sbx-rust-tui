@@ -74,14 +74,14 @@ pub(super) fn create_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
     let cpus = text_input(
         FormField::Cpus,
         |state: &App| state.form().cpus(),
-        "2",
+        "2 (optional)",
         creating,
         form.invalid(FormField::Cpus),
     );
     let memory = text_input(
         FormField::Memory,
         |state: &App| state.form().memory(),
-        "4g",
+        "4g (optional)",
         creating,
         form.invalid(FormField::Memory),
     );

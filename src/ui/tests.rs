@@ -597,6 +597,8 @@ fn renders_create_dialog() {
     assert!(screen.contains("New sandbox"));
     assert!(screen.contains("Create sandbox"));
     assert!(screen.contains("sandbox-name"));
+    assert!(screen.contains("2 (optional)"));
+    assert!(screen.contains("4g (optional)"));
     assert!(screen.contains("opencode"));
     assert!(!screen.contains("Ready to create"));
 
