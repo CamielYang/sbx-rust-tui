@@ -48,4 +48,4 @@ For a development build, use `cargo run` from the project directory instead.
 
 ## Platform Support & Build Testing
 
-The build has been mainly tested on **Windows**. Please be aware that **Linux** and **macOS** have not yet been tested and may encounter minor issues.
+The build has been mainly tested on **Windows** and **Linux**. Please be aware that **macOS** have not yet been tested and may encounter minor issues.
