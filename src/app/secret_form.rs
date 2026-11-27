@@ -152,10 +152,15 @@ impl SecretForm {
 }
 
 /// State for the Set custom secret dialog. Each host is its own input so the
-/// dialog can send one `--host` per filled row, in the order shown.
+/// dialog can send one `--host` per filled row, in the order shown. The scope
+/// list is a snapshot taken when the dialog opens, just like Set secret.
 #[derive(Clone)]
 pub struct CustomSecretForm {
     pub(super) env_key: InputState,
+    pub(super) scopes: Vec<String>,
+    pub(super) scope_index: usize,
+    pub(super) scope_focus: usize,
+    pub(super) scope_open: bool,
     pub(super) secret: InputState,
     pub(super) hosts: Vec<InputState>,
     /// Set once **Set custom secret** is pressed, so empty fields can be
@@ -164,9 +169,15 @@ pub struct CustomSecretForm {
 }
 
 impl CustomSecretForm {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(sandboxes: &[Sandbox]) -> Self {
+        let mut scopes = vec![GLOBAL_SCOPE.to_owned()];
+        scopes.extend(sandboxes.iter().map(|sandbox| sandbox.name.clone()));
         Self {
             env_key: InputState::new(""),
+            scopes,
+            scope_index: 0,
+            scope_focus: 0,
+            scope_open: false,
             secret: InputState::new(""),
             hosts: vec![InputState::new("")],
             attempted: false,
@@ -175,6 +186,41 @@ impl CustomSecretForm {
 
     pub fn env_key(&self) -> &InputState {
         &self.env_key
+    }
+
+    pub fn scopes(&self) -> &[String] {
+        &self.scopes
+    }
+
+    pub fn scope_index(&self) -> usize {
+        self.scope_index
+    }
+
+    pub fn scope_focus(&self) -> usize {
+        self.scope_focus
+    }
+
+    pub fn scope_open(&self) -> bool {
+        self.scope_open
+    }
+
+    /// The committed scope: `"(global)"` or a sandbox name.
+    pub fn scope(&self) -> Option<&str> {
+        self.scopes.get(self.scope_index).map(String::as_str)
+    }
+
+    pub fn set_scope_index(&mut self, index: usize) {
+        self.scope_index = index.min(self.scopes.len().saturating_sub(1));
+        self.scope_focus = self.scope_index;
+        self.scope_open = false;
+    }
+
+    pub fn set_scope_focus(&mut self, index: usize) {
+        self.scope_focus = index.min(self.scopes.len().saturating_sub(1));
+    }
+
+    pub fn set_scope_open(&mut self, open: bool) {
+        self.scope_open = open;
     }
 
     pub fn secret(&self) -> &InputState {

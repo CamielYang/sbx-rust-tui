@@ -800,9 +800,9 @@ pub(super) fn set_secret_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
 
 // --- set custom secret dialog ----------------------------------------------
 
-/// The custom form keeps the feel of Set secret without a service or scope to
-/// choose: an env key, a masked value, and a growable list of hosts become one
-/// `sbx secret set-custom` command with a `--host` per row.
+/// The custom form keeps the feel of Set secret without a service to choose:
+/// the same scope picker, an env key, a masked value, and a growable list of
+/// hosts become one `sbx secret set-custom` command with a `--host` per row.
 pub(super) fn set_custom_secret_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
     let theme = *theme;
     let Some(form) = app.custom_secret_form() else {
@@ -837,6 +837,31 @@ pub(super) fn set_custom_secret_dialog(app: &App, theme: &Theme) -> Dialog<App, 
         false,
         invalid_env,
     );
+    let scopes = Select::new(
+        form.scopes()
+            .iter()
+            .enumerate()
+            .map(|(index, scope)| ListItem::new(index, scope.clone())),
+    )
+    .placeholder("Choose a scope")
+    .open(
+        |state: &App| {
+            state
+                .custom_secret_form()
+                .is_some_and(|form| form.scope_open())
+        },
+        Msg::CustomSecretScopeOpenChanged,
+    )
+    .item_focus(
+        |state: &App| state.custom_secret_form().map(|form| form.scope_focus()),
+        Msg::CustomSecretScopeFocused,
+    )
+    .selection(
+        |state: &App| state.custom_secret_form().map(|form| form.scope_index()),
+        Msg::CustomSecretScopeSelected,
+    )
+    .max_visible_items(8);
+
     let secret_input = input(
         Msg::CustomSecretValueChanged,
         |state: &App| {
@@ -873,8 +898,8 @@ pub(super) fn set_custom_secret_dialog(app: &App, theme: &Theme) -> Dialog<App, 
     };
 
     // Two logical rows per control, with a blank row between them. Hosts add
-    // their own rows so each input stays in the same column as Env key/Secret.
-    let total_rows = 5 + host_count;
+    // their own rows so each input stays in the same column as the other fields.
+    let total_rows = 6 + host_count;
     Dialog::new()
         .title("Set custom secret")
         .outer_width(70)
@@ -884,7 +909,10 @@ pub(super) fn set_custom_secret_dialog(app: &App, theme: &Theme) -> Dialog<App, 
                 Layout::vertical(vec![Constraint::Length(1); total_rows * 2 - 1]).split(ctx.area());
             let row = |index: usize| rows[index * 2];
             field_row(ctx, row(0), "Env key", env_input, theme);
-            field_row(ctx, row(1), "Secret", secret_input, theme);
+            field_row(ctx, row(1), "Scope", scopes, theme);
+            field_row(ctx, row(2), "Secret", secret_input, theme);
+            let host_header =
+                Layout::horizontal([Constraint::Length(20), Constraint::Min(10)]).split(row(3));
             ctx.paint_widget(
                 Paragraph::new(Line::from(Span::styled(
                     " Hosts",
@@ -892,7 +920,20 @@ pub(super) fn set_custom_secret_dialog(app: &App, theme: &Theme) -> Dialog<App, 
                         .fg(theme.muted_foreground)
                         .add_modifier(Modifier::BOLD),
                 ))),
-                row(2),
+                host_header[0],
+            );
+            ctx.paint_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        "api.example.com",
+                        Style::default().fg(theme.muted_foreground),
+                    ),
+                    Span::styled(
+                        "  *.example.com",
+                        Style::default().fg(theme.muted_foreground),
+                    ),
+                ])),
+                host_header[1],
             );
 
             for (index, &invalid) in invalid_hosts.iter().enumerate() {
@@ -909,7 +950,7 @@ pub(super) fn set_custom_secret_dialog(app: &App, theme: &Theme) -> Dialog<App, 
                     invalid,
                 );
                 let columns = Layout::horizontal([Constraint::Length(20), Constraint::Min(10)])
-                    .split(row(3 + index));
+                    .split(row(4 + index));
                 ctx.paint_widget(
                     Paragraph::new(Line::from(Span::styled(
                         format!(" Host {}", index + 1),
@@ -925,7 +966,7 @@ pub(super) fn set_custom_secret_dialog(app: &App, theme: &Theme) -> Dialog<App, 
             }
 
             let add_columns = Layout::horizontal([Constraint::Length(20), Constraint::Min(10)])
-                .split(row(3 + host_count));
+                .split(row(4 + host_count));
             ctx.component(
                 "custom-secret-add-host",
                 Button::new("+ Add host").on_press(|| Msg::AddCustomHost),
@@ -936,7 +977,7 @@ pub(super) fn set_custom_secret_dialog(app: &App, theme: &Theme) -> Dialog<App, 
                     status,
                     Style::default().fg(status_color),
                 ))),
-                row(4 + host_count),
+                row(5 + host_count),
             );
         })
         .action(

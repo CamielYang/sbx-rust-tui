@@ -746,6 +746,14 @@ fn set_custom_secret_button_adds_hosts_and_submits_their_command() {
         "API_KEY"
     );
 
+    // Pick alpha from the scope panel; the global store is the first option.
+    let (x, y) = position_from_bottom(&screen(&terminal), "(global)").expect("scope trigger");
+    click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+    assert!(app.custom_secret_form().unwrap().scope_open());
+    let (x, y) = position_from_bottom(&screen(&terminal), "alpha").expect("alpha option");
+    click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+    assert_eq!(app.custom_secret_form().unwrap().scope(), Some("alpha"));
+
     let (x, y) = position_from_bottom(&screen(&terminal), "Secret value").expect("secret input");
     click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
     type_text(&mut terminal, &mut app, &mut ratcn, "test");
@@ -781,7 +789,7 @@ fn set_custom_secret_button_adds_hosts_and_submits_their_command() {
     assert_eq!(
         app.take_set_for_test().as_deref(),
         Some(
-            "sbx secret set-custom --host api.example.com --host uploads.example.com --env API_KEY --value test"
+            "sbx secret set-custom --sandbox alpha --host api.example.com --host uploads.example.com --env API_KEY --value test"
         )
     );
     assert!(!app.modals_ref().is_open(SET_CUSTOM_SECRET_DIALOG));

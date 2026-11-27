@@ -999,6 +999,56 @@ fn a_sandbox_named_global_is_not_the_global_scope() {
 }
 
 #[test]
+fn set_custom_secret_opens_with_the_same_scope_snapshot() {
+    let mut app = App::with_sandboxes(&["alpha", "beta"]);
+    app.set_custom_secret();
+
+    assert!(matches!(app.mode(), Mode::SetCustomSecret));
+    assert!(app.modals_ref().is_open(SET_CUSTOM_SECRET_DIALOG));
+    let form = app.custom_secret_form().unwrap();
+    assert_eq!(form.scopes(), &["(global)", "alpha", "beta"]);
+    assert_eq!(form.scope(), Some("(global)"));
+    assert_eq!(form.hosts().len(), 1);
+}
+
+#[test]
+fn setting_a_global_custom_secret_matches_the_documented_command() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_custom_secret();
+    app.set_custom_env_key(InputState::new("API_KEY"));
+    app.set_custom_secret_value(InputState::new("test"));
+    app.set_custom_host(0, InputState::new("api.example.com"));
+    app.add_custom_host();
+    app.set_custom_host(1, InputState::new("uploads.example.com"));
+    app.submit_custom_secret();
+
+    assert_eq!(
+        app.take_set_for_test().as_deref(),
+        Some(
+            "sbx secret set-custom --host api.example.com --host uploads.example.com --env API_KEY --value test"
+        )
+    );
+    assert!(!app.modals_ref().is_open(SET_CUSTOM_SECRET_DIALOG));
+}
+
+#[test]
+fn setting_a_scoped_custom_secret_passes_the_sandbox_flag() {
+    let mut app = App::with_sandboxes(&["alpha"]);
+    app.set_custom_secret();
+    app.set_custom_scope(1); // alpha
+    app.set_custom_env_key(InputState::new("API_KEY"));
+    app.set_custom_secret_value(InputState::new("test"));
+    app.set_custom_host(0, InputState::new("*.example.com"));
+    app.submit_custom_secret();
+
+    assert_eq!(
+        app.take_set_for_test().as_deref(),
+        Some("sbx secret set-custom --sandbox alpha --host *.example.com --env API_KEY --value test")
+    );
+    assert!(app.message().contains("API_KEY"));
+}
+
+#[test]
 fn shell_quoting_keeps_the_pipeline_intact() {
     let mut app = App::with_sandboxes(&["my sandbox"]);
     app.set_secret();

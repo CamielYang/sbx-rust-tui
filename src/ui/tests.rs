@@ -213,15 +213,17 @@ fn set_custom_secret_dialog_shows_env_secret_and_hosts() {
     let screen = render(&app);
     assert!(screen.contains("Set custom secret"));
     assert!(screen.contains("Env key"));
+    assert!(screen.contains("Scope"));
+    assert!(screen.contains("(global)"));
     assert!(screen.contains("Secret value"));
     assert!(screen.contains("Hosts"));
     assert!(screen.contains("Host 1"));
     assert!(screen.contains("api.example.com"));
+    assert!(screen.contains("*.example.com"));
     assert!(screen.contains("+ Add host"));
     assert!(screen.contains("Cancel"));
-    // There is no service dropdown or scope picker in this dialog.
+    // The service dropdown is the only Set secret field left out.
     assert!(!screen.contains("Choose a service"));
-    assert!(!screen.contains("(global)"));
 }
 
 #[test]

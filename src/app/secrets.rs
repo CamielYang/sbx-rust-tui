@@ -197,14 +197,14 @@ impl App {
         }
     }
 
-    /// Open the Set custom secret dialog with one empty host row. Unlike the
-    /// service form, this has no lookup or scope: it writes one env key to a
-    /// list of hosts with `sbx secret set-custom`.
+    /// Open the Set custom secret dialog with one empty host row. Its scope
+    /// options are the same snapshot as Set secret: `(global)`, then every
+    /// sandbox, with a sandbox scope becoming `--sandbox` on the CLI.
     pub fn set_custom_secret(&mut self) {
         if self.mode() != Mode::Normal {
             return;
         }
-        self.custom_secret_form = Some(CustomSecretForm::new());
+        self.custom_secret_form = Some(CustomSecretForm::new(&self.sandboxes));
         let _ = self.modals.open(SET_CUSTOM_SECRET_DIALOG, &mut self.focus);
     }
 
@@ -223,6 +223,24 @@ impl App {
     pub fn set_custom_secret_value(&mut self, state: ratcn::InputState) {
         if let Some(form) = self.custom_secret_form.as_mut() {
             form.set_secret(state);
+        }
+    }
+
+    pub fn set_custom_scope_open(&mut self, open: bool) {
+        if let Some(form) = self.custom_secret_form.as_mut() {
+            form.set_scope_open(open);
+        }
+    }
+
+    pub fn set_custom_scope_focus(&mut self, index: usize) {
+        if let Some(form) = self.custom_secret_form.as_mut() {
+            form.set_scope_focus(index);
+        }
+    }
+
+    pub fn set_custom_scope(&mut self, index: usize) {
+        if let Some(form) = self.custom_secret_form.as_mut() {
+            form.set_scope_index(index);
         }
     }
 
@@ -249,6 +267,7 @@ impl App {
         };
         form.mark_attempted();
         let env_key = form.env_key().value().trim().to_owned();
+        let scope = form.scope().map(str::to_owned);
         let secret = form.secret().value().trim().to_owned();
         let hosts: Vec<String> = form
             .hosts()
@@ -256,6 +275,10 @@ impl App {
             .map(|host| host.value().trim().to_owned())
             .collect();
 
+        if scope.is_none() {
+            self.notify_error("Invalid custom secret", "Choose a scope.");
+            return;
+        }
         if env_key.is_empty() {
             self.notify_error("Invalid custom secret", "Enter an env key.");
             return;
@@ -269,7 +292,8 @@ impl App {
             return;
         }
 
-        let pending = Self::set_custom_secret_command(&env_key, &hosts, &secret);
+        let scope = scope.as_deref().unwrap_or(GLOBAL_SCOPE);
+        let pending = Self::set_custom_secret_command(&env_key, scope, &hosts, &secret);
         let success = format!("Set custom secret '{env_key}'.");
 
         #[cfg(test)]
@@ -460,11 +484,20 @@ impl App {
         PendingCommand::shell(command)
     }
 
-    /// `sbx secret set-custom --host <host>... --env <key> --value <secret>`.
-    /// Arguments are passed directly, so values with spaces or shell metachars
-    /// stay a single argument instead of being reinterpreted by a shell.
-    fn set_custom_secret_command(env_key: &str, hosts: &[String], secret: &str) -> PendingCommand {
+    /// `sbx secret set-custom [--sandbox <scope>] --host <host>... --env <key> --value <secret>`.
+    /// The `(global)` scope omits `--sandbox`, as in Set secret. Arguments are
+    /// passed directly, so values with spaces or shell metachars stay a single
+    /// argument instead of being reinterpreted by a shell.
+    fn set_custom_secret_command(
+        env_key: &str,
+        scope: &str,
+        hosts: &[String],
+        secret: &str,
+    ) -> PendingCommand {
         let mut args = vec!["secret".to_owned(), "set-custom".to_owned()];
+        if !is_global_scope(scope) {
+            args.extend(["--sandbox".to_owned(), scope.to_owned()]);
+        }
         for host in hosts {
             args.push("--host".to_owned());
             args.push(host.clone());
