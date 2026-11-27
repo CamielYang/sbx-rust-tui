@@ -1,6 +1,7 @@
 # sbx-rust-tui
 
 ![sbx Rust TUI demo](docs/demo.gif)
+![sbx Rust TUI demo 2](docs/demo2.gif)
 
 A simple terminal UI (TUI) for easily managing Docker Sandboxes and publishing ports, without leaving your terminal.
 
