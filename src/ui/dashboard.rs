@@ -120,7 +120,7 @@ pub(super) fn paint_content_frame(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::White))
         .style(Style::default().bg(theme.surface))
-        .padding(Padding::new(1, 1, 1, 1));
+        .padding(Padding::new(3, 3, 1, 1));
     let inner = frame.inner(area);
     ctx.paint_widget(frame, area);
     inner

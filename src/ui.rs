@@ -5,7 +5,7 @@
 //! modal layering; [`App`](crate::app::App) owns the state and [`apply`] is the
 //! single place where component messages become state changes.
 
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::widgets::Block;
 use ratcn::runtime::{ChildId, DeclareCtx, FocusState};
@@ -108,6 +108,12 @@ pub enum Msg {
     CancelAction,
     CloseInfo,
 }
+
+/// One-cell inset around the dashboard. The footer is deliberately excluded
+/// so its shortcut legend stays flush with the bottom edge.
+const LAYOUT_PADDING_Y: u16 = 1;
+const LAYOUT_PADDING_X: u16 = 2;
+const FOOTER_HEIGHT: u16 = 1;
 
 const ACTION_START: &str = "action-start";
 const ACTION_STOP: &str = "action-stop";
@@ -233,15 +239,32 @@ pub fn declare(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme) {
         )
     });
 
+    // Everything above the footer lives inside a one-cell frame. The footer
+    // keeps the full width and sits on the bottom row, outside that frame.
+    let padded = Rect {
+        x: area.x.saturating_add(LAYOUT_PADDING_X),
+        y: area.y.saturating_add(LAYOUT_PADDING_Y),
+        width: area.width.saturating_sub(LAYOUT_PADDING_X * 2),
+        height: area
+            .height
+            .saturating_sub(LAYOUT_PADDING_Y * 2 + FOOTER_HEIGHT),
+    };
+    let footer = Rect {
+        x: area.x,
+        y: area
+            .y
+            .saturating_add(area.height.saturating_sub(FOOTER_HEIGHT)),
+        width: area.width,
+        height: FOOTER_HEIGHT.min(area.height),
+    };
+
     let vertical = Layout::vertical([
         Constraint::Length(1), // title + quit
         Constraint::Length(1), // spacing
         Constraint::Length(1), // tabs
         Constraint::Min(0),    // white-bordered content wrapper
-        Constraint::Length(1), // spacing
-        Constraint::Length(1), // footer
     ])
-    .split(area);
+    .split(padded);
 
     paint_header(ctx, app, &theme, vertical[0]);
     let content = paint_content_frame(ctx, &theme, vertical[3]);
@@ -264,7 +287,7 @@ pub fn declare(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme) {
     // Declared after the sandbox controls so startup focus still lands on
     // "+ New sandbox"; the visual row stays just below the title spacing.
     paint_tabs(ctx, app, vertical[2]);
-    paint_footer(ctx, &theme, vertical[5]);
+    paint_footer(ctx, &theme, footer);
     paint_quit(ctx, app, vertical[0]);
 
     // Modals are declared last so their layers cover the dashboard. Ids come

@@ -9,7 +9,7 @@ use ratcn::runtime::Ratcn;
 
 fn draw(app: &App) -> Buffer {
     let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
-    let theme = Theme::tokyo_night();
+    let theme = Theme::default();
     let mut ratcn = Ratcn::new()
         .focus(|state: &App| state.focus_ref(), Msg::FocusChanged)
         .modals(|state: &App| state.modals_ref());
@@ -51,29 +51,51 @@ fn renders_tabs_with_quit_on_the_title_row() {
     let screen = render(&app);
     let rows: Vec<&str> = screen.lines().collect();
 
-    let title_row = rows[0];
+    let title_row = rows[1];
     let quit = title_row.find("Quit").expect("quit button on title row");
     assert!(quit > title_row.find("DOCKER SANDBOXES RUST").unwrap());
-    assert!(rows[1].trim().is_empty(), "spacing below the title row");
-    assert!(rows[2].contains("Sandboxes"));
-    assert!(rows[2].contains("Secrets"));
+    assert!(rows[2].trim().is_empty(), "spacing below the title row");
+    assert!(rows[3].contains("Sandboxes"));
+    assert!(rows[3].contains("Secrets"));
     assert!(
-        rows[3].starts_with('┌') && rows[3].ends_with('┐'),
+        rows[4].trim().starts_with('┌') && rows[4].trim().ends_with('┐'),
         "content wrapper border sits directly below the tabs"
     );
-    assert!(rows[7].contains(" Sandboxes "));
-    assert!(rows[8].contains("alpha"));
+    assert!(rows[8].contains(" Sandboxes "));
+    assert!(rows[9].contains("alpha"));
 
     let buffer = draw(&app);
     assert_eq!(
-        buffer.cell((0, 3)).unwrap().fg,
+        buffer.cell((1, 4)).unwrap().fg,
         Color::White,
         "white content wrapper outline"
     );
     assert_eq!(
-        buffer.cell((10, 5)).unwrap().symbol(),
+        buffer.cell((3, 6)).unwrap().symbol(),
         " ",
         "padding inside the wrapper"
+    );
+}
+
+#[test]
+fn layout_is_padded_except_for_the_footer() {
+    let app = App::with_sandbox_statuses(&[("alpha", "running")]);
+    let screen = render(&app);
+    let rows: Vec<&str> = screen.lines().collect();
+
+    assert!(rows[0].trim().is_empty(), "blank row above the title");
+    assert!(
+        rows[..rows.len() - 1]
+            .iter()
+            .all(|row| row.starts_with(' ') && row.ends_with(' ')),
+        "dashboard rows are inset by one column on each side"
+    );
+
+    let footer = rows.last().expect("footer row");
+    assert_eq!(
+        footer.find("N new"),
+        Some(1),
+        "footer keeps its own single leading space, with no outer inset"
     );
 }
 
@@ -84,9 +106,9 @@ fn secrets_tab_shows_toolbar_and_secret_table() {
 
     let screen = render(&app);
     let rows: Vec<&str> = screen.lines().collect();
-    assert!(rows[2].contains("Sandboxes"));
-    assert!(rows[2].contains("Secrets"));
-    assert_eq!(draw(&app).cell((0, 4)).unwrap().fg, Color::White);
+    assert!(rows[3].contains("Sandboxes"));
+    assert!(rows[3].contains("Secrets"));
+    assert_eq!(draw(&app).cell((1, 5)).unwrap().fg, Color::White);
     assert!(screen.contains(" Secrets "));
     assert!(screen.contains("+ Set secret"));
     assert!(screen.contains("+ Set custom secret"));
@@ -462,7 +484,7 @@ fn label_style(buffer: &Buffer, label: &str) -> ratatui::style::Style {
 
 #[test]
 fn dialog_cancel_buttons_share_one_visible_fill() {
-    let theme = Theme::tokyo_night();
+    let theme = Theme::default();
     let style = cancel_style(&theme);
     let fills = [
         style.background,
@@ -556,7 +578,7 @@ fn stopped_actions_show_only_stopped_commands() {
 
 #[test]
 fn action_styles_keep_their_hue_and_change_on_focus_and_hover() {
-    let theme = Theme::tokyo_night();
+    let theme = Theme::default();
     for fill in [START_GREEN, STOP_ORANGE, EXEC_GRAY, REMOVE_RED, INFO_BLUE] {
         let style = action_style(fill)(&theme);
         assert_eq!(style.background, fill);
