@@ -1,6 +1,8 @@
 use super::*;
 use crate::app::test_support::TempWorkspaceDir;
-use crate::app::{INFO_DIALOG, Mode, SET_CUSTOM_SECRET_DIALOG, SET_SECRET_DIALOG, WorkspaceMode};
+use crate::app::{
+    INFO_DIALOG, Mode, SET_CUSTOM_SECRET_DIALOG, SET_SECRET_DIALOG, Secret, WorkspaceMode,
+};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{Terminal, backend::TestBackend};
 use ratcn::runtime::{EventResult, Ratcn};
@@ -353,6 +355,52 @@ fn secret_row_delete_and_toolbar_refresh_are_clickable() {
         emitted
             .iter()
             .any(|message| matches!(message, Msg::RefreshSecrets))
+    );
+}
+
+#[test]
+fn custom_secret_row_delete_uses_the_env_key_and_placeholder() {
+    let mut app = App::with_secrets(&[]);
+    app.set_secrets_for_test(vec![
+        Secret::custom("test", "API_KEY", ["api.example.com".to_owned()])
+            .with_placeholder("sbx-cs-123"),
+    ]);
+    app.select_tab(DashboardTab::Secrets);
+    let mut ratcn = new_runtime();
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    draw(&mut terminal, &app, &mut ratcn);
+
+    let (x, y) = screen(&terminal)
+        .lines()
+        .enumerate()
+        .find_map(|(y, line)| {
+            line.rfind("Delete")
+                .map(|byte| (line[..byte].chars().count() as u16, y as u16))
+        })
+        .expect("custom row delete button");
+    let emitted = click(&mut terminal, &mut app, &mut ratcn, x + 2, y);
+    assert!(emitted.iter().any(|message| matches!(
+        message,
+        Msg::DeleteCustomSecret(env_key, scope, placeholder)
+            if env_key == "API_KEY" && scope == "test" && placeholder == "sbx-cs-123"
+    )));
+    assert_eq!(
+        app.pending_action(),
+        Some(&PendingAction::DeleteCustomSecret(
+            "API_KEY".to_owned(),
+            "test".to_owned(),
+            "sbx-cs-123".to_owned()
+        ))
+    );
+    assert!(screen(&terminal).contains("Delete secret 'API_KEY' from sandbox 'test'?"));
+
+    draw(&mut terminal, &app, &mut ratcn);
+    let (cx, cy) = position_from_bottom(&screen(&terminal), "Delete secret")
+        .expect("confirmation button on screen");
+    click(&mut terminal, &mut app, &mut ratcn, cx + 2, cy);
+    assert_eq!(
+        app.take_deleted_for_test().as_deref(),
+        Some("sbx secret rm --placeholder sbx-cs-123 --sandbox test -f")
     );
 }
 

@@ -16,6 +16,9 @@ pub enum PendingAction {
     Remove(String),
     /// Secret name followed by its scope (the sandbox name, or "(global)").
     DeleteSecret(String, String),
+    /// Env key, scope, and placeholder of a custom secret row. The env key
+    /// replaces `(custom)` in the prompt; the placeholder drives `sbx rm`.
+    DeleteCustomSecret(String, String, String),
     /// Service and scope of a secret that already exists. The new value stays
     /// in the secret form until the overwrite is confirmed.
     OverwriteSecret(String, String),
@@ -31,7 +34,7 @@ impl PendingAction {
             Self::Start(_) => "Start",
             Self::Stop(_) => "Stop",
             Self::Remove(_) => "Remove",
-            Self::DeleteSecret(..) => "Delete secret",
+            Self::DeleteSecret(..) | Self::DeleteCustomSecret(..) => "Delete secret",
             Self::OverwriteSecret(..) | Self::OverwriteCustomSecret(..) => "Overwrite secret",
         }
     }
@@ -95,7 +98,10 @@ impl App {
         };
         self.close_modal(CONFIRM_DIALOG);
         let should_be_running = matches!(&action, PendingAction::Stop(_));
-        let secret_action = matches!(&action, PendingAction::DeleteSecret(..));
+        let secret_action = matches!(
+            &action,
+            PendingAction::DeleteSecret(..) | PendingAction::DeleteCustomSecret(..)
+        );
         let overwrite_action = matches!(
             &action,
             PendingAction::OverwriteSecret(..) | PendingAction::OverwriteCustomSecret(..)
@@ -106,6 +112,9 @@ impl App {
             }
             PendingAction::Remove(name) => self.has_sandbox(name),
             PendingAction::DeleteSecret(name, scope) => self.has_secret(name, scope),
+            PendingAction::DeleteCustomSecret(env_key, scope, _) => {
+                self.has_custom_secret(env_key, scope)
+            }
             PendingAction::OverwriteSecret(service, scope) => {
                 self.secret_form.as_ref().is_some_and(|form| {
                     form.service() == Some(service.as_str())
@@ -136,6 +145,9 @@ impl App {
             if let PendingAction::DeleteSecret(name, scope) = &action {
                 self.delete_secret_now(name, scope);
             }
+            if let PendingAction::DeleteCustomSecret(env_key, scope, placeholder) = &action {
+                self.delete_custom_secret_now(env_key, scope, placeholder);
+            }
             if let PendingAction::OverwriteSecret(service, scope) = &action {
                 self.finish_set_secret(service, scope);
             }
@@ -152,6 +164,9 @@ impl App {
             PendingAction::Stop(name) => self.stop_sandbox(&name),
             PendingAction::Remove(name) => self.remove_sandbox(&name),
             PendingAction::DeleteSecret(name, scope) => self.delete_secret_now(&name, &scope),
+            PendingAction::DeleteCustomSecret(env_key, scope, placeholder) => {
+                self.delete_custom_secret_now(&env_key, &scope, &placeholder)
+            }
             PendingAction::OverwriteSecret(service, scope) => {
                 self.finish_set_secret(&service, &scope)
             }

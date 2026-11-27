@@ -216,13 +216,21 @@ pub(super) fn paint_secrets_body(
             row,
         );
 
-        let name = secret.name.clone();
-        let scope = secret.scope.clone();
+        // Custom rows carry the CLI placeholder, not a service name, so their
+        // Delete button goes through the same removal path as an overwrite.
+        let delete = match secret.env_key() {
+            Some(env_key) => Msg::DeleteCustomSecret(
+                env_key.to_owned(),
+                secret.scope.clone(),
+                secret.placeholder.clone().unwrap_or_default(),
+            ),
+            None => Msg::DeleteSecret(secret.name.clone(), secret.scope.clone()),
+        };
         ctx.component(
             format!("secrets-delete-{index}"),
             Button::new("Delete")
                 .ghost()
-                .on_press(move || Msg::DeleteSecret(name.clone(), scope.clone())),
+                .on_press(move || delete.clone()),
             Rect::new(columns[3].x, row.y, delete_width.min(columns[3].width), 1),
         );
     }

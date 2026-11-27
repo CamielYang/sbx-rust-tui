@@ -249,6 +249,16 @@ fn text_input(
 
 // --- confirmation dialog ----------------------------------------------------
 
+/// Both service secrets and custom rows use the same wording; custom rows pass
+/// their env key instead of the `(custom)` table label.
+fn delete_secret_description(name: &str, scope: &str) -> String {
+    if is_global_scope(scope) {
+        format!("Delete global secret '{name}'?")
+    } else {
+        format!("Delete secret '{name}' from sandbox '{scope}'?")
+    }
+}
+
 /// The last gate before Start/Stop/Remove, a secret deletion, or a secret
 /// overwrite reaches `sbx`. The action's hue is kept on the confirm button so
 /// the dialog reads like the action it replaces.
@@ -282,11 +292,13 @@ pub(super) fn confirm_dialog(app: &App) -> Dialog<App, Msg> {
         ),
         PendingAction::DeleteSecret(name, scope) => (
             "Confirm delete",
-            if is_global_scope(scope) {
-                format!("Delete global secret '{name}'?")
-            } else {
-                format!("Delete secret '{name}' from sandbox '{scope}'?")
-            },
+            delete_secret_description(name, scope),
+            "Delete secret",
+            REMOVE_RED,
+        ),
+        PendingAction::DeleteCustomSecret(env_key, scope, _) => (
+            "Confirm delete",
+            delete_secret_description(env_key, scope),
             "Delete secret",
             REMOVE_RED,
         ),

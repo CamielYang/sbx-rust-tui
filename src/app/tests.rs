@@ -1411,6 +1411,63 @@ fn deleting_a_scoped_secret_targets_its_sandbox() {
 }
 
 #[test]
+fn deleting_a_custom_secret_removes_it_by_placeholder_and_scope() {
+    let mut app = App::with_secrets(&[]);
+    app.set_secrets_for_test(vec![
+        Secret::custom("test", "API_KEY", Vec::<String>::new()).with_placeholder("sbx-cs-123"),
+    ]);
+    app.delete_custom_secret("API_KEY", "test", "sbx-cs-123");
+    assert_eq!(
+        app.pending_action(),
+        Some(&PendingAction::DeleteCustomSecret(
+            "API_KEY".to_owned(),
+            "test".to_owned(),
+            "sbx-cs-123".to_owned()
+        ))
+    );
+    assert!(app.modals_ref().is_open(CONFIRM_DIALOG));
+    assert!(app.take_deleted_for_test().is_none());
+
+    app.confirm_action();
+    assert_eq!(
+        app.take_deleted_for_test().as_deref(),
+        Some("sbx secret rm --placeholder sbx-cs-123 --sandbox test -f")
+    );
+}
+
+#[test]
+fn deleting_a_global_custom_secret_omits_the_sandbox_flag() {
+    let mut app = App::with_secrets(&[]);
+    app.set_secrets_for_test(vec![
+        Secret::custom("(global)", "TOKEN", Vec::<String>::new()).with_placeholder("sbx-cs-global"),
+    ]);
+    app.delete_custom_secret("TOKEN", "(global)", "sbx-cs-global");
+    app.confirm_action();
+
+    assert_eq!(
+        app.take_deleted_for_test().as_deref(),
+        Some("sbx secret rm --placeholder sbx-cs-global -f")
+    );
+}
+
+#[test]
+fn custom_secret_delete_is_skipped_when_the_row_is_gone() {
+    let mut app = App::with_secrets(&[]);
+    app.set_secrets_for_test(vec![
+        Secret::custom("test", "API_KEY", Vec::<String>::new()).with_placeholder("sbx-cs-123"),
+    ]);
+    app.delete_custom_secret("API_KEY", "test", "sbx-cs-123");
+    app.set_secrets_for_test(Vec::new());
+    app.confirm_action();
+
+    assert!(app.take_deleted_for_test().is_none());
+    assert_eq!(
+        app.message(),
+        "Secret is no longer listed; action cancelled."
+    );
+}
+
+#[test]
 fn cancelling_a_secret_delete_runs_nothing() {
     let mut app = App::with_secrets(&[("(global)", "github")]);
     app.delete_secret("github", "(global)");

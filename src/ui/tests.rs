@@ -2,7 +2,7 @@ use super::*;
 use crate::app::test_support::TempWorkspaceDir;
 use crate::app::{
     CONFIRM_DIALOG, HostMount, INFO_DIALOG, Mode, MountMode, PORTS_DIALOG, PortMapping, SERVICES,
-    SET_CUSTOM_SECRET_DIALOG, SET_SECRET_DIALOG, SandboxDetails,
+    SET_CUSTOM_SECRET_DIALOG, SET_SECRET_DIALOG, SandboxDetails, Secret,
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 use ratcn::runtime::Ratcn;
@@ -139,10 +139,16 @@ fn secrets_tab_shows_an_env_var_column() {
 
 #[test]
 fn secrets_tab_shows_an_env_var_for_custom_secrets() {
-    let mut app = App::with_secrets(&[("custom", "MY_TOKEN")]);
+    let mut app = App::with_secrets(&[]);
+    app.set_secrets_for_test(vec![Secret::custom(
+        "test",
+        "MY_TOKEN",
+        ["api.example.com".to_owned()],
+    )]);
     app.select_tab(DashboardTab::Secrets);
 
     let screen = render(&app);
+    assert!(screen.contains("(custom)"));
     assert!(screen.contains("MY_TOKEN"));
 }
 
@@ -182,6 +188,35 @@ fn secret_info_dialog_shows_scope_name_env_var_and_api_domains() {
         "api.githubcopilot.com",
     ] {
         assert!(screen.contains(domain), "missing {domain}");
+    }
+}
+
+#[test]
+fn secret_info_dialog_shows_custom_secret_targets_as_api_domains() {
+    let mut app = App::with_secrets(&[]);
+    let custom = Secret::custom(
+        "(global)",
+        "API_KEY",
+        [
+            "api.example.com".to_owned(),
+            "uploads.example.com".to_owned(),
+        ],
+    );
+    app.show_secret_info_for_test(custom);
+
+    assert!(app.modals_ref().is_open(INFO_DIALOG));
+    let screen = render(&app);
+    for expected in [
+        "Secret · (custom)",
+        "NAME",
+        "(custom)",
+        "ENV VAR",
+        "API_KEY",
+        "API DOMAINS",
+        "api.example.com",
+        "uploads.example.com",
+    ] {
+        assert!(screen.contains(expected), "missing {expected}");
     }
 }
 
@@ -333,6 +368,22 @@ fn secret_delete_confirmation_names_the_scope() {
     named_global.select_tab(DashboardTab::Secrets);
     named_global.delete_secret("github", "global");
     assert!(render(&named_global).contains("Delete secret 'github' from sandbox 'global'?"));
+}
+
+#[test]
+fn custom_secret_delete_confirmation_names_the_env_key() {
+    let mut app = App::with_secrets(&[]);
+    app.delete_custom_secret("API_KEY", "test", "sbx-cs-123");
+    assert!(app.modals_ref().is_open(CONFIRM_DIALOG));
+    let screen = render(&app);
+    assert!(screen.contains("Confirm delete"));
+    assert!(screen.contains("Delete secret 'API_KEY' from sandbox 'test'?"));
+    assert!(screen.contains("Delete secret"));
+    assert!(!screen.contains("(custom)"));
+
+    let mut global = App::with_secrets(&[]);
+    global.delete_custom_secret("TOKEN", "(global)", "sbx-cs-global");
+    assert!(render(&global).contains("Delete global secret 'TOKEN'?"));
 }
 
 #[test]

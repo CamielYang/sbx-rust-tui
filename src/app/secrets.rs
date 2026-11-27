@@ -9,6 +9,9 @@ use super::{
     SET_SECRET_DIALOG, service_info,
 };
 
+/// The name shown for custom secrets, which have no service name in the CLI.
+const CUSTOM_SECRET_NAME: &str = "(custom)";
+
 /// One row of a scoped `sbx secret ls --json`, reduced to the fields the
 /// dashboard table shows. Service metadata is resolved from the name so a row
 /// carries everything its info dialog needs.
@@ -18,6 +21,9 @@ pub struct Secret {
     pub name: String,
     pub env_vars: Vec<String>,
     pub api_domains: Vec<String>,
+    /// Custom secrets have no service name and can only be removed by the
+    /// placeholder printed in the CLI listing. Service secrets have none.
+    pub placeholder: Option<String>,
 }
 
 impl Secret {
@@ -26,9 +32,9 @@ impl Secret {
         let info = service_info(&name);
         Self {
             scope: scope.into(),
-            // Custom secrets are keyed by their env name; there is no service
-            // entry to look up, so the name itself is the variable they use.
             name: name.clone(),
+            // An unknown service is treated as a custom key: the name itself is
+            // the variable it sets. Known services use their catalog metadata.
             env_vars: info.map_or_else(
                 || vec![name.clone()],
                 |info| info.env_vars.iter().map(|env| (*env).to_owned()).collect(),
@@ -39,6 +45,44 @@ impl Secret {
                     .map(|domain| (*domain).to_owned())
                     .collect()
             }),
+            placeholder: None,
+        }
+    }
+
+    /// A row from `custom_secrets`. The CLI has no service name for it, so the
+    /// table shows `(custom)` while the env key and target hosts come from the
+    /// row itself.
+    pub fn custom(
+        scope: impl Into<String>,
+        env: impl Into<String>,
+        targets: impl Into<Vec<String>>,
+    ) -> Self {
+        Self {
+            scope: scope.into(),
+            name: CUSTOM_SECRET_NAME.to_owned(),
+            env_vars: vec![env.into()],
+            api_domains: targets.into(),
+            placeholder: None,
+        }
+    }
+
+    /// Keep the placeholder the CLI needs for `sbx secret rm --placeholder`.
+    pub fn with_placeholder(mut self, placeholder: impl Into<String>) -> Self {
+        self.placeholder = Some(placeholder.into());
+        self
+    }
+
+    /// A custom row has no service name; its env key stands in for one.
+    pub fn is_custom(&self) -> bool {
+        self.name == CUSTOM_SECRET_NAME
+    }
+
+    /// The env key of a custom row, used in place of `(custom)` in prompts.
+    pub fn env_key(&self) -> Option<&str> {
+        if self.is_custom() {
+            self.env_vars.first().map(String::as_str)
+        } else {
+            None
         }
     }
 
@@ -100,22 +144,49 @@ fn parse_secrets(bytes: &[u8], scope: &str) -> Result<Vec<Secret>, String> {
     let value: Value = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
     let mut secrets = Vec::new();
 
-    for field in ["secrets", "custom_secrets"] {
-        let Some(rows) = value.get(field).and_then(Value::as_array) else {
-            continue;
-        };
-        for row in rows {
-            let Some(name) = json_text(row, &["name", "service", "env_name"]) else {
-                continue;
-            };
+    let Some(rows) = value.get("secrets").and_then(Value::as_array) else {
+        return Err("sbx secret ls did not include a secret list".to_owned());
+    };
+    for row in rows {
+        if let Some(name) = json_text(row, &["name", "service"]) {
             secrets.push(Secret::new(scope, name));
         }
     }
 
-    if value.get("secrets").and_then(Value::as_array).is_none() {
-        return Err("sbx secret ls did not include a secret list".to_owned());
+    if let Some(rows) = value.get("custom_secrets").and_then(Value::as_array) {
+        for row in rows {
+            // Current listings use `env`; older ones keyed the row by `env_name`.
+            let Some(env) = json_text(row, &["env", "env_name"]) else {
+                continue;
+            };
+            let mut targets = json_strings(row.get("targets"));
+            if targets.is_empty()
+                && let Some(host) = json_text(row, &["host"])
+            {
+                targets.push(host);
+            }
+            let mut secret = Secret::custom(scope, env, targets);
+            if let Some(placeholder) = json_text(row, &["placeholder"]) {
+                secret = secret.with_placeholder(placeholder);
+            }
+            secrets.push(secret);
+        }
     }
+
     Ok(secrets)
+}
+
+/// Read an array of strings, e.g. a custom secret's `targets` hosts.
+fn json_strings(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Whether a scoped `sbx secret ls --format json` reports a stored secret.
@@ -165,6 +236,13 @@ impl App {
         self.secrets
             .iter()
             .any(|secret| secret.name == name && secret.scope == scope)
+    }
+
+    /// Custom rows are keyed by env name, not by their `(custom)` display name.
+    pub(super) fn has_custom_secret(&self, env_key: &str, scope: &str) -> bool {
+        self.secrets.iter().any(|secret| {
+            secret.is_custom() && secret.env_key() == Some(env_key) && secret.scope == scope
+        })
     }
 
     /// Open the Set secret dialog. Scope options are snapshot from the current
@@ -430,8 +508,9 @@ impl App {
     }
 
     /// `sbx secret rm --placeholder <placeholder> [--sandbox <scope>] -f`.
-    /// The placeholder comes from the pre-set lookup; `-f` skips the CLI prompt,
-    /// which cannot be answered from a worker while the TUI owns the terminal.
+    /// The placeholder comes from the pre-set lookup or the table listing; `-f`
+    /// skips the CLI prompt, which cannot be answered from a worker while the
+    /// TUI owns the terminal.
     pub(super) fn remove_custom_secret_command(placeholder: &str, scope: &str) -> PendingCommand {
         let mut args = vec!["secret".to_owned(), "rm".to_owned()];
         args.extend(["--placeholder".to_owned(), placeholder.to_owned()]);
@@ -462,6 +541,47 @@ impl App {
                 scope,
                 result: pending.run(),
             });
+    }
+
+    /// A custom row's Delete button asks for confirmation with its env key and
+    /// placeholder, since `(custom)` is only a table label.
+    pub fn delete_custom_secret(&mut self, env_key: &str, scope: &str, placeholder: &str) {
+        self.request_action(PendingAction::DeleteCustomSecret(
+            env_key.to_owned(),
+            scope.to_owned(),
+            placeholder.to_owned(),
+        ));
+    }
+
+    /// Remove a confirmed custom row with the same placeholder command the
+    /// overwrite flow uses. `SecretDelete` then refreshes the table and names
+    /// the env key in the result toast.
+    #[cfg_attr(test, allow(dead_code))]
+    pub(super) fn delete_custom_secret_now(
+        &mut self,
+        env_key: &str,
+        scope: &str,
+        placeholder: &str,
+    ) {
+        let pending = Self::remove_custom_secret_command(placeholder, scope);
+
+        #[cfg(test)]
+        {
+            // The test hook records the command; the env key only names the toast.
+            let _ = env_key;
+            self.deleted_for_test = Some(pending.preview());
+        }
+
+        #[cfg(not(test))]
+        {
+            let deleted = env_key.to_owned();
+            self.notify_info(format!("Deleting custom secret '{env_key}'..."), None);
+            self.jobs
+                .spawn(move || super::workers::JobResult::SecretDelete {
+                    name: deleted,
+                    result: pending.run(),
+                });
+        }
     }
 
     /// The dialog's **Set secret** button. Look for an existing secret first:
@@ -762,23 +882,75 @@ mod tests {
             vec![
                 Secret::new("test", "github"),
                 Secret::new("test", "nebius"),
-                Secret::new("test", "MY_TOKEN"),
+                Secret::custom("test", "MY_TOKEN", Vec::<String>::new()),
             ]
         );
     }
 
     #[test]
-    fn includes_custom_secrets_and_ignores_rows_without_a_name() {
+    fn includes_custom_secrets_and_ignores_rows_without_an_env_key() {
         let json = br#"{
           "secrets": [{ "scope": "global", "name": "openai" }, {}],
-          "custom_secrets": [{ "env_name": "MY_TOKEN", "host": "example.com" }]
+          "custom_secrets": [
+            { "env_name": "MY_TOKEN", "host": "example.com" },
+            {}
+          ]
         }"#;
 
         assert_eq!(
             parse_secrets(json, GLOBAL_SCOPE).unwrap(),
             vec![
                 Secret::new(GLOBAL_SCOPE, "openai"),
-                Secret::new(GLOBAL_SCOPE, "MY_TOKEN"),
+                Secret::custom(GLOBAL_SCOPE, "MY_TOKEN", ["example.com".to_owned()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn custom_secrets_use_the_placeholder_name_and_target_hosts() {
+        let json = br#"{
+          "secrets": [
+            { "scope": "global", "type": "service", "name": "github", "secret": "(stored)" }
+          ],
+          "custom_secrets": [
+            {
+              "scope": "global",
+              "targets": ["api.example.com", "uploads.example.com"],
+              "env": "API_KEY",
+              "placeholder": "sbx-cs-LjhIY8B1ZcJbmPCP",
+              "secret": ""
+            },
+            {
+              "scope": "test",
+              "targets": ["api.example.com", "*.example.com"],
+              "env": "TEST_KEY",
+              "placeholder": "sbx-cs-LKW4RmtuW6zmpZ2V",
+              "secret": ""
+            }
+          ],
+          "shadowed_services": [],
+          "env_only_count": 0
+        }"#;
+
+        assert_eq!(
+            parse_secrets(json, GLOBAL_SCOPE).unwrap(),
+            vec![
+                Secret::new(GLOBAL_SCOPE, "github"),
+                Secret::custom(
+                    GLOBAL_SCOPE,
+                    "API_KEY",
+                    [
+                        "api.example.com".to_owned(),
+                        "uploads.example.com".to_owned()
+                    ],
+                )
+                .with_placeholder("sbx-cs-LjhIY8B1ZcJbmPCP"),
+                Secret::custom(
+                    GLOBAL_SCOPE,
+                    "TEST_KEY",
+                    ["api.example.com".to_owned(), "*.example.com".to_owned()],
+                )
+                .with_placeholder("sbx-cs-LKW4RmtuW6zmpZ2V"),
             ]
         );
     }
@@ -821,10 +993,21 @@ mod tests {
     }
 
     #[test]
-    fn a_custom_secret_uses_its_name_as_the_env_var() {
-        let custom = Secret::new("custom", "MY_TOKEN");
+    fn a_custom_secret_uses_its_env_key_and_targets() {
+        let custom = Secret::custom(
+            "test",
+            "MY_TOKEN",
+            ["api.example.com".to_owned(), "*.example.com".to_owned()],
+        );
+        assert_eq!(custom.name, "(custom)");
+        assert_eq!(custom.env_key(), Some("MY_TOKEN"));
         assert_eq!(custom.env_vars, ["MY_TOKEN"]);
-        assert!(custom.api_domains.is_empty());
+        assert_eq!(custom.api_domains, ["api.example.com", "*.example.com"]);
+        assert!(custom.placeholder.is_none());
+
+        let listed = custom.with_placeholder("sbx-cs-123");
+        assert_eq!(listed.placeholder.as_deref(), Some("sbx-cs-123"));
+        assert!(Secret::new("test", "github").placeholder.is_none());
     }
 
     #[test]

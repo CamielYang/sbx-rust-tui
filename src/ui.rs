@@ -75,6 +75,8 @@ pub enum Msg {
     RefreshSecrets,
     /// Secret name followed by its scope (the sandbox name, or "(global)").
     DeleteSecret(String, String),
+    /// Custom secret env key, scope, and CLI placeholder, in that order.
+    DeleteCustomSecret(String, String, String),
     /// A clicked secret row: name followed by scope, as in `DeleteSecret`.
     OpenSecretInfo(String, String),
     Quit,
@@ -153,6 +155,9 @@ pub fn apply(app: &mut App, msg: Msg) {
         Msg::SubmitSecret => app.submit_secret(),
         Msg::RefreshSecrets => app.request_secret_refresh(),
         Msg::DeleteSecret(name, scope) => app.delete_secret(&name, &scope),
+        Msg::DeleteCustomSecret(env_key, scope, placeholder) => {
+            app.delete_custom_secret(&env_key, &scope, &placeholder)
+        }
         Msg::OpenSecretInfo(name, scope) => app.open_secret_info(&name, &scope),
         Msg::Quit => app.quit(),
         Msg::CancelWizard => app.cancel_wizard(),
