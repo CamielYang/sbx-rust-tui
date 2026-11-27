@@ -96,10 +96,12 @@ pub(super) fn policy_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
     Dialog::new()
         .title("Network policy")
         .outer_width(72)
-        .content(8, move |ctx| {
+        .content(10, move |ctx| {
             let rows = Layout::vertical([
                 Constraint::Length(1),
+                Constraint::Length(1),
                 Constraint::Min(6),
+                Constraint::Length(1),
                 Constraint::Length(1),
             ])
             .split(ctx.area());
@@ -110,15 +112,17 @@ pub(super) fn policy_dialog(app: &App, theme: &Theme) -> Dialog<App, Msg> {
                 ))),
                 rows[0],
             );
-            if rows[1].height > 0 && rows[1].width > 0 {
-                ctx.component("policy-options", policies, rows[1]);
+            // Blank rows[1] and rows[3] separate the prompt, the options, and
+            // the hint from each other.
+            if rows[2].height > 0 && rows[2].width > 0 {
+                ctx.component("policy-options", policies, rows[2]);
             }
             ctx.paint_widget(
                 Paragraph::new(Line::from(Span::styled(
                     status,
                     Style::default().fg(status_color),
                 ))),
-                rows[2],
+                rows[4],
             );
         })
 }

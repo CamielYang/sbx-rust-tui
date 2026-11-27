@@ -48,6 +48,26 @@ fn policy_dialog_lists_all_three_choices() {
     assert!(screen.contains("default deny, with common dev sites allowed"));
     assert!(screen.contains("Locked Down"));
     assert!(screen.contains("all traffic blocked unless you allow it"));
+
+    let lines: Vec<&str> = screen.lines().collect();
+    let prompt = lines
+        .iter()
+        .position(|line| line.contains("Choose the network policy for sandboxes"))
+        .unwrap();
+    let first_option = lines
+        .iter()
+        .position(|line| line.contains("○ Open"))
+        .unwrap();
+    let last_description = lines
+        .iter()
+        .position(|line| line.contains("all traffic blocked unless you allow it"))
+        .unwrap();
+    let hint = lines
+        .iter()
+        .position(|line| line.contains("↑↓ / click to choose"))
+        .unwrap();
+    assert_eq!(first_option, prompt + 2);
+    assert_eq!(hint, last_description + 2);
 }
 
 #[test]
