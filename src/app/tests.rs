@@ -514,6 +514,18 @@ fn confirmation_cancels_when_status_changed_or_sandbox_vanished() {
 }
 
 #[test]
+fn q_does_not_quit_from_the_sandboxes_tab() {
+    let mut app = App::with_sandbox_statuses(&[("alpha", "running")]);
+
+    app.handle_global_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+    assert!(!app.should_quit());
+
+    // Esc stays as the keyboard equivalent of the Quit button.
+    app.handle_global_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.should_quit());
+}
+
+#[test]
 fn global_shortcuts_are_inert_while_confirming() {
     let mut app = App::with_sandbox_statuses(&[("alpha", "stopped")]);
     app.remove_selected();

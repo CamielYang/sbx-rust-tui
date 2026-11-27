@@ -14,6 +14,9 @@ use ratcn::{
 use super::*;
 use crate::app::Secret;
 
+/// Blank columns between adjacent toolbar buttons, so their fills never touch.
+const TOOLBAR_GAP: u16 = 1;
+
 pub(super) fn paint_header(
     ctx: &mut DeclareCtx<'_, App, Msg>,
     app: &App,
@@ -84,19 +87,20 @@ pub(super) fn paint_toolbar(
 
     let columns = Layout::horizontal([
         Constraint::Length(new_button.width() + 2),
+        Constraint::Length(TOOLBAR_GAP),
         Constraint::Length(refresh_button.width() + 2),
         Constraint::Min(0),
     ])
     .split(area);
 
     ctx.component("toolbar-new", new_button, columns[0]);
-    ctx.component("toolbar-refresh", refresh_button, columns[1]);
+    ctx.component("toolbar-refresh", refresh_button, columns[2]);
 
     let hint = Span::styled(
         "  Tab moves focus · Enter activates",
         Style::default().fg(theme.muted_foreground),
     );
-    ctx.paint_widget(Paragraph::new(Line::from(hint)), columns[2]);
+    ctx.paint_widget(Paragraph::new(Line::from(hint)), columns[3]);
 }
 
 pub(super) fn paint_body(ctx: &mut DeclareCtx<'_, App, Msg>, app: &App, theme: &Theme, area: Rect) {
@@ -133,21 +137,23 @@ pub(super) fn paint_secrets_toolbar(ctx: &mut DeclareCtx<'_, App, Msg>, theme: &
 
     let columns = Layout::horizontal([
         Constraint::Length(set_button.width() + 2),
+        Constraint::Length(TOOLBAR_GAP),
         Constraint::Length(set_custom_button.width() + 2),
+        Constraint::Length(TOOLBAR_GAP),
         Constraint::Length(refresh_button.width() + 2),
         Constraint::Min(0),
     ])
     .split(area);
 
     ctx.component("secrets-set", set_button, columns[0]);
-    ctx.component("secrets-set-custom", set_custom_button, columns[1]);
-    ctx.component("secrets-refresh", refresh_button, columns[2]);
+    ctx.component("secrets-set-custom", set_custom_button, columns[2]);
+    ctx.component("secrets-refresh", refresh_button, columns[4]);
 
     let hint = Span::styled(
         "  Tab moves focus · Enter activates",
         Style::default().fg(theme.muted_foreground),
     );
-    ctx.paint_widget(Paragraph::new(Line::from(hint)), columns[3]);
+    ctx.paint_widget(Paragraph::new(Line::from(hint)), columns[5]);
 }
 
 /// A single pane holding the secret inventory: scope, name, and env var in

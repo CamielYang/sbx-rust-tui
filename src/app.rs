@@ -467,7 +467,7 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => self.quit(),
+            KeyCode::Esc => self.quit(),
             KeyCode::Char('r') | KeyCode::Char('R') => self.request_sandbox_refresh(),
             KeyCode::Char('n') | KeyCode::Char('N') => self.open_wizard(),
             KeyCode::Char('s') | KeyCode::Char('S') => self.toggle_selected(),
